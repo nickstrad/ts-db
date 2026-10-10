@@ -1,14 +1,31 @@
 {
   "nodeModulesDir": "auto",
   "compilerOptions": { "strict": true },
-  "tasks": {
-    "serve": "deno run -A platform/server.ts",
-    "demo": "deno run --allow-net --allow-env scripts/demo.ts",
-    "test": "deno test -A tests/core_test.ts",
-    "integration": "deno run -A tests/integration.ts",
-    "check": "deno check platform/server.ts platform/reader.ts scripts/demo.ts scripts/restore.ts tests/core_test.ts tests/types.ts tests/integration.ts",
-    "restore": "deno run -A scripts/restore.ts",
-    "explain": "deno run scripts/explain.ts"
+  "imports": {
+    "effect": "npm:effect@3.22.2",
+    "fast-check": "npm:fast-check@4.10.2",
+    "@duckdb/node-api": "npm:@duckdb/node-api@1.5.6-r.1",
+    "aws4fetch": "npm:aws4fetch@1.0.20"
   },
-  "fmt": { "lineWidth": 110 }
+  "tasks": {
+    "fmt:check": "deno fmt --check",
+    "lint": "deno lint",
+    "check": "deno check platform/server.ts platform/reader.ts scripts/demo.ts scripts/restore.ts tests/core_test.ts tests/types.ts tests/integration.ts",
+    "test": "deno test -A tests/unit/**/*.ts tests/core_test.ts",
+    "test:prop": "deno test -A tests/property/**/*.ts",
+    "ci": "deno task fmt:check && deno task lint && deno task check && deno task test && deno task test:prop",
+    "explain": "deno run scripts/explain.ts",
+    "integration": "deno run -A tests/integration.ts",
+    "serve": "deno run -A platform/server.ts",
+    "logs:ingest": "deno run -A scripts/logs.ts ingest",
+    "logs:query": "deno run -A scripts/logs.ts query",
+    "logs:sweep": "deno run -A scripts/logs.ts sweep",
+    "perf:smoke": "k6 run perf/smoke.js",
+    "perf:load": "k6 run perf/mutation_load.js",
+    "perf:query": "k6 run perf/query_load.js",
+    "perf:mixed": "k6 run perf/mixed.js",
+    "perf:ingest": "deno run -A perf/ingest_k6.ts"
+  },
+  "fmt": { "lineWidth": 110 },
+  "lint": { "rules": { "tags": ["recommended"] } }
 }
