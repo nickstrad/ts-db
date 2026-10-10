@@ -90,6 +90,13 @@ Owns-scope adherence:[ ] touched only its Owns set      [ ] strayed into: ___
 Review verdict:      [ ] PASS   [ ] NITS   [ ] FAIL   (reviewer-opus-high)
 Merged to main:       [ ] yes (human-approved)   [ ] no
 
+Sonnet-to-Haiku conversion verdict:
+[ ] Haiku output is indistinguishable from what Sonnet would have produced --
+    this item class can move to Haiku going forward.
+[ ] Haiku output is usable but needed meaningful correction -- Haiku viable for
+    this item class only with Opus review in the loop.
+[ ] Haiku output not acceptable for this item class -- keep on Sonnet/Opus.
+
 Notes:
 -
 ```
