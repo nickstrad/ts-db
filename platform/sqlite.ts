@@ -1,8 +1,9 @@
 // Writer process ONLY. Never import this file into the DuckDB process.
 import { DatabaseSync } from "node:sqlite";
+import { Effect } from "effect";
 import { Documents, type Operation, type SelectPlan } from "../sdk/db.ts";
 import { parseObject, type Schema } from "../sdk/schema.ts";
-import type { AnyDefinition } from "../sdk/functions.ts";
+import { type AnyDefinition, runHandlerAsPromise } from "../sdk/functions.ts";
 import { compileDDL, compileSelect, compileInsert, compileReplace, compileDelete, decode, tableFor, type Row, type SQL } from "./compiler.ts";
 export type Trace = (engine: "sqlite" | "duckdb", sql: SQL) => void;
 
@@ -81,12 +82,19 @@ export class SQLiteWriter<S extends Schema> {
     return await this.exclusive(async () => {
       this.database.exec("BEGIN IMMEDIATE");
       let active = true;
-      const documents = new Documents<S>(async (op) => {
-        if (!active) throw new Error("Transaction context has expired");
-        return this.execute(op);
-      });
+      // TEMPORARY BRIDGE (item 10): removed by item 15, which turns this class into the scoped
+      // `Storage` service and builds an Effect `Execute` directly. Until then the promise-returning
+      // executor is adapted with `Effect.promise` (a rejection becomes a defect, which
+      // `runHandlerAsPromise` rethrows unchanged), and the handler effect — handlers are Effects
+      // now, not async functions — is run here rather than awaited.
+      const documents = new Documents<S>((op) =>
+        Effect.promise(async () => {
+          if (!active) throw new Error("Transaction context has expired");
+          return this.execute(op);
+        })
+      );
       try {
-        const result = await definition.invoke(documents, args);
+        const result = await runHandlerAsPromise(definition, documents, args);
         // Catch non-JSON results before committing; transport cannot serialize them later.
         const safeResult = JSON.parse(JSON.stringify(result ?? null));
         this.database.exec("COMMIT");

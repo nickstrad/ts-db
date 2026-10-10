@@ -1,8 +1,10 @@
-import { createClient } from "../sdk/client.ts";
+// TEMPORARY BRIDGE (item 10): the Effect client's promise wrapper, until this file is ported.
+// This script is unowned by any plan item.
+import { createPromiseClient } from "../sdk/client.ts";
 import type { functions } from "../app/functions.ts";
 const base = Deno.env.get("BASE_URL") ?? "http://127.0.0.1:8000";
 const app = Deno.args[0] ?? "tic-tac-toe";
-const client = createClient<typeof functions>(base, app, Deno.env.get("TOKEN") ?? "dev-only");
+const client = createPromiseClient<typeof functions>(base, app, Deno.env.get("TOKEN") ?? "dev-only");
 const { gameId } = await client.mutation("createGame", { xPlayer: "alice", oPlayer: "bob" });
 console.log("Created:", gameId);
 let game = await client.query("getGame", { gameId });
