@@ -22,11 +22,7 @@ import { join } from "node:path";
 import { Cause, Duration, Effect, Exit, Logger, LogLevel, TestClock, TestContext } from "effect";
 import { type EventRecord, handlerEvent, type Level, lifecycleEvent, type Role } from "../../core/events.ts";
 import { ConfigTest } from "../../platform/config.ts";
-import {
-  type EventRecord as DeclaredEventRecord,
-  EventSink,
-  type LoggingConfig,
-} from "../../platform/services.ts";
+import { EventSink, type LoggingConfig } from "../../platform/services.ts";
 import {
   eventSink,
   eventSinkLayer,
@@ -152,7 +148,7 @@ const emitAll = (records: readonly EventRecord[]) =>
   });
 
 /** Emits every record and reports whether each `emit` succeeded — `emit` may never fail. */
-const emitAllChecked = (records: readonly (EventRecord | DeclaredEventRecord)[]) =>
+const emitAllChecked = (records: readonly EventRecord[]) =>
   Effect.gen(function* () {
     const sink: EventSinkRecordService = yield* eventSink;
     let failures = 0;
@@ -224,33 +220,6 @@ test("every level is written when the gate is open at debug", async () => {
 
     const parsed = await readRecords(dir);
     assert.deepEqual(parsed.map((r) => r["level"]), ["debug", "info", "warn", "error"]);
-  });
-});
-
-test("the frozen envelope shape (epoch ts, attrs bag) is normalized into a canonical record", async () => {
-  await withTempDir(async (dir) => {
-    const ts = Date.UTC(2026, 9, 10, 14, 0, 0);
-    const declared: DeclaredEventRecord = {
-      kind: "handler",
-      eventId: "declared-1",
-      ts,
-      level: "info",
-      role: "server",
-      pid: 4242,
-      traceId: "t-declared",
-      attrs: { handlerKind: "mutation", name: "play", outcome: "ok", durationMs: 3 },
-    };
-    const failures = await runWithSink(dir, { eventFlushMs: 10 }, emitAllChecked([declared]));
-    assert.equal(failures, 0);
-
-    const [record] = await readRecords(dir);
-    assert.equal(record["ts"], new Date(ts).toISOString());
-    assert.equal(record["kind"], "handler");
-    assert.equal(record["handlerKind"], "mutation");
-    assert.equal(record["name"], "play");
-    assert.equal(record["outcome"], "ok");
-    assert.equal(record["durationMs"], 3);
-    assert.equal(record["attrs"], undefined);
   });
 });
 
