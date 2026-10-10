@@ -177,10 +177,25 @@ export function validate(node: Node, value: unknown, path: string): Either.Eithe
       valid = typeof value === "string" && !!node.values?.includes(value);
       break;
     case "array":
+      if (node.item === undefined) {
+        // Only reachable by bypassing the `v` builders with a hand-built node. Returning a
+        // Left keeps this module total: nothing in here raises, not even on malformed input.
+        return Either.left(
+          new SchemaError({
+            reason: "type-mismatch",
+            path,
+            expected: "array with an item descriptor",
+            actual: value,
+          }),
+        );
+      }
       if (Array.isArray(value) && (node.length === undefined || value.length === node.length)) {
+        // Sparse arrays are intentionally rejected: the old code used `value.map`, which
+        // skips holes, while this index loop reads `value[i]` as `undefined` and fails the
+        // item node. Strictly stronger, and unreachable from `JSON.parse` (never emits holes).
         const items: unknown[] = [];
         for (let i = 0; i < value.length; i++) {
-          const item = validate(node.item!, value[i], `${path}[${i}]`);
+          const item = validate(node.item, value[i], `${path}[${i}]`);
           if (Either.isLeft(item)) return Either.left(item.left);
           items.push(item.right);
         }

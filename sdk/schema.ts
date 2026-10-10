@@ -89,8 +89,12 @@ export class AppTable<F extends Fields = Fields> extends Table<F> {
 
 /** Declares a table, throwing on a bad or reserved field name. */
 export function defineTable<F extends Fields>(fields: F): AppTable<F> {
-  orThrow(Core.defineTable(fields));
-  return new AppTable(fields);
+  return orThrow(
+    Either.map(
+      Core.defineTable(fields),
+      (table) => new AppTable(table.fields, table.storage, table.indexes),
+    ),
+  );
 }
 
 /** Validates a schema's table names, throwing on a bad or reserved one, and returns it unchanged. */

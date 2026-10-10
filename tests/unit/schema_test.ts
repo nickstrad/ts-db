@@ -41,6 +41,19 @@ function assertMismatch(error: SchemaError, path: string, expected: string) {
 const nullableOf = (field: { node: Node }): Node => v.nullable(field as never).node;
 
 // ---------------------------------------------------------------------------
+// Either channel contract (plan prose is error-first; Effect 3.22 is value-first)
+// ---------------------------------------------------------------------------
+
+Deno.test("Either channels: values ride right, SchemaErrors ride left (value-first order)", () => {
+  // Pins the type-parameter order contract explicitly: a future edit that silently inverts
+  // `Either<A, E>` must trip this assertion, not just the type-checker.
+  const ok = validate(v.string().node, "x", "f");
+  assert.ok(Either.isRight(ok), "success must be a Right");
+  const bad = validate(v.string().node, 1, "f");
+  assert.ok(Either.isLeft(bad), "rejection must be a Left");
+});
+
+// ---------------------------------------------------------------------------
 // validate: one test per node kind, both nullable combinations, every failure mode
 // ---------------------------------------------------------------------------
 
@@ -173,6 +186,30 @@ Deno.test("validate: a nullable array accepts null but a non-nullable element do
   assert.equal(expectRight(validate(node, null, "tags")), null);
   assert.deepEqual(expectRight(validate(node, ["a", "b"], "tags")), ["a", "b"]);
   assertMismatch(expectLeft(validate(node, ["a", null], "tags")), "tags[1]", "string");
+});
+
+Deno.test("validate: a sparse array is rejected at the first hole (strictly stronger than .map)", () => {
+  // The old implementation used `value.map`, which skips holes, so they were never
+  // validated and came back as holes (serializing to null). The index loop reads
+  // `value[i]` as `undefined` instead, failing the item node. Pinned so a future
+  // reader does not restore `.map` and silently re-accept holes.
+  const node = v.array(v.string(), 3).node;
+  const sparse: unknown[] = new Array(3);
+  assertMismatch(expectLeft(validate(node, sparse, "board")), "board[0]", "string");
+  const partlySparse: unknown[] = new Array(3);
+  partlySparse[0] = "a";
+  partlySparse[2] = "c";
+  assertMismatch(expectLeft(validate(node, partlySparse, "board")), "board[1]", "string");
+});
+
+Deno.test("validate: an array node without an item descriptor returns a left, never raises", () => {
+  // Only reachable by bypassing the `v` builders with a hand-built node; the module keeps
+  // its "nothing in here raises" guarantee even for malformed descriptors.
+  const node = { kind: "array" } as Node;
+  const error = expectLeft(validate(node, ["a", "b"], "f"));
+  assert.equal(error._tag, "SchemaError");
+  assert.equal(error.reason, "type-mismatch");
+  assert.equal(error.path, "f");
 });
 
 // ---------------------------------------------------------------------------
