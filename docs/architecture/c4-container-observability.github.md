@@ -23,7 +23,7 @@ flowchart TB
         server["<b>Server process</b><br/>[Deno process]<br/>emits http, sql, tx, queue, backup and<br/>lifecycle events; runs the retention<br/>sweeper (item 24)"]
         reader["<b>Reader process</b><br/>[Deno child process]<br/>emits sql, tx and ingest events; owns the<br/>only DuckDB handle, so it also runs the<br/>event-log ingest"]
         jsonl["<b>JSONL log directories</b> (planned, item 11)<br/>[filesystem]<br/><code>logs/&lt;role&gt;/&lt;YYYY-MM-DD&gt;/events-&lt;HH&gt;-&lt;pid&gt;-&lt;seq&gt;.jsonl</code><br/>role = server | reader | restore | cli. One JSON object per<br/>line. Rolls on date, hour or 64 MiB. Retention: gzip after 2<br/>days, keep 14 days, 2 GiB cap; today's dir is never swept."]
-        k6["<b>k6 results</b> (item 03; more in item 14)<br/>[filesystem]<br/><code>logs/k6/&lt;run-id&gt;/raw.json</code>, <code>summary.json</code><br/>written by the k6 binary, not by Deno"]
+        k6["<b>k6 results</b> (items 03 and 14)<br/>[filesystem]<br/><code>logs/k6/&lt;run-id&gt;/raw.json</code>, <code>summary.json</code><br/>written by the k6 binary, not by Deno"]
         duck["<b>DuckDB event log</b> (planned, item 21)<br/>[DuckDB file]<br/><code>logs/duckdb/events.duckdb</code><br/>append-only tables plus <code>_ingest_state</code> offsets;<br/>INSERT only"]
         cli["<b>logs CLI</b> (planned, item 23)<br/>[Deno CLI]<br/><code>scripts/logs.ts</code> — ingest | query | list | sweep<br/>Named analysis queries only, never caller-supplied SQL"]
     end

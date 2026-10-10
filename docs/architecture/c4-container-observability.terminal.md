@@ -43,8 +43,8 @@ directories, the DuckDB event log and the `logs` CLI are plan items 11, 21, 23 a
 ╎                                                     │ (3)            ╎
 ╎                                                     ▼                ╎
 ╎  ┌────────────────────────────┐       ┌┄┄┄┄┄┄┄┄┄┄┄┄┄┬┄┄┄┄┄┄┄┄┄┄┄┄┄┄┐ ╎
-╎  │ k6 results  (item 03;      │       ┆ DuckDB event log           ┆ ╎
-╎  │ more in 14) [filesystem]   │       ┆ (item 21) [DuckDB file]    ┆ ╎
+╎  │ k6 results  (items         │       ┆ DuckDB event log           ┆ ╎
+╎  │ 03, 14) [filesystem]       │       ┆ (item 21) [DuckDB file]    ┆ ╎
 ╎  │                            │       ┆                            ┆ ╎
 ╎  │ logs/k6/<run-id>/          ├─(4)──►┆ logs/duckdb/events.duckdb  ┆ ╎
 ╎  │ raw.json, summary.json     │       ┆ append-only tables plus    ┆ ╎

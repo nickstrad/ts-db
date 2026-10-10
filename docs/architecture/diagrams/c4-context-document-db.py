@@ -75,9 +75,9 @@ cv.box(row, 48, 22, [
     "k6 load generator",
     "[External system]",
     "",
-    "k6 v0.56.0 and the",
-    "smoke scenario;",
-    "more in item 14",
+    "k6 v0.56.0; smoke,",
+    "mutation, query,",
+    "mixed (03 and 14)",
 ], top=(11,))
 
 print(cv.render(limit=70))
