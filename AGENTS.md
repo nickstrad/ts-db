@@ -87,6 +87,22 @@ not re-verified against the landed diff. If an item touches no diagram-relevant 
 follow-up agent says so in one line in its commit message (`docs: item NN touches no C4 surface`)
 and moves on.
 
+## File sync protocol
+
+This repo maintains two instruction files: **AGENTS.md** (agent orchestration and repo structure)
+and **CLAUDE.md** (repo conventions for Claude Code CLI). The Claude Code CLI auto-discovers only
+CLAUDE.md, not AGENTS.md — empirically validated in sq-05.
+
+- **AGENTS.md** is the single source of truth for agent orchestration, work protocols, model
+  assignments, and repo structure. It is read by human coordinators and agent prompts, never
+  auto-discovered by the CLI.
+- **CLAUDE.md** is auto-discovered by the `claude` CLI and defines repo conventions (environment
+  setup, branch etiquette, docs-only sessions, commit style). It is a hand-maintained summary of
+  AGENTS.md sections that are relevant to CLI behavior, plus CLI-specific conventions.
+- **Keep them in sync**: When editing AGENTS.md, ensure that CLAUDE.md reflects any changes to
+  environment setup, branch/worktree etiquette, docs-only/implementation boundaries, or commit
+  style. Do not attempt a symlink: the CLI looks for CLAUDE.md by filename, not by target.
+
 ## Stopping-point convention
 
 Work proceeds item by item (or quest by quest) and stops at the item the human and coordinator
