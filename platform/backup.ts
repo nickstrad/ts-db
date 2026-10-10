@@ -15,10 +15,15 @@
  *
  * Events: one `backup` event per phase this module owns — `snapshot`, `verify`, `hash`, `put-manifest`,
  * `publish-latest` — with duration and outcome, emitted on interruption too, so a stalled or killed
- * backup is visible. `put-object` is NOT emitted here on success or failure: `ObjectStore` already emits
- * a `backup`/`put-object` event for every put (the manifest and `latest.json` puts included), and a
- * second one would double-count. The one exception is interruption, which the store cannot record (its
- * event is written after the put returns, and an interrupted fiber never gets there); see `putObject`.
+ * backup is visible. A run that fails before its snapshot starts (the temp directory cannot be created)
+ * still emits one failed `snapshot` event. `put-object` is NOT emitted here on success or failure:
+ * `ObjectStore` already emits a `backup`/`put-object` event for every put (the manifest and
+ * `latest.json` puts included), and a second one would double-count. The exception is interruption,
+ * which the store usually cannot record (its event is written after the put settles, and an interrupted
+ * fiber normally never gets there); see `putObject`. That exception is not race-free: an interrupt that
+ * lands after the store has emitted its event but before `put` returns is recorded here as well, so one
+ * written object can show both the store's `ok` and an `Interrupted` event. The `Interrupted` event
+ * therefore carries `errorDetail: { written: "unknown" }`: the object may or may not have been written.
  * Every event of a run carries its `appId` and `traceId` through log annotations, which the store's
  * events read as well, so the store's put events join the run.
  */
@@ -201,12 +206,16 @@ export function makeBackupRunner(
         };
       });
 
-    /** Emits the one `backup` event describing a phase that started at `startedAt` and ended in `exit`. */
+    /**
+     * Emits the one `backup` event describing a phase that started at `startedAt` and ended in `exit`.
+     * `detail`, when given, replaces the failure's `errorDetail`.
+     */
     const record = <A, E>(
       name: BackupPhase,
       startedAt: number,
       exit: Exit.Exit<A, E>,
       fields: PhaseFields,
+      detail?: unknown,
     ): Effect.Effect<void> =>
       Effect.gen(function* () {
         const finishedAt = yield* Clock.currentTimeMillis;
@@ -220,7 +229,7 @@ export function makeBackupRunner(
           durationMs: finishedAt - startedAt,
           outcome: ok ? "ok" : "error",
           errorTag: errors?.errorTag,
-          errorDetail: errors?.errorDetail,
+          errorDetail: detail ?? errors?.errorDetail,
         }));
       });
 
@@ -249,8 +258,15 @@ export function makeBackupRunner(
 
     /**
      * The snapshot-object put. `ObjectStore` records its success or failure; only an interruption is
-     * recorded here, since the store's event would never be written. So a backup killed mid-upload
-     * still shows where it stopped, and no put is counted twice.
+     * recorded here, since the store's event is normally never written. So a backup killed mid-upload
+     * still shows where it stopped.
+     *
+     * This can double-count. The store emits its event before its `put` effect returns, so an interrupt
+     * landing between the two is recorded here too, for an object that was written (the store's event
+     * says `ok`). The interrupted record is marked `written: "unknown"` for that reason: read it as "may
+     * or may not have been written", and prefer the store's `put-object` event for the same key when
+     * both exist. Closing the window needs `ObjectStore` to record interruption itself (follow-up; that
+     * file is outside this item).
      */
     const putObject = (key: string, bytes: Uint8Array) =>
       Effect.flatMap(
@@ -260,7 +276,9 @@ export function makeBackupRunner(
             store.put(key, bytes),
             (exit) =>
               Exit.isFailure(exit) && Cause.isInterruptedOnly(exit.cause)
-                ? record("put-object", startedAt, exit, { key, bytes: bytes.byteLength })
+                ? record("put-object", startedAt, exit, { key, bytes: bytes.byteLength }, {
+                  written: "unknown",
+                })
                 : Effect.void,
           ),
       );
@@ -285,14 +303,20 @@ export function makeBackupRunner(
 
     /**
      * A private temp directory, removed (recursively) when the run's scope closes. `BackupPhase` has no
-     * setup phase, so failing to create it is reported as `snapshot`, the phase it is created for.
+     * setup phase, so failing to create it is reported, and recorded as an event, as `snapshot`, the
+     * phase it is created for; the snapshot phase's own event is never reached in that case.
      */
     const tempDir = (appId: string): Effect.Effect<string, BackupError, Scope.Scope> =>
       Effect.acquireRelease(
-        Effect.tryPromise({
-          try: () => Deno.makeTempDir({ prefix: "document-db-backup-" }),
-          catch: failed(appId, "snapshot"),
-        }),
+        Effect.flatMap(Clock.currentTimeMillis, (startedAt) =>
+          Effect.tryPromise({
+            try: () => Deno.makeTempDir({ prefix: "document-db-backup-" }),
+            catch: failed(appId, "snapshot"),
+          }).pipe(
+            Effect.onExit((exit) =>
+              Exit.isFailure(exit) ? record("snapshot", startedAt, exit, {}) : Effect.void
+            ),
+          )),
         (directory) =>
           Effect.tryPromise(() => Deno.remove(directory, { recursive: true })).pipe(
             // A finalizer cannot fail; a leaked directory is reported rather than lost.

@@ -391,6 +391,34 @@ test("a Storage failure becomes BackupError at phase snapshot", async () => {
   assert.deepEqual(backupEvents(events).map((e) => [e.phase, e.errorTag]), [["snapshot", "StorageError"]]);
 });
 
+test("a temp-directory failure fails take at phase snapshot and still emits a snapshot event", async () => {
+  const store = stubStore();
+  const storage = stubStorage();
+  const { runner, events } = runnerOver(store);
+  const previous = Deno.env.get("TMPDIR");
+  // `Deno.makeTempDir` creates under `TMPDIR`; a missing parent makes it fail.
+  Deno.env.set("TMPDIR", join(tmpdir(), `ts-db-missing-${crypto.randomUUID()}`));
+  let exit: Exit.Exit<Manifest, unknown>;
+  try {
+    exit = await Effect.runPromiseExit(runner.take("app", storage));
+  } finally {
+    if (previous === undefined) Deno.env.delete("TMPDIR");
+    else Deno.env.set("TMPDIR", previous);
+  }
+  const error = failureOf(exit);
+  assert.ok(error instanceof BackupError);
+  assert.equal(error.phase, "snapshot");
+  assert.equal(storage.paths.length, 0, "the snapshot was never attempted");
+  assert.equal(store.puts.length, 0);
+  const trace = backupEvents(events);
+  assert.deepEqual(trace.map((e) => [e.phase, e.outcome, e.level, e.errorTag]), [
+    ["snapshot", "error", "error", "BackupError"],
+  ]);
+  assert.equal(trace[0].appId, "app");
+  // The guard was released: the next take is admitted and completes.
+  await Effect.runPromise(runner.take("app", stubStorage()));
+});
+
 test("a defect in Storage still releases the guard and removes the temp directory", async () => {
   const store = stubStore();
   const dying = stubStorage({ kind: "die" });
@@ -440,6 +468,8 @@ test("interrupting take mid-upload releases the per-app guard and removes the te
   ]);
   assert.equal(trace[3].errorTag, "Interrupted");
   assert.equal(trace[3].level, "warn");
+  // An interrupt can land after the store wrote the object, so the record does not claim it was not.
+  assert.deepEqual(trace[3].errorDetail, { written: "unknown" });
   assert.match(trace[3].key ?? "", /^apps\/app\/.*\.sqlite$/);
   // Guard released: the next take is admitted and completes.
   store.unhang();
