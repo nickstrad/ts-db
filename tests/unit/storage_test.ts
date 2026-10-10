@@ -325,6 +325,55 @@ test("a Documents handle used after its transaction fails ContextExpiredError", 
   );
 });
 
+test("a forked write switched out mid-operation cannot land after COMMIT", async () => {
+  await withStorageLayer((storage, h) =>
+    Effect.gen(function* () {
+      let expired = 0;
+      // The yield threshold decides where the forked patch is switched out: before its select,
+      // between the select and the update, or between COMMIT and the release. Sweep them all.
+      for (let threshold = 10; threshold <= 60; threshold++) {
+        const { gameId } =
+          (yield* storage.mutation(functions.createGame, { xPlayer: "a", oPlayer: "b" })) as {
+            gameId: string;
+          };
+        let forked: Fiber.Fiber<unknown, unknown> | undefined;
+        const leak = app.mutation({
+          args: { gameId: v.string() },
+          handler: ({ db }, { gameId }) =>
+            Effect.gen(function* () {
+              forked = yield* Effect.forkDaemon(db.patch("games", gameId, { turn: "O" }));
+              return null;
+            }),
+        });
+        const from = h.events.length;
+        yield* storage.mutation(leak, { gameId }).pipe(Effect.withMaxOpsBeforeYield(threshold));
+        const exit = yield* Fiber.await(forked!);
+        const events = h.events.slice(from);
+        const commit = events.findIndex((e) => e.kind === "tx");
+        const update = events.findIndex((e) => e.kind === "sql" && e.statementKind === "update");
+        const games =
+          ((yield* storage.mutation(inspect, {})) as { games: { _id: string; turn: string }[] }).games;
+        const turn = games.find((g) => g._id === gameId)!.turn;
+        if (Exit.isSuccess(exit)) {
+          // Only acceptable if the whole patch ran inside the transaction.
+          assert.ok(update !== -1 && update < commit, `threshold ${threshold}: update ran after COMMIT`);
+          assert.equal(turn, "O");
+        } else {
+          expired++;
+          assert.equal(
+            (failureOf(exit) as { _tag: string })._tag,
+            "ContextExpiredError",
+            `threshold ${threshold}`,
+          );
+          assert.equal(update, -1, `threshold ${threshold}: no update statement ran`);
+          assert.equal(turn, "X", `threshold ${threshold}: the patch did not persist`);
+        }
+      }
+      assert.ok(expired > 0, "some threshold switched the forked patch out past COMMIT");
+    })
+  );
+});
+
 test("typed handler failures keep their tag and roll back", async () => {
   await withStorageLayer((storage) =>
     Effect.gen(function* () {

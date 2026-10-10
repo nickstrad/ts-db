@@ -27,7 +27,8 @@
  *    `BEGIN IMMEDIATE` is the acquire, the handler plus the serializability check plus `COMMIT` is
  *    the use, and the release rolls back whenever `COMMIT` did not run — on a typed failure, a
  *    defect, or an interruption. The release also expires the handler's `Documents` handle (the
- *    mutation-context flag), so a forked fiber that kept it fails `ContextExpiredError`.
+ *    mutation-context flag, checked before every statement), so a forked fiber that kept it fails
+ *    `ContextExpiredError` — even one switched out mid-operation, between a select and its update.
  * 4. **Every statement is an event.** `statement` times each prepared statement and emits a `sql`
  *    event (kind, table, duration, row count, bind count, SQL text; bind values only under
  *    `LOG_INCLUDE_BIND_VALUES`); each transaction emits one `tx` event; each queue rejection emits a
@@ -219,16 +220,24 @@ export function makeStorage(
         }),
     );
 
-    /** One prepared statement: run, time, emit a `sql` event, map a driver throw to `StorageError`. */
-    const statement = <A>(
+    /**
+     * One prepared statement: run, time, emit a `sql` event, map a driver throw to `StorageError`.
+     * `guard`, when given, is checked in the same synchronous step as the driver call: a fiber can be
+     * switched out between two statements of one operation, so checking once per operation would let
+     * a forked fiber's write land after `COMMIT`.
+     */
+    const statement = <A, E = never>(
       kind: SqlStatementKind,
       table: string | undefined,
       sql: SQL,
       run: (prepared: StatementSync) => A,
       rows: (result: A) => number,
       operation: StorageError["operation"] = kind,
-    ): Effect.Effect<A, StorageError> =>
-      Effect.suspend(() => {
+      guard?: () => E | undefined,
+    ): Effect.Effect<A, StorageError | E> =>
+      Effect.suspend((): Effect.Effect<A, StorageError | E> => {
+        const refused = guard?.();
+        if (refused !== undefined) return Effect.fail(refused);
         const started = nanos();
         let result: A;
         try {
@@ -296,6 +305,8 @@ export function makeStorage(
         (tx) =>
           Effect.flatMap(use(tx), (result) =>
             Effect.suspend(() => {
+              // Expire in the same step as COMMIT: the release runs later, after a possible yield.
+              tx.active = false;
               try {
                 database.exec("COMMIT");
               } catch (cause) {
@@ -385,7 +396,11 @@ export function makeStorage(
         })
       );
 
-    const select = (plan: SelectPlan) =>
+    /** The mutation-context guard for `statement`: refuses once `tx`'s release has run. */
+    const live = (tx: Tx) => (): ContextExpiredError | undefined =>
+      tx.active ? undefined : new ContextExpiredError({ context: "mutation" });
+
+    const select = (plan: SelectPlan, tx: Tx) =>
       Effect.gen(function* () {
         const sql = yield* compileSelect(schema, plan, "sqlite");
         const rows = yield* statement(
@@ -394,17 +409,23 @@ export function makeStorage(
           sql,
           (s) => s.all(...sql.values),
           (r) => r.length,
+          "select",
+          live(tx),
         );
         return yield* decode(schema, plan, rows as Row[]);
       });
 
-    const write = (kind: "insert" | "update" | "delete", table: string, sql: SQL) =>
-      statement(kind, table, sql, (s) => s.run(...sql.values), changes);
+    const write = <E = never>(
+      kind: "insert" | "update" | "delete",
+      table: string,
+      sql: SQL,
+      guard?: () => E | undefined,
+    ) => statement(kind, table, sql, (s) => s.run(...sql.values), changes, kind, guard);
 
-    const execute = (op: Operation): Effect.Effect<unknown, ExecuteError> => {
+    const execute = (op: Operation, tx: Tx): Effect.Effect<unknown, ExecuteError> => {
       switch (op.kind) {
         case "select":
-          return select(op);
+          return select(op, tx);
         case "insert":
           return Effect.gen(function* () {
             const id = yield* idGen.next;
@@ -413,6 +434,7 @@ export function makeStorage(
               "insert",
               op.table,
               yield* compileInsert(schema, op.table, op.value, { _id: id, _creationTime: now }),
+              live(tx),
             );
             return id;
           });
@@ -425,7 +447,7 @@ export function makeStorage(
               table: op.table,
               filters: [{ field: "_id", op: "eq", value: op.id }],
               limit: 1,
-            });
+            }, tx);
             const old = (found as Row[])[0];
             if (!old) return yield* new NotFoundError({ table: op.table, id: op.id });
             const body = Object.fromEntries(Object.keys(table.fields).map((key) => [key, old[key]]));
@@ -433,12 +455,13 @@ export function makeStorage(
               "update",
               op.table,
               yield* compileReplace(schema, op.table, op.id, { ...body, ...patch }),
+              live(tx),
             );
             return null;
           });
         case "delete":
           return Effect.gen(function* () {
-            yield* write("delete", op.table, yield* compileDelete(schema, op.table, op.id));
+            yield* write("delete", op.table, yield* compileDelete(schema, op.table, op.id), live(tx));
             return null;
           });
       }
@@ -486,7 +509,7 @@ export function makeStorage(
                 Effect.suspend(() => {
                   if (!tx.active) return Effect.fail(new ContextExpiredError({ context: "mutation" }));
                   tx.operations++;
-                  return execute(op);
+                  return execute(op, tx);
                 })
               );
               return definition.invoke(documents, args).pipe(
