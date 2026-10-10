@@ -3,9 +3,9 @@
  *
  * The stub is a dependency-free Deno script written to a temp file (this item owns only this test
  * file and `platform/ipc.ts`). It speaks the reader wire protocol and picks its behaviour from each
- * request's `name`: echo after a delay, never answer, exit, emit garbage, answer an unknown id, or
- * send an error frame. `--ignore-eof` makes it keep running after stdin closes, so the finalizer has
- * to kill it.
+ * request's `name`: echo after a delay, never answer, exit, emit garbage or an oversize frame, answer
+ * an unknown id, send an error frame, or close its stdin. `--ignore-eof` makes it keep running after
+ * stdin closes, so the finalizer has to kill it; `--ignore-sigterm` makes that take a SIGKILL.
  *
  * Every test runs its connection inside `Effect.scoped` and, after the scope closes, asserts the
  * child's `status` has settled — no test leaves a process behind.
@@ -32,6 +32,7 @@ import {
 
 const STUB = `
 const ignoreEof = Deno.args.includes("--ignore-eof");
+if (Deno.args.includes("--ignore-sigterm")) Deno.addSignalListener("SIGTERM", () => {});
 const out = Deno.stdout.writable.getWriter();
 const enc = new TextEncoder();
 let tail = Promise.resolve();
@@ -64,20 +65,42 @@ async function handle(req) {
       await new Promise((r) => setTimeout(r, 20));
       return send(text.slice(5));
     }
+    case "oversize":
+      // One more than the decoder's limit, no newline, and then silence.
+      return send("x".repeat(2_000_001));
   }
 }
 const dec = new TextDecoder();
 let buf = "";
-for await (const chunk of Deno.stdin.readable) {
+// "closeStdin" stops reading and closes fd 0, so the parent's next write fails; the child then
+// stays up, or exits after args.exitAfterMs with args.code.
+let closing;
+read: for await (const chunk of Deno.stdin.readable) {
   buf += dec.decode(chunk, { stream: true });
   let nl;
   while ((nl = buf.indexOf("\\n")) >= 0) {
     const line = buf.slice(0, nl);
     buf = buf.slice(nl + 1);
-    if (line) handle(JSON.parse(line));
+    if (!line) continue;
+    const req = JSON.parse(line);
+    if (req.name === "closeStdin") {
+      closing = req;
+      break read;
+    }
+    handle(req);
   }
 }
-if (ignoreEof) setInterval(() => {}, 1000);
+if (closing) {
+  // Deno.stdin.close() leaves fd 0 open, so the parent's writes would still succeed; close(2) it.
+  const libc = Deno.dlopen(Deno.build.os === "darwin" ? "libSystem.B.dylib" : "libc.so.6", {
+    close: { parameters: ["i32"], result: "i32" },
+  });
+  libc.symbols.close(0);
+  await reply({ id: closing.id, result: "closed" });
+  const { exitAfterMs, code } = closing.args ?? {};
+  if (exitAfterMs === undefined) setInterval(() => {}, 1000);
+  else setTimeout(() => Deno.exit(code ?? 0), exitAfterMs);
+} else if (ignoreEof) setInterval(() => {}, 1000);
 else { await tail; }
 `;
 
@@ -88,10 +111,18 @@ const stubPath = await (async () => {
 })();
 after(() => Deno.remove(stubPath));
 
-/** An `EventSink` that records into an array the test can inspect. */
-function recordingSink() {
+/**
+ * An `EventSink` that records into an array the test can inspect. `dieOn` names a lifecycle phase
+ * whose emission dies instead, to plant a defect in the fiber that emits it.
+ */
+function recordingSink(dieOn?: string) {
   const events: EventRecord[] = [];
-  const layer = Layer.succeed(EventSink, { emit: (e) => Effect.sync(() => void events.push(e)) });
+  const layer = Layer.succeed(EventSink, {
+    emit: (e) =>
+      e.kind === "lifecycle" && e.phase === dieOn
+        ? Effect.die(new Error(`sink died on ${dieOn}`))
+        : Effect.sync(() => void events.push(e)),
+  });
   return { events, layer };
 }
 
@@ -107,8 +138,9 @@ interface Harness {
 async function withStub<A>(
   body: (h: Harness) => Effect.Effect<A, unknown>,
   options: Partial<ReaderClientOptions> = {},
+  sinkDiesOn?: string,
 ): Promise<{ value: A; status: Deno.CommandStatus; events: EventRecord[] }> {
-  const { events, layer } = recordingSink();
+  const { events, layer } = recordingSink(sinkDiesOn);
   let child: Deno.ChildProcess | undefined;
   const value = await Effect.runPromise(
     Effect.scoped(Effect.gen(function* () {
@@ -201,14 +233,16 @@ test("early child exit fails every pending call with ReaderExitedError, and late
       const exitCall = yield* failure(connection.call(query("exit", { code: 3 })));
       const pendingErrors = yield* Effect.forEach(waiting, Fiber.join);
       const later = yield* failure(connection.call({ kind: "ping" }));
-      return { exitCall, pendingErrors, later, pending: yield* connection.pendingCount };
+      return { exitCall, pendingErrors, later };
     })
   );
+  // `pendingCount` reads 0 on a closed connection whatever happened, so it proves nothing here; the
+  // drain is proven by all three calls that were pending (asserted above) failing with the exit.
+  assert.equal(value.pendingErrors.length, 3);
   for (const error of [value.exitCall, ...value.pendingErrors, value.later]) {
     assert.ok(error instanceof ReaderExitedError, `expected ReaderExitedError, got ${String(error)}`);
     assert.equal(error.code, 3);
   }
-  assert.equal(value.pending, 0);
   const exited = events.find((e) => e.kind === "lifecycle" && e.phase === "reader-exited");
   assert.equal(exited?.level, "warn");
 });
@@ -345,6 +379,99 @@ test("the scope finalizer kills a child that ignores stdin EOF", async () => {
   assert.ok(Date.now() - started < 5_000);
   const exited = events.find((e) => e.kind === "lifecycle" && e.phase === "reader-exited");
   assert.equal(exited?.level, "info", "the scope's own shutdown is not a warning");
+});
+
+test("the scope finalizer escalates to SIGKILL when the child also ignores SIGTERM", async () => {
+  const started = Date.now();
+  const { status } = await withStub(
+    ({ connection }) => connection.call({ kind: "ping" }),
+    { args: ["--ignore-eof", "--ignore-sigterm"], shutdownTimeout: "200 millis" },
+  );
+  assert.equal(status.signal, "SIGKILL");
+  assert.ok(Date.now() - started < 5_000);
+});
+
+test("an oversize frame with nothing after it fails the connection at once with message-too-large", async () => {
+  const { value, status, events } = await withStub(
+    ({ connection }) =>
+      Effect.gen(function* () {
+        const oversize = yield* failure(connection.call(query("oversize")));
+        const later = yield* failure(connection.call({ kind: "ping" }));
+        return { oversize, later };
+      }),
+    // Far beyond how long the frame takes to arrive: a stall would surface as `timeout`.
+    { callTimeout: "5 seconds" },
+  );
+  for (const error of [value.oversize, value.later]) {
+    assert.ok(error instanceof IpcError, `expected IpcError, got ${String(error)}`);
+    assert.equal(error.reason, "message-too-large");
+  }
+  const failed = events.find((e) => e.kind === "lifecycle" && e.phase === "reader-connection-failed");
+  assert.ok(failed, "connection failure must be logged");
+  assert.equal(status.signal, "SIGTERM");
+});
+
+test("a stdin write failure with the child still running fails the connection with write-failed", async () => {
+  const { value, status, events } = await withStub(
+    ({ connection }) =>
+      Effect.gen(function* () {
+        const closed = yield* connection.call(query("closeStdin"));
+        const write = yield* failure(connection.call({ kind: "ping" }));
+        return { closed, write };
+      }),
+    { shutdownTimeout: "200 millis" },
+  );
+  assert.equal(value.closed, "closed");
+  assert.ok(value.write instanceof IpcError, `expected IpcError, got ${String(value.write)}`);
+  assert.equal(value.write.reason, "write-failed");
+  const failed = events.find((e) => e.kind === "lifecycle" && e.phase === "reader-connection-failed");
+  assert.ok(failed, "connection failure must be logged");
+  assert.equal(status.signal, "SIGTERM", "a child out of sync with us is killed");
+});
+
+test("a stdin write failure followed by the child's exit reports the exit", async () => {
+  const { value } = await withStub(
+    ({ connection }) =>
+      Effect.gen(function* () {
+        yield* connection.call(query("closeStdin", { exitAfterMs: 150, code: 7 }));
+        // The write fails at once; the connection waits up to the grace period for the exit.
+        return yield* failure(connection.call({ kind: "ping" }));
+      }),
+    { shutdownTimeout: "2 seconds" },
+  );
+  assert.ok(value instanceof ReaderExitedError, `expected ReaderExitedError, got ${String(value)}`);
+  assert.equal(value.code, 7);
+});
+
+test("a defect in the receiver fiber fails the connection with stream-failure instead of stalling", async () => {
+  const { value, status } = await withStub(
+    // The stray reply's anomaly event dies in the receiver, before the real reply is read.
+    ({ connection }) => failure(connection.call(query("unknownId"))),
+    { callTimeout: "5 seconds" },
+    "reader-reply-anomaly",
+  );
+  assert.ok(value instanceof IpcError, `expected IpcError, got ${String(value)}`);
+  assert.equal(value.reason, "stream-failure");
+  assert.equal(status.signal, "SIGTERM");
+});
+
+test("a call from an uninterruptible region still times out and frees its entry", async () => {
+  const { value } = await withStub(
+    ({ connection }) =>
+      Effect.gen(function* () {
+        const error = yield* Effect.uninterruptible(failure(connection.call(query("never"))));
+        return {
+          error,
+          pending: yield* connection.pendingCount,
+          pong: yield* connection.call({ kind: "ping" }),
+        };
+      }),
+    { callTimeout: "100 millis" },
+  );
+  assert.ok(value.error instanceof IpcError, `expected IpcError, got ${String(value.error)}`);
+  assert.equal(value.error.reason, "timeout");
+  assert.equal(value.pending, 0);
+  assert.equal(value.pong, "pong");
 });
 
 test("ReaderClientLive provides the service and tears the child down with its layer", async () => {

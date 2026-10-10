@@ -23,6 +23,7 @@
  * - A malformed line, an oversize or truncated frame, a stdout read failure or a stdin write failure
  *   while the child is still running: the connection fails with the matching `IpcError` reason, the
  *   child is killed (it is out of sync with us), and the failure is logged as a `lifecycle` event.
+ *   A defect in the receiver or writer fiber does the same, as `stream-failure`.
  * - A reply for an id nobody is waiting on (typically one that already timed out) is logged as an
  *   anomaly event and dropped; the connection stays up.
  * - The 1000-call cap is `QueueFullError({ queue: "reader" })`; each call has a timeout
@@ -36,12 +37,14 @@
  * `platform/server.ts` uses `ReaderRPC` until item 22 composes `ReaderClientLive`.
  */
 import {
+  Cause,
   Clock,
   Deferred,
   Duration,
   Effect,
   Either,
   Exit,
+  Fiber,
   HashMap,
   Layer,
   Option,
@@ -299,6 +302,28 @@ export function makeReaderConnection(
         ? Effect.succeed(cause)
         : Effect.map(awaitExit(child), Option.match({ onNone: () => cause, onSome: exitedError }));
 
+    /**
+     * How the receiver and writer fibers end: a typed failure goes through `terminalError`; a defect
+     * fails the connection at once as `stream-failure` (the child is still running, so there is no
+     * exit to wait for), so no call is left waiting for a fiber that has died. Interruption is the
+     * scope closing, which `shutdown` handles.
+     */
+    const onTransportFailure = (fiber: "receiver" | "writer") => (cause: Cause.Cause<IpcError>) => {
+      if (Cause.isInterruptedOnly(cause)) return Effect.failCause(cause);
+      const failure = Cause.failureOption(cause);
+      if (Option.isSome(failure)) {
+        return Effect.flatMap(terminalError(failure.value), (e) => failConnection(child, e));
+      }
+      return failConnection(
+        child,
+        new IpcError({
+          reason: "stream-failure",
+          detail: `reader ${fiber} fiber died`,
+          cause: Cause.squash(cause),
+        }),
+      );
+    };
+
     /** Remove `id` from the pending map; returns the `Deferred` if it was still there. */
     const take = (id: number) =>
       Ref.modify(state, (s): [Option.Option<Pending>, State] => {
@@ -339,13 +364,15 @@ export function makeReaderConnection(
         const decoded = decode.push(chunk.value);
         if (Either.isLeft(decoded)) return yield* decoded.left;
         for (const line of decoded.right) yield* settle(yield* parseReply(line));
+        // The decoder latches an oversize remainder and reports it on the next push, which may
+        // never come if the child goes quiet; an empty push surfaces it now.
+        const latched = decode.push("");
+        if (Either.isLeft(latched)) return yield* latched.left;
       }
       const finished = decode.finish();
       if (Either.isLeft(finished)) return yield* finished.left;
       return yield* new IpcError({ reason: "stream-failure", detail: "reader closed stdout" });
-    }).pipe(
-      Effect.catchAll((error) => Effect.flatMap(terminalError(error), (e) => failConnection(child, e))),
-    );
+    }).pipe(Effect.catchAllCause(onTransportFailure("receiver")));
 
     const writer = Effect.gen(function* () {
       while (true) {
@@ -358,8 +385,8 @@ export function makeReaderConnection(
         });
       }
     }).pipe(
-      // A write fails mostly because the child died; prefer reporting that exit when it follows.
-      Effect.catchAll((error) => Effect.flatMap(terminalError(error), (e) => failConnection(child, e))),
+      // A write fails mostly because the child died; `terminalError` prefers that exit if it follows.
+      Effect.catchAllCause(onTransportFailure("writer")),
     );
 
     yield* Effect.forkScoped(receiver);
@@ -413,8 +440,7 @@ export function makeReaderConnection(
           const awaitReply = Effect.raceFirst(
             Effect.zipRight(Queue.offer(outbox, { id, bytes: encoded.right }), Effect.never),
             Deferred.await(deferred),
-          );
-          return yield* restore(awaitReply).pipe(
+          ).pipe(
             Effect.timeoutFail({
               duration: callTimeout,
               onTimeout: () =>
@@ -423,8 +449,16 @@ export function makeReaderConnection(
                   detail: `no reply to ${request.kind} after ${Duration.format(callTimeout)}`,
                 }),
             }),
-            // Timeout, interruption and success all leave the map without this id.
-            Effect.ensuring(take(id)),
+          );
+          // The wait runs on its own interruptible daemon fiber. A timeout awaits the loser it
+          // interrupts, so if the wait inherited an uninterruptible caller's flags (a finalizer,
+          // say) the timeout would block forever on a Deferred nobody completes. As a daemon it
+          // also does not receive the caller's interrupt signals, so an uninterruptible caller
+          // still sees the call through; an interruptible one interrupts it via `ensuring`.
+          const reply = yield* Effect.forkDaemon(Effect.interruptible(awaitReply));
+          return yield* restore(Fiber.join(reply)).pipe(
+            // Timeout, interruption and success all leave the map without this id and no fiber.
+            Effect.ensuring(Effect.zipRight(take(id), Fiber.interrupt(reply))),
           );
         })
       );
