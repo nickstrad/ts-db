@@ -177,8 +177,8 @@ test("an unrecognized LOG_LEVEL fails with ConfigError(malformed)", async () => 
   });
 });
 
-test("a LOG_INCLUDE_BIND_VALUES outside true/false fails with ConfigError(malformed)", async () => {
-  await withEnv({ LOG_INCLUDE_BIND_VALUES: "yes" }, async () => {
+test("a LOG_INCLUDE_BIND_VALUES outside true/false/1/0/yes/no fails with ConfigError(malformed)", async () => {
+  await withEnv({ LOG_INCLUDE_BIND_VALUES: "maybe" }, async () => {
     const exit = await load();
     assert.equal(exit._tag, "Failure");
     if (exit._tag !== "Failure") return;
@@ -186,6 +186,23 @@ test("a LOG_INCLUDE_BIND_VALUES outside true/false fails with ConfigError(malfor
     assert.equal(error?._tag, "ConfigError");
     assert.equal(error?.key, "LOG_INCLUDE_BIND_VALUES");
     assert.equal(error?.reason, "malformed");
+  });
+});
+
+test("booleans accept 1/0 and yes/no alongside true/false (TRACE_SQL=1 stays valid)", async () => {
+  await withEnv({ TRACE_SQL: "1", LOG_INCLUDE_BIND_VALUES: "yes" }, async () => {
+    const exit = await load();
+    assert.equal(exit._tag, "Success");
+    if (exit._tag !== "Success") return;
+    assert.equal(exit.value.logging.traceSql, true);
+    assert.equal(exit.value.logging.includeBindValues, true);
+  });
+  await withEnv({ TRACE_SQL: "0", LOG_INCLUDE_BIND_VALUES: "no" }, async () => {
+    const exit = await load();
+    assert.equal(exit._tag, "Success");
+    if (exit._tag !== "Success") return;
+    assert.equal(exit.value.logging.traceSql, false);
+    assert.equal(exit.value.logging.includeBindValues, false);
   });
 });
 
@@ -238,8 +255,17 @@ test("every option is declared exactly once, by env var", () => {
 test("README 'Configuration' section matches the options table exactly", () => {
   const readmePath = fileURLToPath(new URL("../../README.md", import.meta.url));
   const readme = readFileSync(readmePath, "utf-8");
-  assert.ok(
-    readme.includes(renderOptionsTable()),
+  // Anchor to the section: a row appended to (or left behind in) the table must fail too,
+  // not just edits and deletions. Normalize whitespace so `deno fmt` on README.md stays green.
+  const sectionStart = readme.indexOf("## Configuration");
+  assert.ok(sectionStart !== -1, "README.md must contain a ## Configuration section");
+  const nextSection = readme.indexOf("\n## ", sectionStart + 1);
+  const section = readme.slice(sectionStart, nextSection === -1 ? undefined : nextSection);
+  const norm = (s: string) => s.split("\n").map((line) => line.trim().replace(/\s+/g, " "));
+  const readmeTable = section.split("\n").filter((line) => line.startsWith("|")).join("\n");
+  assert.deepEqual(
+    norm(readmeTable),
+    norm(renderOptionsTable()),
     "README.md's Configuration table must match platform/config.ts's OPTIONS exactly (name, env var, type, default, description)",
   );
 });

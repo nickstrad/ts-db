@@ -192,7 +192,7 @@ ignores the environment entirely and is for tests.
 | Option | Env var | Type | Default | Description |
 | --- | --- | --- | --- | --- |
 | `port` | `PORT` | number | `8000` | HTTP server port. |
-| `hostname` | `HOSTNAME` | string | `127.0.0.1` | HTTP server bind address. |
+| `bindHost` | `BIND_HOST` | string | `127.0.0.1` | HTTP server bind address. |
 | `maxRequestBytes` | `MAX_REQUEST_BYTES` | number | `65536` | Request body cap in bytes; larger bodies are rejected before parsing. |
 | `dataDir` | `DATA_DIR` | string | `./data` | Root directory for per-app SQLite files, resolved to an absolute path. |
 | `adminToken` | `ADMIN_TOKEN` | string | `dev-only` | Bearer token for the /admin/* routes. |
@@ -200,13 +200,13 @@ ignores the environment entirely and is for tests.
 | `jsonAppToken` | `JSON_APP_TOKEN` | string | `dev-only` | Bearer token for the tic-tac-toe-json app (json storage). |
 | `backupIntervalMs` | `BACKUP_INTERVAL_MS` | number | `0` | Backup timer period in milliseconds. 0 disables the timer; otherwise must be finite and >= 1000. |
 | `logDir` | `LOG_DIR` | string | `./logs` | Root of the logs/<role>/<date>/ tree. |
-| `logLevel` | `LOG_LEVEL` | enum(debug|info|warn|error) | `info` | Minimum event level written to the log. |
+| `logLevel` | `LOG_LEVEL` | enum(debug\|info\|warn\|error) | `info` | Minimum event level written to the log. |
 | `logRetentionDays` | `LOG_RETENTION_DAYS` | number | `30` | Days a log file is kept before deletion. |
 | `logGzipAfterDays` | `LOG_GZIP_AFTER_DAYS` | number | `7` | Days a log file is kept uncompressed before gzip. |
 | `logMaxTotalBytes` | `LOG_MAX_TOTAL_BYTES` | number | `1073741824` | Total bytes the log tree may occupy before the oldest files are swept. |
 | `logMaxFileBytes` | `LOG_MAX_FILE_BYTES` | number | `67108864` | Bytes a single log file may reach before it rolls over. |
-| `logIncludeBindValues` | `LOG_INCLUDE_BIND_VALUES` | boolean | `false` | Include SQL bind values in sql events. Off by default: bind values are application data. |
-| `traceSql` | `TRACE_SQL` | boolean | `false` | Emit a trace-level event for every compiled SQL statement. |
+| `logIncludeBindValues` | `LOG_INCLUDE_BIND_VALUES` | boolean | `false` | Include SQL bind values in sql events. Off by default: bind values are application data. Accepts true/false, 1/0, yes/no. |
+| `traceSql` | `TRACE_SQL` | boolean | `false` | Emit an event for every compiled SQL statement. Accepts true/false, 1/0, yes/no. |
 | `eventQueueCapacity` | `EVENT_QUEUE_CAPACITY` | number | `10000` | Depth of the in-process dropping queue that buffers events before they are flushed to disk. |
 | `eventFlushMs` | `EVENT_FLUSH_MS` | number | `250` | Interval in milliseconds between batched event-queue flushes. |
 | `s3BaseUrl` | `S3_BASE_URL` | optional-string | `(unset)` | Base URL of the S3 (or S3-compatible) bucket for backups. Absent selects the local object-store stand-in. |

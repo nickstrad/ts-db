@@ -7,7 +7,8 @@
  *
  * `OPTIONS` is the one place every option is declared: name, env var, type, default, description.
  * Adding an option is adding one row here plus wiring its decoded value into `assemble`'s return
- * object — no other plumbing changes. `tests/unit/config_test.ts` checks the README "Configuration"
+ * object — the wiring keys are type-checked against the table, so a typo'd key is a compile
+ * error. `tests/unit/config_test.ts` checks the README "Configuration"
  * section against this table mechanically (`renderOptionsTable`), so the two cannot drift silently.
  *
  * Effect Schema (`effect/Schema`) enforces every per-option rule used here (number/boolean/enum
@@ -31,6 +32,20 @@ import {
 
 const EVENT_LEVELS = ["debug", "info", "warn", "error"] as const;
 const DEV_TOKEN_DEFAULT = "dev-only";
+
+/**
+ * Boolean decoder: "true"/"false" are primary, but "1"/"0" and "yes"/"no" are accepted
+ * too — `TRACE_SQL=1` is the long-standing documented spelling (README/SKIM), so rejecting
+ * it would contradict the docs. Empty string never reaches here (`readOption` treats it
+ * as unset).
+ */
+const BooleanFromLenientString = Schema.Literal("true", "false", "1", "0", "yes", "no").pipe(
+  Schema.transform(Schema.Boolean, {
+    strict: true,
+    decode: (s) => s === "true" || s === "1" || s === "yes",
+    encode: (b) => (b ? "true" : "false"),
+  }),
+);
 
 type OptionType = "string" | "optional-string" | "number" | "boolean" | "enum";
 
@@ -56,7 +71,7 @@ export interface OptionSpec {
  * The options table. Order groups options by the `ConfigService` section they feed, matching
  * `platform/services.ts`'s field order within each section.
  */
-export const OPTIONS: readonly OptionSpec[] = [
+export const OPTIONS = [
   // --- server ---
   {
     name: "port",
@@ -67,8 +82,8 @@ export const OPTIONS: readonly OptionSpec[] = [
     description: "HTTP server port.",
   },
   {
-    name: "hostname",
-    envVar: "HOSTNAME",
+    name: "bindHost",
+    envVar: "BIND_HOST",
     type: "string",
     default: "127.0.0.1",
     defaultLabel: "127.0.0.1",
@@ -184,7 +199,8 @@ export const OPTIONS: readonly OptionSpec[] = [
     type: "boolean",
     default: false,
     defaultLabel: "false",
-    description: "Include SQL bind values in sql events. Off by default: bind values are application data.",
+    description:
+      "Include SQL bind values in sql events. Off by default: bind values are application data. Accepts true/false, 1/0, yes/no.",
   },
   {
     name: "traceSql",
@@ -192,7 +208,7 @@ export const OPTIONS: readonly OptionSpec[] = [
     type: "boolean",
     default: false,
     defaultLabel: "false",
-    description: "Emit a trace-level event for every compiled SQL statement.",
+    description: "Emit an event for every compiled SQL statement. Accepts true/false, 1/0, yes/no.",
   },
   {
     name: "eventQueueCapacity",
@@ -273,20 +289,23 @@ export const OPTIONS: readonly OptionSpec[] = [
     description:
       "Persistent DuckDB file backing the ingested event log, resolved to an absolute path. Defaults to eventlog.duckdb inside DATA_DIR.",
   },
-];
+] as const satisfies readonly OptionSpec[];
 
 /** Renders `OPTIONS` as the exact markdown table the README "Configuration" section must contain. */
 export function renderOptionsTable(): string {
   const header = "| Option | Env var | Type | Default | Description |\n| --- | --- | --- | --- | --- |";
   const rows = OPTIONS.map((spec) => {
-    const type = spec.type === "enum" ? `enum(${spec.enumValues!.join("|")})` : spec.type;
+    const type = spec.type === "enum" ? `enum(${spec.enumValues!.join("\\|")})` : spec.type;
     return `| \`${spec.name}\` | \`${spec.envVar}\` | ${type} | \`${spec.defaultLabel}\` | ${spec.description} |`;
   });
   return [header, ...rows].join("\n");
 }
 
 type EnvRecord = Readonly<Record<string, string | undefined>>;
-type Decoded = Readonly<Record<string, string | number | boolean | undefined>>;
+/** The option names as a literal union, so a typo'd key in `assemble` is a compile
+ * error instead of silently reading `undefined`. */
+type OptionName = typeof OPTIONS[number]["name"];
+type Decoded = Readonly<Record<OptionName, string | number | boolean | undefined>>;
 
 function configError(envVar: string, reason: ConfigError["reason"], detail: string): ConfigError {
   return new ConfigError({ key: envVar, reason, detail });
@@ -312,12 +331,12 @@ function decodeScalar(
       );
     case "boolean":
       return Effect.mapError(
-        Schema.decodeUnknown(Schema.BooleanFromString)(raw),
+        Schema.decodeUnknown(BooleanFromLenientString)(raw),
         () =>
           configError(
             spec.envVar,
             "malformed",
-            `${spec.envVar} must be "true" or "false", got ${JSON.stringify(raw)}`,
+            `${spec.envVar} must be true/false, 1/0, or yes/no, got ${JSON.stringify(raw)}`,
           ),
       );
     case "enum":
@@ -344,21 +363,25 @@ function readOption(
 }
 
 function decodeAll(env: EnvRecord): Effect.Effect<Decoded, ConfigError> {
-  const effects: Record<string, Effect.Effect<string | number | boolean | undefined, ConfigError>> = {};
+  // Keyed by the literal option names so the decoded record matches `Decoded` exactly.
+  const effects = {} as Record<
+    OptionName,
+    Effect.Effect<string | number | boolean | undefined, ConfigError>
+  >;
   for (const spec of OPTIONS) effects[spec.name] = readOption(env, spec);
   return Effect.all(effects);
 }
 
-function str(values: Decoded, name: string): string {
+function str(values: Decoded, name: OptionName): string {
   return values[name] as string;
 }
-function optStr(values: Decoded, name: string): string | undefined {
+function optStr(values: Decoded, name: OptionName): string | undefined {
   return values[name] as string | undefined;
 }
-function num(values: Decoded, name: string): number {
+function num(values: Decoded, name: OptionName): number {
   return values[name] as number;
 }
-function bool(values: Decoded, name: string): boolean {
+function bool(values: Decoded, name: OptionName): boolean {
   return values[name] as boolean;
 }
 
@@ -401,15 +424,18 @@ function assemble(values: Decoded): Effect.Effect<ConfigService, ConfigError> {
     adminToken === DEV_TOKEN_DEFAULT || columnAppToken === DEV_TOKEN_DEFAULT ||
     jsonAppToken === DEV_TOKEN_DEFAULT
   ) {
-    // HOOK(item-07): emit a lifecycle warn-level event
+    // HOOK(item-07, item-22): emit a lifecycle warn-level event
     // { kind: "lifecycle", level: "warn", attrs: { message: "default dev-only token in use" } }
-    // via core/events.ts's EventSink once item 07 lands. This replaces today's unconditional
-    // console.error banner (platform/server.ts:84), removed when item 22 ports server.ts onto
-    // this Config; the dev-token defaults themselves keep working either way.
+    // via core/events.ts's EventSink once item 07 lands. OWNERSHIP: item 22 (server port) owns
+    // this as a named acceptance follow-up — when item 22 ports server.ts onto this Config it
+    // must emit this warning whenever a dev-only token default is in effect, replacing today's
+    // unconditional console.error banner (platform/server.ts:84). Not emitted here: EventSinkLive
+    // is item 11 and consumes Config, so emitting from inside ConfigLive would be a layer cycle.
+    // The dev-token defaults themselves keep working either way.
   }
 
   const server: ServerConfig = {
-    hostname: str(values, "hostname"),
+    hostname: str(values, "bindHost"),
     port: num(values, "port"),
     maxRequestBytes: num(values, "maxRequestBytes"),
     adminToken,
