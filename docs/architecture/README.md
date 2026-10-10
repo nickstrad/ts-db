@@ -8,12 +8,12 @@ Conventions, naming and the maintenance contract: [`AGENTS.md`](AGENTS.md).
 
 ## Index
 
-| Level | Diagram                        | What it shows                                                                                                                                                                                 | GitHub                                         | Terminal                                           |
-| ----- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- | -------------------------------------------------- |
-| 1     | System Context                 | The platform as one box: app developers, players, the operator, and the external object store, DuckDB analytics consumer and k6 load generator.                                               | [github](c4-context-document-db.github.md)     | [terminal](c4-context-document-db.terminal.md)     |
-| 2     | Container — request path       | The server process, the DuckDB reader child process, the per-app SQLite files and the object store, and how a request and a backup move between them.                                         | [github](c4-container-platform.github.md)      | [terminal](c4-container-platform.terminal.md)      |
-| 2     | Container — observability path | Where events go: rotating JSONL log directories (built, item 11; the reader mounts its sink since item 16), the DuckDB event log and the `logs` CLI (planned), and k6 results (built, items 03/14).                                                 | [github](c4-container-observability.github.md) | [terminal](c4-container-observability.terminal.md) |
-| 3     | Component — server process     | The Effect services and layers inside the server: HTTP API, AppRegistry (planned); Backups, Storage, ReaderClient, ObjectStore, Logger/EventSink, Config and the pure `core/` kernel (built). | [github](c4-component-server.github.md)        | [terminal](c4-component-server.terminal.md)        |
+| Level | Diagram                        | What it shows                                                                                                                                                                                       | GitHub                                         | Terminal                                           |
+| ----- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- | -------------------------------------------------- |
+| 1     | System Context                 | The platform as one box: app developers, players, the operator, and the external object store, DuckDB analytics consumer and k6 load generator.                                                     | [github](c4-context-document-db.github.md)     | [terminal](c4-context-document-db.terminal.md)     |
+| 2     | Container — request path       | The server process, the DuckDB reader child process, the per-app SQLite files and the object store, and how a request and a backup move between them.                                               | [github](c4-container-platform.github.md)      | [terminal](c4-container-platform.terminal.md)      |
+| 2     | Container — observability path | Where events go: rotating JSONL log directories (built, item 11; the reader mounts its sink since item 16), the DuckDB event log and the `logs` CLI (planned), and k6 results (built, items 03/14). | [github](c4-container-observability.github.md) | [terminal](c4-container-observability.terminal.md) |
+| 3     | Component — server process     | The Effect services and layers inside the server: HTTP API, AppRegistry (planned); Backups, Storage, ReaderClient, ObjectStore, Logger/EventSink, Config and the pure `core/` kernel (built).       | [github](c4-component-server.github.md)        | [terminal](c4-component-server.terminal.md)        |
 
 Level 2 is split in two so neither picture is cluttered; together they cover one container set.
 
@@ -46,13 +46,13 @@ ReaderClient, ObjectStore) were in progress at the audit; items 15 (Storage), 16
   process is still the pre-port code (item 22).
 - The Level 2 observability path is **half built**: the JSONL log directories and the layer that writes them
   are real (item 11), and the reader mounts it at runtime since item 16 — a running reader now appends to
-  `<LOG_DIR>/reader/`. The server does not mount it until item 22. The DuckDB event log, the `logs` CLI and the retention sweeper are planned (items 21, 23, 24).
-- Level 3 is **built from the bottom up**: the `core/` kernel (items 02, 04–09), `Config` (item 08),
-  `Storage` (item 15), `Logger + EventSink` (item 11), `ObjectStore` (item 18), `ReaderClient`
-  (item 17) and `Backups` (item 19) exist as Effect layers with tests. The `HTTP API` and `AppRegistry`
-  services and the `PlatformLive`
-  composition are planned (item 22), and
-  `platform/server.ts` does not yet mount the landed layers.
+  `<LOG_DIR>/reader/`. The server does not mount it until item 22. The DuckDB event log, the `logs` CLI and
+  the retention sweeper are planned (items 21, 23, 24).
+- Level 3 is **built from the bottom up**: the `core/` kernel (items 02, 04–09), `Config` (item 08), `Storage`
+  (item 15), `Logger + EventSink` (item 11), `ObjectStore` (item 18), `ReaderClient` (item 17) and `Backups`
+  (item 19) exist as Effect layers with tests. The `HTTP API` and `AppRegistry` services and the
+  `PlatformLive` composition are planned (item 22), and `platform/server.ts` does not yet mount the landed
+  layers.
 
 ## Not drawn yet
 
