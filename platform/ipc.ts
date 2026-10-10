@@ -1,17 +1,20 @@
-/** Small JSON-lines transport. Only trusted named handler requests cross it. */
+import { Either } from "effect";
+import { decoder } from "../core/ipc/framing.ts";
+
+/**
+ * Small JSON-lines transport. Only trusted named handler requests cross it.
+ * Decoding from bytes happens here, at the stream boundary; the buffering and framing rules live
+ * in the pure `decoder` (`core/ipc/framing.ts`).
+ */
 export async function* lines(stream: ReadableStream<Uint8Array>): AsyncGenerator<string> {
-  let buffer = "";
+  const decode = decoder();
   for await (const chunk of stream.pipeThrough(new TextDecoderStream())) {
-    buffer += chunk;
-    let newline: number;
-    while ((newline = buffer.indexOf("\n")) >= 0) {
-      const line = buffer.slice(0, newline);
-      buffer = buffer.slice(newline + 1);
-      if (line) yield line;
-    }
-    if (buffer.length > 2_000_000) throw new Error("IPC message too large");
+    const result = decode.push(chunk);
+    if (Either.isLeft(result)) throw result.left;
+    yield* result.right;
   }
-  if (buffer.trim()) throw new Error("Truncated IPC message");
+  const result = decode.finish();
+  if (Either.isLeft(result)) throw result.left;
 }
 export type ReaderRequest = { kind: "ping" } | { kind: "query"; appId: string; name: string; args: unknown };
 
