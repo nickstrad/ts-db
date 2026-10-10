@@ -13,8 +13,8 @@
  * event for `get`, because `BackupPhase` in `core/errors.ts` has no read phase. Both carry key, bytes,
  * duration and outcome. This module reads no environment variables; `platform/config.ts` is the only reader.
  */
-import { dirname, resolve } from "node:path";
-import { Cause, Clock, Duration, Effect, Exit, HashMap, Layer, Option, Schedule } from "effect";
+import { dirname, resolve, sep } from "node:path";
+import { Cause, Clock, Duration, Effect, Exit, FiberId, HashMap, Layer, Option, Schedule } from "effect";
 import { ConfigError, InvalidKeyError, type KeyFailure, ObjectStoreError } from "../core/errors.ts";
 import {
   backupEvent,
@@ -40,11 +40,21 @@ import {
 
 const KEY_PATTERN = /^[A-Za-z0-9_./-]+$/;
 
-/** Why `key` is not a legal object key, or `undefined` when it is. Pure. */
+/**
+ * Why `key` is not a legal object key, or `undefined` when it is. Pure.
+ *
+ * Every `/`-separated segment must be a real name: `..` and `.` are path-relative (both resolve out of
+ * or onto the base), and an empty segment (`a//b`, `a/`) is a different key to some backends and the
+ * same one to others. The `KeyFailure` taxonomy is frozen by ADR 0002, so `.` is reported as
+ * `parent-traversal` and an empty segment as `illegal-character`.
+ */
 export function keyFailure(key: string): KeyFailure | undefined {
   if (!KEY_PATTERN.test(key)) return "illegal-character";
-  if (key.split("/").includes("..")) return "parent-traversal";
+  const segments = key.split("/");
+  if (segments.includes("..")) return "parent-traversal";
   if (key.startsWith("/")) return "absolute-path";
+  if (segments.includes(".")) return "parent-traversal";
+  if (segments.includes("")) return "illegal-character";
   return undefined;
 }
 
@@ -66,10 +76,17 @@ interface Instrumentation {
   readonly ids: IdGenService;
 }
 
-/** A log annotation (`traceId`, `appId`) as the logger reads it, so object events join their request. */
-function annotation(annotations: HashMap.HashMap<string, unknown>, key: string): string | undefined {
-  const value = Option.getOrUndefined(HashMap.get(annotations, key));
-  return typeof value === "string" && value !== "" ? value : undefined;
+/**
+ * A log annotation (`traceId`/`trace_id`, `appId`/`app_id`) read under the same names and coercions as
+ * `recordFromLogEntry`, so object events join their request.
+ */
+function annotation(annotations: HashMap.HashMap<string, unknown>, ...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = Option.getOrUndefined(HashMap.get(annotations, key));
+    if (typeof value === "string" && value !== "") return value;
+    if (typeof value === "number") return String(value);
+  }
+  return undefined;
 }
 
 /**
@@ -89,6 +106,7 @@ function instrument<A>(
     const exit = yield* Effect.exit(run);
     const finishedAt = yield* Clock.currentTimeMillis;
     const annotations = yield* Effect.logAnnotations;
+    const fiber = FiberId.threadName(yield* Effect.fiberId);
     const eventId = yield* deps.ids.next;
     const ok = Exit.isSuccess(exit);
     const error = ok ? undefined : Option.getOrUndefined(Cause.failureOption(exit.cause));
@@ -100,9 +118,9 @@ function instrument<A>(
       level: ok ? "info" : "error",
       role: deps.role,
       pid: Deno.pid,
-      traceId: annotation(annotations, "traceId") ?? "object-store",
-      spanId: annotation(annotations, "spanId"),
-      appId: annotation(annotations, "appId"),
+      traceId: annotation(annotations, "traceId", "trace_id") ?? fiber,
+      spanId: annotation(annotations, "spanId", "span_id"),
+      appId: annotation(annotations, "appId", "app_id"),
     };
     const durationMs = finishedAt - startedAt;
     const outcome = ok ? "ok" : "error";
@@ -182,14 +200,25 @@ export function makeObjectStoreLocal(options: ObjectStoreOptions = {}): ObjectSt
         ids: yield* IdGen,
       };
       const root = resolve(config.objectStore.localDir);
+      const rootPrefix = root.endsWith(sep) ? root : root + sep;
+
+      /**
+       * Defence in depth behind `keyFailure`: the resolved path must be strictly inside `root`, so a key
+       * the validator ever let through still cannot write or read outside (or at) the base directory.
+       */
+      const localPath = (key: string): Effect.Effect<string, InvalidKeyError> => {
+        const file = resolve(root, key);
+        return file.startsWith(rootPrefix)
+          ? Effect.succeed(file)
+          : Effect.fail(new InvalidKeyError({ key, reason: "parent-traversal" }));
+      };
 
       const fail = (operation: ObjectOperation, key: string) => (cause: unknown) =>
         new ObjectStoreError({ operation, key, cause, detail: String(cause) });
 
-      const publish = (key: string, bytes: Uint8Array) =>
+      const publish = (key: string, file: string, bytes: Uint8Array) =>
         Effect.tryPromise({
           try: async () => {
-            const file = resolve(root, key);
             await fs.mkdir(dirname(file), { recursive: true });
             const tmp = `${file}.${crypto.randomUUID()}.tmp`;
             try {
@@ -211,7 +240,10 @@ export function makeObjectStoreLocal(options: ObjectStoreOptions = {}): ObjectSt
             "put",
             key,
             bytes.byteLength,
-            Effect.flatMap(validateKey(key), () => publish(key, bytes)),
+            validateKey(key).pipe(
+              Effect.flatMap(localPath),
+              Effect.flatMap((file) => publish(key, file, bytes)),
+            ),
             () => bytes.byteLength,
           ),
         get: (key) =>
@@ -220,13 +252,14 @@ export function makeObjectStoreLocal(options: ObjectStoreOptions = {}): ObjectSt
             "get",
             key,
             undefined,
-            Effect.flatMap(
-              validateKey(key),
-              () =>
+            validateKey(key).pipe(
+              Effect.flatMap(localPath),
+              Effect.flatMap((file) =>
                 Effect.tryPromise({
-                  try: () => fs.readFile(resolve(root, key)),
+                  try: () => fs.readFile(file),
                   catch: fail("get", key),
-                }),
+                })
+              ),
             ),
             (value) => value.byteLength,
           ),
@@ -256,10 +289,18 @@ class HttpFailure extends Error {
   }
 }
 
-/** Network errors, timeouts, throttling and server faults may succeed on a retry; other 4xx will not. */
+/**
+ * Network errors, timeouts, throttling and server faults may succeed on a retry; other 4xx and the
+ * permanent 501 will not. S3 reports a slow upload as `400 RequestTimeout`, which is transient.
+ * `403 RequestTimeTooSkewed` is deliberately not retried: re-signing reuses the same local clock, so
+ * the skew persists and retrying only delays the failure.
+ */
 function isTransient(error: ObjectStoreError): boolean {
   const status = error.status;
-  return status === undefined || status === 429 || status >= 500;
+  if (status === undefined) return true;
+  if (status === 400) return /<Code>RequestTimeout<\/Code>/.test(error.detail ?? "");
+  return status === 408 || status === 429 || status === 500 || status === 502 || status === 503 ||
+    status === 504;
 }
 
 /** Signed S3 (or S3-compatible) client; `aws4fetch` is imported when the layer is built. */
@@ -302,7 +343,9 @@ export function makeObjectStoreS3(options: ObjectStoreOptions = {}): ObjectStore
       const base = s3BaseUrl.replace(/\/$/, "");
       const url = (key: string) => `${base}/${key.split("/").map(encodeURIComponent).join("/")}`;
       const send = options.fetch ?? ((request: Request, init?: RequestInit) => fetch(request, init));
+      // Jittered so concurrent writers backing off from the same throttle do not retry in lockstep.
       const schedule = Schedule.exponential(options.retryBase ?? DEFAULT_RETRY_BASE).pipe(
+        Schedule.jittered,
         Schedule.intersect(Schedule.recurs(RETRIES)),
       );
 

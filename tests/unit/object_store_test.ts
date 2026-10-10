@@ -132,6 +132,17 @@ const INVALID_KEYS: ReadonlyArray<readonly [string, string, KeyFailure]> = [
   ["embedded parent", "a/../../b", "parent-traversal"],
   ["trailing parent", "a/b/..", "parent-traversal"],
   ["leading slash", "/etc/passwd", "absolute-path"],
+  ["bare slash", "/", "absolute-path"],
+  ["bare dot", ".", "parent-traversal"],
+  ["dot and slash", "./", "parent-traversal"],
+  ["dot, slash, dot", "./.", "parent-traversal"],
+  ["leading dot segment", "./a", "parent-traversal"],
+  ["embedded dot segment", "a/./b", "parent-traversal"],
+  ["trailing dot segment", "a/.", "parent-traversal"],
+  ["parent after dot segment", "a/./../b", "parent-traversal"],
+  ["empty segment", "a//b", "illegal-character"],
+  ["trailing slash", "a/", "illegal-character"],
+  ["double trailing slash", "a//", "illegal-character"],
 ];
 
 for (const [label, key, reason] of INVALID_KEYS) {
@@ -157,7 +168,16 @@ for (const [label, key, reason] of INVALID_KEYS) {
 }
 
 test("keyFailure accepts the key shapes the platform generates", () => {
-  for (const key of ["a", "app/2026-10-10T12-00-00Z-ab12.sqlite", "tic-tac-toe/latest.json", "a.b_c/d-e"]) {
+  for (
+    const key of [
+      "a",
+      "app/2026-10-10T12-00-00Z-ab12.sqlite",
+      "tic-tac-toe/latest.json",
+      "a.b_c/d-e",
+      ".hidden",
+      "a/..b/c.",
+    ]
+  ) {
     assert.equal(keyFailure(key), undefined, key);
   }
 });
@@ -313,15 +333,15 @@ function stubFetch(responses: ReadonlyArray<Response | Error>) {
 
 const s3Options = (fetch: typeof globalThis.fetch): ObjectStoreOptions => ({ fetch, retryBase: "1 millis" });
 
-test("s3: put signs and sends a PUT to the base-relative, encoded URL", async () => {
+test("s3: put signs and sends a PUT to the base-relative URL", async () => {
   const stub = stubFetch([new Response(null, { status: 200 })]);
   const h = harness(S3, makeObjectStoreS3, s3Options(stub.fetch));
-  const exit = await exec(h, put("app/snap one.bin".replace(" ", "-"), enc.encode("payload")));
+  const exit = await exec(h, put("app/snap-one_v1.bin", enc.encode("payload")));
   assert.ok(Exit.isSuccess(exit));
   assert.equal(stub.calls.length, 1);
   const [call] = stub.calls;
   assert.equal(call.method, "PUT");
-  assert.equal(call.url, "https://s3.example.test/bucket/app/snap-one.bin");
+  assert.equal(call.url, "https://s3.example.test/bucket/app/snap-one_v1.bin");
   assert.match(call.authorization ?? "", /^AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE\//);
   assert.equal(call.contentType, "application/octet-stream");
   assert.equal(dec.decode(call.body), "payload");
@@ -358,6 +378,26 @@ test("s3: get of a missing object maps 404 without retrying", async () => {
   assert.equal(error.status, 404);
   assert.equal(error.detail, "NoSuchKey");
   assert.equal(stub.calls.length, 1);
+});
+
+test("s3: a 501 is permanent and is not retried", async () => {
+  const stub = stubFetch([new Response("NotImplemented", { status: 501 })]);
+  const h = harness(S3, makeObjectStoreS3, s3Options(stub.fetch));
+  const error = failureOf(await exec(h, put("a.bin", enc.encode("x"))));
+  assert.ok(error instanceof ObjectStoreError);
+  assert.equal(error.status, 501);
+  assert.equal(stub.calls.length, 1);
+});
+
+test("s3: a 400 RequestTimeout is transient and a later success wins", async () => {
+  const stub = stubFetch([
+    new Response("<Error><Code>RequestTimeout</Code></Error>", { status: 400 }),
+    new Response(null, { status: 200 }),
+  ]);
+  const h = harness(S3, makeObjectStoreS3, s3Options(stub.fetch));
+  const exit = await exec(h, put("a.bin", enc.encode("x")));
+  assert.ok(Exit.isSuccess(exit));
+  assert.equal(stub.calls.length, 2);
 });
 
 test("s3: a persistent 503 is retried three times, then surfaces as ObjectStoreError", async () => {
