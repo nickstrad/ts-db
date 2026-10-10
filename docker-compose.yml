@@ -1,0 +1,92 @@
+# Local development services for ts-db. Driven by the Makefile (`make help`); see docker/README.md.
+#
+# seaweedfs: a single-container SeaweedFS (master + volume + filer + S3 API) giving the platform an
+# S3-compatible object store at http://localhost:8333. DEV ONLY: the credentials below are public
+# test values and must never be reused anywhere real.
+
+name: tsdb
+
+services:
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.48 # pinned; bump deliberately (latest tag on Docker Hub as of 2026-10)
+    command:
+      - server
+      - -dir=/data
+      - -ip.bind=0.0.0.0
+      - -master.volumeSizeLimitMB=128 # small volumes: dev data is tiny, and each bucket claims several
+      - -volume.max=100 # default (8) is exhausted by one bucket's initial volume growth
+      - -s3
+      - -s3.config=/etc/seaweedfs/s3.json
+    ports:
+      - "8333:8333" # S3 API (what S3_BASE_URL points at)
+      - "9333:9333" # master (debug UI / cluster status)
+      - "8888:8888" # filer (debug UI)
+      - "8080:8080" # volume server (debug)
+    volumes:
+      - seaweedfs-data:/data
+    configs:
+      - source: seaweedfs-s3
+        target: /etc/seaweedfs/s3.json
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+    healthcheck:
+      # Ready = master answers AND the S3 gateway answers. wget exits non-zero on HTTP >= 400.
+      test:
+        - CMD-SHELL
+        - wget -q -O /dev/null http://localhost:9333/cluster/healthz && wget -q -O /dev/null http://localhost:8333/healthz
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
+  # --- Adding another service -------------------------------------------------------------------
+  # Template for a future dev service (e.g. a local observability backend). Uncomment and adapt:
+  #
+  # otel-collector:
+  #   image: otel/opentelemetry-collector-contrib:<pinned-version>
+  #   ports:
+  #     - "4317:4317" # OTLP gRPC
+  #     - "4318:4318" # OTLP HTTP
+  #   volumes:
+  #     - otel-data:/var/lib/otel
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         cpus: "0.5"
+  #         memory: 512M
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:13133/ || exit 1"]
+  #     interval: 3s
+  #     timeout: 3s
+  #     retries: 20
+  #   depends_on:
+  #     seaweedfs:
+  #       condition: service_healthy # only if it needs the object store
+  #
+  # Then declare any new named volume under `volumes:` below. `make up` waits for every service that
+  # has a healthcheck, so give the new service one.
+
+configs:
+  # S3 identity for local dev, inlined so the compose file is self-contained. Static
+  # `-s3.config` is SeaweedFS's documented way to enable credential-based S3 access.
+  seaweedfs-s3:
+    content: |
+      {
+        "identities": [
+          {
+            "name": "tsdb-dev",
+            "credentials": [
+              { "accessKey": "tsdbdevkey", "secretKey": "tsdbdevsecret" }
+            ],
+            "actions": ["Admin", "Read", "List", "Tagging", "Write"]
+          }
+        ]
+      }
+
+volumes:
+  seaweedfs-data:
+    name: seaweedfs-data # literal name (not project-prefixed) so `docker volume ls` shows it as-is
