@@ -15,6 +15,7 @@
  */
 import { Effect } from "effect";
 import type { DbError } from "../core/errors.ts";
+import { MAX_LIMIT, MIN_LIMIT } from "../core/plan.ts";
 import type { Body, Document, Schema } from "./schema.ts";
 
 /** This is the intermediate representation. There is no SQL in the public SDK. */
@@ -66,7 +67,7 @@ export class Find<T> {
    * `normalise`, which is where this guard goes once that lands.
    */
   limit(limit: number): Find<T> {
-    if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new Error("Limit must be 1..1000");
+    if (!Number.isInteger(limit) || limit < MIN_LIMIT || limit > MAX_LIMIT) throw new Error(`Limit must be ${MIN_LIMIT}..${MAX_LIMIT}`);
     return new Find(this.execute, { ...this.plan, limit });
   }
   collect(): Effect.Effect<T[], DbError> {
