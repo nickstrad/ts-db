@@ -842,6 +842,56 @@ runTest(
   { skip: needsSqlite },
 );
 
+/**
+ * Known divergence 3 (see `StorageTest`'s module header): a lone surrogate in text. Live binds
+ * strings as UTF-8 and so replaces it with U+FFFD; the double keeps the JS string. Deliberately
+ * outside `conformanceScript()`, whose steps assert that the two agree.
+ */
+const LONE = "a\uD800b";
+const REPLACED = "a\uFFFDb";
+const loneSurrogate = cs.mutation({
+  args: {},
+  handler: ({ db }) =>
+    Effect.gen(function* () {
+      yield* db.insert("items", {
+        name: LONE,
+        rank: 1,
+        score: null,
+        active: true,
+        kind: "alpha",
+        tags: [LONE],
+        parent: null,
+      });
+      const [doc] = yield* db.find("items").collect();
+      const matched = yield* db.find("items", { name: LONE }).collect();
+      return { name: doc.name, tags: doc.tags, matches: matched.length };
+    }),
+});
+
+for (
+  const [target, layout, expected] of [
+    // Scalar text column: U+FFFD on read, and the bound filter is replaced alike, so `eq` matches.
+    ["live", "columns", { name: REPLACED, tags: [LONE], matches: 1 }],
+    // `doc` JSON text: `\ud800` round-trips, but `json_extract` decodes it and the bound filter is
+    // replaced, so `eq` misses the row.
+    ["live", "json", { name: LONE, tags: [LONE], matches: 0 }],
+    // The double is the divergence: the value round-trips and `eq` matches in both layouts.
+    ["double", "columns", { name: LONE, tags: [LONE], matches: 1 }],
+    ["double", "json", { name: LONE, tags: [LONE], matches: 1 }],
+  ] as const
+) {
+  runTest(
+    `conformance: known divergence 3, a lone surrogate (${target}, ${layout})`,
+    Effect.gen(function* () {
+      const { storage } = target === "live"
+        ? yield* openLive(layout, conformanceSchema)
+        : yield* openTest(layout, conformanceSchema);
+      assert.deepStrictEqual(yield* storage.mutation(loneSurrogate, {}), expected);
+    }),
+    { skip: target === "live" ? needsSqlite : false },
+  );
+}
+
 runTest(
   "conformance: the script is deterministic",
   Effect.gen(function* () {

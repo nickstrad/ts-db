@@ -54,11 +54,13 @@
  *    the stored text back as an exact INTEGER, so `eq x` misses the row. Here it matches.
  * 2. Text containing U+0000: `node:sqlite` truncates it on read. Here it round-trips.
  * 3. Text containing a lone surrogate (e.g. `"a\uD800b"`): `node:sqlite` binds strings as UTF-8,
- *    which replaces it with U+FFFD. In the `columns` layout the value reads back as `"a�b"`
- *    (and `eq "a\uD800b"` still matches, since the bound filter is replaced the same way). In the
- *    `json` layout `JSON.stringify` escapes it as `\ud800`, so it round-trips, but `json_extract`
- *    decodes the escape and the bound filter does not, so `eq "a\uD800b"` misses the row. Here the
- *    value round-trips and `eq` matches in both layouts.
+ *    which replaces it with U+FFFD. In the `columns` layout a scalar text column reads back as
+ *    `"a�b"` (and `eq "a\uD800b"` still matches, since the bound filter is replaced the same way);
+ *    array fields are stored there as JSON text, where `JSON.stringify` escapes it as `\ud800`, so
+ *    they round-trip. In the `json` layout the whole document is JSON text, so every value
+ *    round-trips, but `json_extract` decodes the escape and the bound filter does not, so
+ *    `eq "a\uD800b"` misses the row. Here the value round-trips and `eq` matches in both layouts.
+ *    Pinned by "known divergence 3" in `tests/core_test.ts`.
  *
  * No SQLite, no filesystem: `snapshot(path)` records the committed contents under `path` in
  * `MemoryStore.snapshots` (and runs `onSnapshot`, if given) instead of writing a file. Live
