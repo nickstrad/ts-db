@@ -1,107 +1,107 @@
-/** App-facing schema descriptors. Types are inferred; descriptors survive at runtime. */
-export type Node = {
-  kind: "string" | "number" | "integer" | "boolean" | "enum" | "array";
-  nullable?: boolean;
-  values?: readonly string[];
-  item?: Node;
-  length?: number;
-};
-export type Field<T = unknown> = { node: Node; readonly _type?: T };
-export type Fields = Record<string, Field>;
-export type Infer<F extends Fields> = { [K in keyof F]: F[K] extends Field<infer T> ? T : never };
-export type Storage = "columns" | "json";
+/**
+ * App-facing schema surface.
+ *
+ * The descriptors and the validation logic now live in `core/schema.ts`, where they are total:
+ * every rejection comes back as a `SchemaError` in an `Either`. This module is the compatibility
+ * seam for the pre-port, throwing API (plan item 04, work 3): it re-exports the core types and
+ * builders, and adds `*OrThrow` wrappers that render a `SchemaError` back into the exact `Error`
+ * message the old code produced. `platform/compiler.ts`, `platform/sqlite.ts` and
+ * `sdk/functions.ts` therefore compile untouched, via the legacy aliases at the bottom.
+ *
+ * `AppTable.index` and `defineTable`/`defineSchema` keep throwing for the same reason: they run at
+ * module load in `app/schema.ts`, which has nowhere to put an `Either`. Later items in the Effect
+ * port move those callers onto the core API and delete the wrappers.
+ */
+import { Either, Function as EffectFunction } from "effect";
+import type { SchemaError } from "../core/errors.ts";
+import * as Core from "../core/schema.ts";
+import { type Fields, type Infer, type Node, type Schema, type Storage, Table } from "../core/schema.ts";
 
-export const v = {
-  string: (): Field<string> => ({ node: { kind: "string" } }),
-  number: (): Field<number> => ({ node: { kind: "number" } }),
-  integer: (): Field<number> => ({ node: { kind: "integer" } }),
-  boolean: (): Field<boolean> => ({ node: { kind: "boolean" } }),
-  enum: <const T extends readonly [string, ...string[]]>(...values: T): Field<T[number]> =>
-    ({ node: { kind: "enum", values } }),
-  nullable: <T>(field: Field<T>): Field<T | null> =>
-    ({ node: { ...field.node, nullable: true } }),
-  array: <T>(item: Field<T>, length?: number): Field<T[]> =>
-    ({ node: { kind: "array", item: item.node, length } }),
-};
+export { Table, v, withStorage } from "../core/schema.ts";
+export type { Body, Document, Field, Fields, Index, Infer, Node, Schema, Storage } from "../core/schema.ts";
 
-export class Table<F extends Fields = Fields> {
-  constructor(
-    readonly fields: F,
-    readonly storage: Storage = "columns",
-    readonly indexes: readonly { name: string; fields: readonly string[] }[] = [],
-  ) {}
-  index(name: string, fields: readonly (keyof F & string)[]): Table<F> {
-    identifier(name);
-    if (!fields.length) throw new Error("An index needs at least one field");
-    for (const field of fields) {
-      if (!Object.hasOwn(this.fields, field) || this.fields[field].node.kind === "array") {
-        throw new Error(`Cannot index ${field}`);
-      }
+/**
+ * Renders a structured `SchemaError` into the pre-port message, verbatim — `tests/core_test.ts`
+ * asserts `/Unknown field/` and `/expected integer/` against these strings. The switch is total
+ * over `SchemaFailure`: adding a reason without a case here is a compile error.
+ */
+export function formatSchemaError(error: SchemaError): Error {
+  const message = ((): string => {
+    switch (error.reason) {
+      case "type-mismatch":
+        return `${error.path}: expected ${error.expected ?? "a valid value"}`;
+      case "not-an-object":
+        return "Expected an object";
+      case "unknown-field":
+        return `Unknown field: ${error.path}`;
+      case "invalid-identifier":
+        return `Invalid identifier: ${error.path}`;
+      case "reserved-field":
+        return `Reserved field: ${error.path}`;
+      case "reserved-table":
+        return `Reserved table: ${error.path}`;
+      case "empty-index":
+        return "An index needs at least one field";
+      case "unindexable-field":
+        return `Cannot index ${error.path}`;
+      case "duplicate-index":
+        return `Duplicate index ${error.path}`;
+      default:
+        return EffectFunction.absurd<string>(error.reason);
     }
-    if (this.indexes.some((i) => i.name === name)) throw new Error(`Duplicate index ${name}`);
-    return new Table(this.fields, this.storage, [...this.indexes, { name, fields }]);
-  }
-  storeAs(storage: Storage): Table<F> { return new Table(this.fields, storage, this.indexes); }
+  })();
+  return new Error(message, { cause: error });
 }
-export type Schema = Record<string, Table>;
-export type Document<S extends Schema, K extends keyof S> = Infer<S[K]["fields"]> & {
-  _id: string;
-  _creationTime: number;
-  _version: number;
-};
-export type Body<S extends Schema, K extends keyof S> = Infer<S[K]["fields"]>;
 
-export function identifier(name: string): string {
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error(`Invalid identifier: ${name}`);
-  return name;
+const orThrow = <A>(either: Either.Either<A, SchemaError>): A =>
+  Either.getOrThrowWith(either, formatSchemaError);
+
+/** `core/schema.ts`'s `identifier`, throwing `Invalid identifier: <name>` instead of returning a left. */
+export function identifierOrThrow(name: string): string {
+  return orThrow(Core.identifier(name));
 }
-export function defineTable<F extends Fields>(fields: F): Table<F> {
-  for (const name of Object.keys(fields)) {
-    identifier(name);
-    if (name.startsWith("_")) throw new Error(`Reserved field: ${name}`);
+
+/** `core/schema.ts`'s `validate`, throwing `<path>: expected <kind>[ or null]` instead of returning a left. */
+export function validateOrThrow(node: Node, value: unknown, path: string): unknown {
+  return orThrow(Core.validate(node, value, path));
+}
+
+/** `core/schema.ts`'s `parseObject`, throwing `Unknown field: <key>` and friends instead of returning a left. */
+export function parseObjectOrThrow<F extends Fields>(fields: F, input: unknown, partial = false): Infer<F> {
+  return orThrow(Core.parseObject(fields, input, partial));
+}
+
+/**
+ * A `Table` whose `index` throws, for schemas declared at module load. Identical data to
+ * `core/schema.ts`'s `Table`, so platform code that only reads `fields`/`storage`/`indexes` is
+ * unaffected by which of the two it is handed.
+ */
+export class AppTable<F extends Fields = Fields> extends Table<F> {
+  index(name: string, fields: readonly (keyof F & string)[]): AppTable<F> {
+    const next = orThrow(this.addIndex(name, fields));
+    return new AppTable(next.fields, next.storage, next.indexes);
   }
-  return new Table(fields);
+
+  override storeAs(storage: Storage): AppTable<F> {
+    return new AppTable(this.fields, storage, this.indexes);
+  }
 }
+
+/** Declares a table, throwing on a bad or reserved field name. */
+export function defineTable<F extends Fields>(fields: F): AppTable<F> {
+  return orThrow(
+    Either.map(
+      Core.defineTable(fields),
+      (table) => new AppTable(table.fields, table.storage, table.indexes),
+    ),
+  );
+}
+
+/** Validates a schema's table names, throwing on a bad or reserved one, and returns it unchanged. */
 export function defineSchema<S extends Schema>(schema: S): S {
-  for (const name of Object.keys(schema)) {
-    identifier(name);
-    if (name.startsWith("_") || name.toLowerCase().startsWith("sqlite_")) {
-      throw new Error(`Reserved table: ${name}`);
-    }
-  }
-  return schema;
-}
-export function withStorage<S extends Schema>(schema: S, storage: Storage): S {
-  return Object.fromEntries(Object.entries(schema).map(([k, t]) => [k, t.storeAs(storage)])) as S;
+  return orThrow(Core.defineSchema(schema));
 }
 
-export function validate(node: Node, value: unknown, path: string): unknown {
-  if (value === null && node.nullable) return null;
-  let valid = false;
-  switch (node.kind) {
-    case "string": valid = typeof value === "string"; break;
-    case "number": valid = typeof value === "number" && Number.isFinite(value); break;
-    case "integer": valid = typeof value === "number" && Number.isSafeInteger(value); break;
-    case "boolean": valid = typeof value === "boolean"; break;
-    case "enum": valid = typeof value === "string" && !!node.values?.includes(value); break;
-    case "array":
-      if (Array.isArray(value) && (node.length === undefined || value.length === node.length)) {
-        return value.map((x, i) => validate(node.item!, x, `${path}[${i}]`));
-      }
-  }
-  if (!valid) throw new Error(`${path}: expected ${node.kind}${node.nullable ? " or null" : ""}`);
-  return value;
-}
-export function parseObject<F extends Fields>(fields: F, input: unknown, partial = false): Infer<F> {
-  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("Expected an object");
-  const obj = input as Record<string, unknown>;
-  for (const key of Object.keys(obj)) {
-    if (!Object.hasOwn(fields, key)) throw new Error(`Unknown field: ${key}`);
-  }
-  const result: Record<string, unknown> = {};
-  for (const [key, field] of Object.entries(fields)) {
-    if (partial && !Object.hasOwn(obj, key)) continue;
-    result[key] = validate(field.node, obj[key], key);
-  }
-  return result as Infer<F>;
-}
+// Legacy aliases: the names `platform/` and `sdk/functions.ts` still import. Both the throwing
+// behaviour and the messages are unchanged from before the port.
+export { identifierOrThrow as identifier, parseObjectOrThrow as parseObject, validateOrThrow as validate };
