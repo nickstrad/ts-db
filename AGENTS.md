@@ -70,6 +70,23 @@ collocated here too, not in a separate folder. Full placement rules in
 writing a new script, and append a row to it when you add one** — over time this becomes the
 shared set of building blocks agents start from instead of re-creating.
 
+## Diagram maintenance (C4 architecture docs)
+
+`docs/architecture/` holds Simon Brown C4 diagrams for this project (see
+`docs/architecture/AGENTS.md` for the diagram conventions). After every plan item lands on
+`main`, the coordinator spawns a **follow-up docs agent** (Sonnet-class, docs-only) that:
+
+1. Reads the landed item's diff and decides which C4 diagrams it affects (new service, new
+   container/process, changed component boundaries, new external dependency).
+2. Updates the affected diagrams **in both formats** (GitHub/Mermaid version and the
+   terminal/glow version) to match the new code.
+3. Commits as `docs: update C4 diagrams for item NN` on `main` (pull --rebase first) and pushes.
+
+Diagrams must never drift from the code: a reviewer rejects a "diagrams current" claim that was
+not re-verified against the landed diff. If an item touches no diagram-relevant surface, the
+follow-up agent says so in one line in its commit message (`docs: item NN touches no C4 surface`)
+and moves on.
+
 ## Stopping-point convention
 
 Work proceeds item by item (or quest by quest) and stops at the item the human and coordinator
