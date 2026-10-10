@@ -1,0 +1,152 @@
+# ---------------------------------------------------------------------------
+# Deno
+# ---------------------------------------------------------------------------
+.deno/
+.deno_cache/
+deno_dir/
+# deno.lock is intentionally tracked; uncomment to ignore it
+# deno.lock
+
+# ---------------------------------------------------------------------------
+# Node / npm (deno.json has nodeModulesDir: auto)
+# ---------------------------------------------------------------------------
+node_modules/
+.npm/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+
+# ---------------------------------------------------------------------------
+# Build and bundle outputs
+# ---------------------------------------------------------------------------
+dist/
+build/
+out/
+.output/
+*.tsbuildinfo
+*.bundle.js
+*.bundle.js.map
+
+# ---------------------------------------------------------------------------
+# SQLite databases (incl. WAL / SHM / journal sidecars)
+# ---------------------------------------------------------------------------
+*.sqlite
+*.sqlite3
+*.db
+*.db3
+*.s3db
+*.sl3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
+*.db-wal
+*.db-shm
+*.db-journal
+*-wal
+*-shm
+*-journal
+
+# ---------------------------------------------------------------------------
+# DuckDB
+# ---------------------------------------------------------------------------
+*.duckdb
+*.duckdb.wal
+*.duckdb.tmp/
+
+# ---------------------------------------------------------------------------
+# Runtime data, backups, snapshots, object store
+# ---------------------------------------------------------------------------
+data/
+data-*/
+.data/
+object-store/
+object_store/
+objects/
+objstore/
+store/
+backups/
+snapshots/
+tmp/
+temp/
+*.bak
+*.backup
+*.snapshot
+
+# ---------------------------------------------------------------------------
+# Environment and secrets
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.key
+*.crt
+.aws/
+credentials
+secrets.*
+
+# ---------------------------------------------------------------------------
+# Test coverage
+# ---------------------------------------------------------------------------
+coverage/
+cov_profile/
+cov/
+*.lcov
+.nyc_output/
+junit.xml
+
+# ---------------------------------------------------------------------------
+# Logs
+# ---------------------------------------------------------------------------
+logs/
+*.log
+
+# ---------------------------------------------------------------------------
+# Editors and IDEs
+# ---------------------------------------------------------------------------
+.vscode/
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+.*.sw?
+.project
+.classpath
+.settings/
+*.sublime-workspace
+*.sublime-project
+.fleet/
+.history/
+
+# ---------------------------------------------------------------------------
+# OS files
+# ---------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+.AppleDouble
+.LSOverride
+Icon?
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# ---------------------------------------------------------------------------
+# Agent / tooling scratch
+# ---------------------------------------------------------------------------
+.claude/settings.local.json
+.codex/

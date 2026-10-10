@@ -1,0 +1,133 @@
+TAP version 13
+# (node:696) ExperimentalWarning: Type Stripping is an experimental feature and might change at any time
+# (Use `node --trace-warnings ...` to show where the warning was created)
+# (node:696) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+# Subtest: columns: create, complete game, aggregate wins, delete
+ok 1 - columns: create, complete game, aggregate wins, delete
+  ---
+  duration_ms: 20.373474
+  type: 'test'
+  ...
+# Subtest: columns: two competing moves cannot both commit
+ok 2 - columns: two competing moves cannot both commit
+  ---
+  duration_ms: 2.93423
+  type: 'test'
+  ...
+# Subtest: columns: rollback restores board, version, and move history
+ok 3 - columns: rollback restores board, version, and move history
+  ---
+  duration_ms: 2.25476
+  type: 'test'
+  ...
+# Subtest: columns: invalid arguments and illegal moves are rejected
+ok 4 - columns: invalid arguments and illegal moves are rejected
+  ---
+  duration_ms: 2.333071
+  type: 'test'
+  ...
+# Subtest: columns: quote-bearing strings stay data, not SQL
+ok 5 - columns: quote-bearing strings stay data, not SQL
+  ---
+  duration_ms: 1.91104
+  type: 'test'
+  ...
+# Subtest: columns: standalone backup includes uncheckpointed WAL commits
+ok 6 - columns: standalone backup includes uncheckpointed WAL commits
+  ---
+  duration_ms: 2.405627
+  type: 'test'
+  ...
+# Subtest: columns: schema drift fails rather than silently migrating
+ok 7 - columns: schema drift fails rather than silently migrating
+  ---
+  duration_ms: 1.387351
+  type: 'test'
+  ...
+# Subtest: json: create, complete game, aggregate wins, delete
+ok 8 - json: create, complete game, aggregate wins, delete
+  ---
+  duration_ms: 5.452479
+  type: 'test'
+  ...
+# Subtest: json: two competing moves cannot both commit
+ok 9 - json: two competing moves cannot both commit
+  ---
+  duration_ms: 2.076267
+  type: 'test'
+  ...
+# Subtest: json: rollback restores board, version, and move history
+ok 10 - json: rollback restores board, version, and move history
+  ---
+  duration_ms: 1.883385
+  type: 'test'
+  ...
+# Subtest: json: invalid arguments and illegal moves are rejected
+ok 11 - json: invalid arguments and illegal moves are rejected
+  ---
+  duration_ms: 2.13511
+  type: 'test'
+  ...
+# Subtest: json: quote-bearing strings stay data, not SQL
+ok 12 - json: quote-bearing strings stay data, not SQL
+  ---
+  duration_ms: 1.446815
+  type: 'test'
+  ...
+# Subtest: json: standalone backup includes uncheckpointed WAL commits
+ok 13 - json: standalone backup includes uncheckpointed WAL commits
+  ---
+  duration_ms: 1.46334
+  type: 'test'
+  ...
+# Subtest: json: schema drift fails rather than silently migrating
+ok 14 - json: schema drift fails rather than silently migrating
+  ---
+  duration_ms: 1.666391
+  type: 'test'
+  ...
+# Subtest: each app file has its own data, even when IDs collide
+ok 15 - each app file has its own data, even when IDs collide
+  ---
+  duration_ms: 2.987749
+  type: 'test'
+  ...
+# Subtest: same logical plan generates both dialects and both storage layouts
+ok 16 - same logical plan generates both dialects and both storage layouts
+  ---
+  duration_ms: 0.360647
+  type: 'test'
+  ...
+# Subtest: array predicates and unknown fields fail instead of falling back to JS scans
+ok 17 - array predicates and unknown fields fail instead of falling back to JS scans
+  ---
+  duration_ms: 0.422961
+  type: 'test'
+  ...
+# Subtest: JSON numeric queries cast extracted values; null uses IS NULL
+ok 18 - JSON numeric queries cast extracted values; null uses IS NULL
+  ---
+  duration_ms: 0.331605
+  type: 'test'
+  ...
+# Subtest: decoder normalizes DuckDB BIGINT results to safe JS numbers
+ok 19 - decoder normalizes DuckDB BIGINT results to safe JS numbers
+  ---
+  duration_ms: 0.149071
+  type: 'test'
+  ...
+# Subtest: schema compiler emits indexes for either physical layout
+ok 20 - schema compiler emits indexes for either physical layout
+  ---
+  duration_ms: 0.188932
+  type: 'test'
+  ...
+1..20
+# tests 20
+# suites 0
+# pass 20
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 510.540224

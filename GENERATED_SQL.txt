@@ -1,0 +1,56 @@
+QUERY PLAN {
+  "kind": "select",
+  "table": "games",
+  "limit": 20,
+  "filters": [
+    {
+      "field": "status",
+      "op": "eq",
+      "value": "playing"
+    }
+  ],
+  "order": {
+    "field": "_creationTime",
+    "direction": "desc"
+  }
+}
+
+COLUMNS DDL
+CREATE TABLE IF NOT EXISTS "games" ("_id" TEXT PRIMARY KEY NOT NULL, "_creationTime" INTEGER NOT NULL, "_version" INTEGER NOT NULL CHECK ("_version" >= 1), "xPlayer" TEXT NOT NULL, "oPlayer" TEXT NOT NULL, "board" TEXT NOT NULL CHECK ("board" IS NULL OR json_valid("board")), "turn" TEXT NOT NULL CHECK ("turn" IN ('X', 'O')), "status" TEXT NOT NULL CHECK ("status" IN ('playing', 'won', 'draw')), "winner" TEXT CHECK ("winner" IN ('X', 'O'))) STRICT;
+CREATE INDEX IF NOT EXISTS "idx_games_by_status" ON "games" ("status");
+CREATE TABLE IF NOT EXISTS "moves" ("_id" TEXT PRIMARY KEY NOT NULL, "_creationTime" INTEGER NOT NULL, "_version" INTEGER NOT NULL CHECK ("_version" >= 1), "gameId" TEXT NOT NULL, "playerId" TEXT NOT NULL, "mark" TEXT NOT NULL CHECK ("mark" IN ('X', 'O')), "cell" INTEGER NOT NULL, "moveNumber" INTEGER NOT NULL) STRICT;
+CREATE INDEX IF NOT EXISTS "idx_moves_by_game" ON "moves" ("gameId", "moveNumber");
+sqlite {
+  "text": "SELECT * FROM \"games\" WHERE \"status\" = ? ORDER BY \"_creationTime\" DESC NULLS LAST, \"_id\" ASC LIMIT ?",
+  "values": [
+    "playing",
+    20
+  ]
+}
+duckdb {
+  "text": "SELECT * FROM \"app\".\"games\" WHERE \"status\" = $p1 ORDER BY \"_creationTime\" DESC NULLS LAST, \"_id\" ASC LIMIT $p2",
+  "values": [
+    "playing",
+    20
+  ]
+}
+
+JSON DDL
+CREATE TABLE IF NOT EXISTS "games" ("_id" TEXT PRIMARY KEY NOT NULL, "_creationTime" INTEGER NOT NULL, "_version" INTEGER NOT NULL CHECK ("_version" >= 1), "doc" TEXT NOT NULL CHECK (json_valid("doc"))) STRICT;
+CREATE INDEX IF NOT EXISTS "idx_games_by_status" ON "games" (json_extract("doc", '$.status'));
+CREATE TABLE IF NOT EXISTS "moves" ("_id" TEXT PRIMARY KEY NOT NULL, "_creationTime" INTEGER NOT NULL, "_version" INTEGER NOT NULL CHECK ("_version" >= 1), "doc" TEXT NOT NULL CHECK (json_valid("doc"))) STRICT;
+CREATE INDEX IF NOT EXISTS "idx_moves_by_game" ON "moves" (json_extract("doc", '$.gameId'), json_extract("doc", '$.moveNumber'));
+sqlite {
+  "text": "SELECT * FROM \"games\" WHERE json_extract(\"doc\", '$.status') = ? ORDER BY \"_creationTime\" DESC NULLS LAST, \"_id\" ASC LIMIT ?",
+  "values": [
+    "playing",
+    20
+  ]
+}
+duckdb {
+  "text": "SELECT * FROM \"app\".\"games\" WHERE json_extract_string(\"doc\", '$.status') = $p1 ORDER BY \"_creationTime\" DESC NULLS LAST, \"_id\" ASC LIMIT $p2",
+  "values": [
+    "playing",
+    20
+  ]
+}
