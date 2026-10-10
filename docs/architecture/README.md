@@ -32,11 +32,13 @@ This repo is mid-way through the Effect-TS port and observability plan in
 [`../plans/effect-port-and-observability.md`](../plans/effect-port-and-observability.md). These
 diagrams draw the **target** architecture from that plan. Anything not on `main` yet is marked
 `(planned)` in its label *and* drawn with a dashed border, usually with the plan item number that
-delivers it. As of the first batch of diagrams only item 01 (dependency pins and tasks) had landed,
-so:
+delivers it. As of the first batch of diagrams, plan items 01 (dependency pins and tasks), 02
+(error taxonomy and service tags) and 03 (k6 install and smoke scenario) had landed, so:
 
 - Level 1 and the Level 2 request path are mostly **built** — the container topology does not change.
-- The Level 2 observability path and all of Level 3 are mostly **planned**.
+- The Level 2 observability path is mostly **planned**; the k6 results directory is real.
+- Level 3 is almost entirely **planned**: item 02 landed the error taxonomy and the service tags,
+  so the bottom tier of the diagram is the contract the implementations will be written against.
 
 ## Not drawn yet
 

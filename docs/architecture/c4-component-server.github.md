@@ -13,9 +13,11 @@ depend on each other. Read it bottom-up: `core/` is pure, `Config` is the only t
 the environment, and each tier above is provided by the tiers below it. `platform/layers.ts`
 composes the whole stack as `PlatformLive`.
 
-**Every component in this diagram is planned.** The code exists today as classes and top-level
-`await` in `platform/*.ts`; the plan item number in each box says which item turns it into a
-service. Plan: [`docs/plans/effect-port-and-observability.md`](../plans/effect-port-and-observability.md),
+**Almost every component in this diagram is planned.** Item 02 landed the bottom tier — the
+`core/errors.ts` tagged-error taxonomy and the `platform/services.ts` `Context.Tag` declarations —
+so the contract exists but no implementation sits behind it yet. Everything above it is still the
+pre-port code: classes and top-level `await` in `platform/*.ts`. The plan item number in each box
+says which item turns it into a service. Plan: [`docs/plans/effect-port-and-observability.md`](../plans/effect-port-and-observability.md),
 §1.2 for the service table and §1.3 for the error channel.
 
 ```mermaid
@@ -29,7 +31,7 @@ flowchart TB
         registry["<b>AppRegistry</b> (planned, item 22)<br/><code>platform/registry.ts</code><br/>appId → schema, functions, token and<br/>file path; no Deno.env of its own"]
         logger["<b>Logger + EventSink</b> (planned, item 11)<br/><code>platform/logging/{logger,file_sink,retention}.ts</code><br/>Effect Logger replaced by a JSONL sink;<br/>dropping queue, never fails a mutation;<br/>retention sweeper fiber (item 24)"]
         config["<b>Config</b> (planned, item 08)<br/><code>platform/config.ts</code><br/>The only module that reads Deno.env. One options table<br/>(name, env var, type, default) validated with Effect Schema;<br/>fails at layer construction, not at first use"]
-        core["<b>core/ — pure kernel</b> (planned, items 02, 04-09)<br/><code>errors.ts schema.ts plan.ts events.ts</code><br/><code>compile/{dialect,ddl,select,write,decode}.ts</code><br/><code>logging/rotation.ts ipc/framing.ts eventlog/{ddl,offsets}.ts</code><br/>No Deno.*, no node:*, no npm:*, no platform/ or sdk/ imports"]
+        core["<b>core/ — pure kernel</b> + <b>platform/services.ts</b> (items 02, 04-09)<br/>landed (item 02): <code>core/errors.ts</code>, <code>platform/services.ts</code><br/>planned: <code>schema.ts plan.ts events.ts</code>,<br/><code>compile/{dialect,ddl,select,write,decode}.ts</code>,<br/><code>logging/rotation.ts ipc/framing.ts eventlog/{ddl,offsets}.ts</code><br/>No Deno.*, no node:*, no npm:*, no platform/ or sdk/ imports"]
     end
 
     files[("App SQLite files<br/>[SQLite 3, WAL]")]

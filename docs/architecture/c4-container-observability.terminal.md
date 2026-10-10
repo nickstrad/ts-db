@@ -12,8 +12,9 @@ The request and backup path is the companion Level 2 diagram:
 Where platform events go: the rotating JSONL files both processes append to, the DuckDB file they
 are materialised into, the k6 output that joins against them, and the CLI that queries the result.
 
-**Almost everything in this diagram is planned.** The two processes exist; the log directories,
-the DuckDB event log, the k6 results and the `logs` CLI are plan items 11, 21, 23, 24 and 03/14 of
+**Most of this diagram is planned.** The two processes and the k6 results directory exist; the
+log directories,
+the DuckDB event log and the `logs` CLI are plan items 11, 21, 23 and 24 of
 `docs/plans/effect-port-and-observability.md`. Today the platform's only observability surface is
 `TRACE_SQL=1`, which prints SQL to stderr from `platform/registry.ts:trace` — the event log
 replaces it.
@@ -44,15 +45,15 @@ replaces it.
 ╎  └┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┬┄┄┄┄┄┄┄┄┄┄┄┄┄┄┘ ╎
 ╎                                                     │ (3)            ╎
 ╎                                                     ▼                ╎
-╎  ┌┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┐       ┌┄┄┄┄┄┄┄┄┄┄┄┄┄┬┄┄┄┄┄┄┄┄┄┄┄┄┄┄┐ ╎
-╎  ┆ k6 results  (items 03,     ┆       ┆ DuckDB event log           ┆ ╎
-╎  ┆ 14)  [filesystem]          ┆       ┆ (item 21) [DuckDB file]    ┆ ╎
-╎  ┆                            ┆       ┆                            ┆ ╎
-╎  ┆ logs/k6/<run-id>/          ├─(4)──►┆ logs/duckdb/events.duckdb  ┆ ╎
-╎  ┆ raw.json, summary.json     ┆       ┆ append-only tables plus    ┆ ╎
-╎  ┆ written by the k6          ┆       ┆ _ingest_state offsets;     ┆ ╎
-╎  ┆ binary, not by Deno        ┆       ┆ INSERT only                ┆ ╎
-╎  └┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┘       └┄┄┄┄┄┄┄┄┄┄┄┄┄┬┄┄┄┄┄┄┄┄┄┄┄┄┄┄┘ ╎
+╎  ┌────────────────────────────┐       ┌┄┄┄┄┄┄┄┄┄┄┄┄┄┬┄┄┄┄┄┄┄┄┄┄┄┄┄┄┐ ╎
+╎  │ k6 results  (item 03;      │       ┆ DuckDB event log           ┆ ╎
+╎  │ more in 14) [filesystem]   │       ┆ (item 21) [DuckDB file]    ┆ ╎
+╎  │                            │       ┆                            ┆ ╎
+╎  │ logs/k6/<run-id>/          ├─(4)──►┆ logs/duckdb/events.duckdb  ┆ ╎
+╎  │ raw.json, summary.json     │       ┆ append-only tables plus    ┆ ╎
+╎  │ written by the k6          │       ┆ _ingest_state offsets;     ┆ ╎
+╎  │ binary, not by Deno        │       ┆ INSERT only                ┆ ╎
+╎  └────────────────────────────┘       └┄┄┄┄┄┄┄┄┄┄┄┄┄┬┄┄┄┄┄┄┄┄┄┄┄┄┄┄┘ ╎
 ╎                                                     ▲ (5)            ╎
 ╎                                                     │                ╎
 ╎                                       ┌┄┄┄┄┄┄┄┄┄┄┄┄┄┬┄┄┄┄┄┄┄┄┄┄┄┄┄┄┐ ╎
@@ -75,7 +76,7 @@ replaces it.
 | 1 | Server process | JSONL log directories | One JSON object per line, appended through a dropping `Queue` drained by a background fiber, so logging never blocks or fails a mutation. Drops are themselves logged as a `queue` event. Files roll on date, hour or `maxFileBytes`. |
 | 2 | Reader process | JSONL log directories | The same sink in its own `logs/reader/` directory — the pid and sequence in the filename keep two concurrently writing processes from interleaving into one file. **Its stdout stays reserved for the RPC protocol.** |
 | 3 | JSONL log directories | DuckDB event log | Idempotent ingest: DuckDB `read_json_auto` over an explicit file list, trimmed by the byte offsets in `_ingest_state`, inserted into the typed tables and the offsets updated in the **same** transaction. Runs in the reader process, which already owns DuckDB. |
-| 4 | k6 results | DuckDB event log | `perf/ingest_k6.ts` loads `raw.json` into the `k6_points` table with the run id as a column, so the `k6-vs-platform` query can join client-side p95 to server-side handler p95 per 10-second bucket by trace id. |
+| 4 | k6 results | DuckDB event log | (planned, item 25) `perf/ingest_k6.ts` loads `raw.json` into the `k6_points` table with the run id as a column, so the `k6-vs-platform` query can join client-side p95 to server-side handler p95 per 10-second bucket by trace id. |
 | 5 | logs CLI | DuckDB event log | `deno task logs:query <name>` runs an entry from a fixed catalog (`slowest-sql`, `plan-shapes`, `error-rate-by-handler`, `trace`, …). The caller supplies a name and params, never SQL — the same posture as the document API. |
 
 Edge 3 is drawn from the files to the DuckDB log because that is the data flow; the *work* is done

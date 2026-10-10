@@ -33,14 +33,14 @@ Dashed boxes labelled `planned` do not exist on `main` yet; they come from
 └──────────┬───────────────────────┬───────────────────────┬─────────┘
            │ (4)                   │ (5)                   ▲ (6)
            ▼                       ▼                       │
-┌──────────┬─────────┐  ┌┄┄┄┄┄┄┄┄┄┄┬┄┄┄┄┄┄┄┄┄┐  ┌┄┄┄┄┄┄┄┄┄┄┬┄┄┄┄┄┄┄┄┄┐
-│ S3-compatible      │  ┆ DuckDB analytics   ┆  ┆ k6 load generator  ┆
-│ object storage     │  ┆ consumer           ┆  ┆ [External] planned ┆
-│ [External system]  │  ┆ [External] planned ┆  ┆                    ┆
-│                    │  ┆                    ┆  ┆ drives the same    ┆
-│ immutable snapshot │  ┆ any DuckDB client  ┆  ┆ HTTP API; results  ┆
-│ + manifest objects │  ┆ over events.duckdb ┆  ┆ join by trace id   ┆
-└────────────────────┘  └┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┘  └┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┘
+┌──────────┬─────────┐  ┌┄┄┄┄┄┄┄┄┄┄┬┄┄┄┄┄┄┄┄┄┐  ┌──────────┬─────────┐
+│ S3-compatible      │  ┆ DuckDB analytics   ┆  │ k6 load generator  │
+│ object storage     │  ┆ consumer           ┆  │ [External system]  │
+│ [External system]  │  ┆ [External] planned ┆  │                    │
+│                    │  ┆                    ┆  │ k6 v0.56.0 and the │
+│ immutable snapshot │  ┆ any DuckDB client  ┆  │ smoke scenario;    │
+│ + manifest objects │  ┆ over events.duckdb ┆  │ more in item 14    │
+└────────────────────┘  └┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┘  └────────────────────┘
 ```
 
 ## Relationships
@@ -52,7 +52,7 @@ Dashed boxes labelled `planned` do not exist on `main` yet; they come from
 | 3 | Platform operator (planned) | Document DB platform | `POST /admin/backup/<appId>` with the admin token today; `POST /admin/logs/ingest` and `deno task logs:query <name>` once items 21–23 land. |
 | 4 | Document DB platform | S3-compatible object storage | `VACUUM INTO` snapshot → `PRAGMA quick_check` → SHA-256 → PUT the snapshot, PUT its manifest, and only then PUT `apps/<appId>/latest.json`. `scripts/restore.ts` reads the same objects back. |
 | 5 | Document DB platform | DuckDB analytics consumer (planned) | The reader process ingests the rotating JSONL event log into `logs/duckdb/events.duckdb`; any DuckDB client can then read those append-only tables (plan item 21). |
-| 6 | k6 load generator (planned) | Document DB platform | Load scenarios against the same HTTP API, one `X-Trace-Id` per iteration so client-side latency can be joined to server-side event durations (plan items 03, 14, 25). |
+| 6 | k6 load generator | Document DB platform | Load scenarios against the same HTTP API. The k6 binary and `perf/smoke.js` landed with plan item 03; the mutation/query/mixed scenarios are item 14, and the `X-Trace-Id` per iteration that lets client-side latency join server-side event durations is items 14 and 25. |
 
 Edge 6 points **into** the platform, which is why its arrowhead sits against the platform box.
 

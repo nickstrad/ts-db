@@ -47,14 +47,14 @@ jsonl_bottom = cv.box(row, 3, 67, [
 row = cv.down(jsonl_bottom + 1, RDR, "(3)")
 
 cv.box(row, 3, 30, [
-    "k6 results  (items 03,",
-    "14)  [filesystem]",
+    "k6 results  (item 03;",
+    "more in 14) [filesystem]",
     "",
     "logs/k6/<run-id>/",
     "raw.json, summary.json",
     "written by the k6",
     "binary, not by Deno",
-], planned=True, right=(4,))
+], right=(4,))
 duck_bottom = cv.box(row, 40, 30, [
     "DuckDB event log",
     "(item 21) [DuckDB file]",

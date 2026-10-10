@@ -12,10 +12,12 @@ depend on each other. Read it bottom-up: `core/` is pure, `Config` is the only t
 the environment, and each tier above is provided by the tiers below it. `platform/layers.ts`
 composes the whole stack as `PlatformLive`.
 
-**Every component in this diagram is planned.** The code exists today as classes and top-level
-`await` in `platform/*.ts`; the plan item number in each box says which item turns it into a
-service. Plan: `docs/plans/effect-port-and-observability.md`, §1.2 for the service table and §1.3
-for the error channel.
+**Almost every component in this diagram is planned.** Item 02 landed the bottom tier — the
+`core/errors.ts` tagged-error taxonomy and the `platform/services.ts` `Context.Tag` declarations —
+so the contract exists but no implementation sits behind it yet. Everything above it is still the
+pre-port code: classes and top-level `await` in `platform/*.ts`. The plan item number in each box
+says which item turns it into a service. Plan: `docs/plans/effect-port-and-observability.md`,
+§1.2 for the service table and §1.3 for the error channel.
 
 <!-- c4-render: diagrams/c4-component-server.py -->
 ```text
@@ -74,13 +76,13 @@ for the error channel.
 ╎                     ▲ (8)                            ▲ (8)           ╎
 ╎                     │                                │               ╎
 ╎         ┌┄┄┄┄┄┄┄┄┄┄┄┬┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┬┄┄┄┄┄┄┄┄┄┄┄┄┐  ╎
-╎         ┆ core/   pure kernel   (items 02, 04-09)                 ┆  ╎
+╎         ┆ core/ + platform/services.ts   (items 02, 04-09)        ┆  ╎
 ╎         ┆                                                         ┆  ╎
-╎         ┆ errors.ts  schema.ts  plan.ts  events.ts                ┆  ╎
+╎         ┆ landed (item 02): errors.ts, platform/services.ts       ┆  ╎
+╎         ┆                                                         ┆  ╎
+╎         ┆ planned: schema.ts  plan.ts  events.ts                  ┆  ╎
 ╎         ┆ compile/{dialect,ddl,select,write,decode}.ts            ┆  ╎
-╎         ┆ logging/rotation.ts  ipc/framing.ts                     ┆  ╎
-╎         ┆ eventlog/{ddl,offsets}.ts                               ┆  ╎
-╎         ┆                                                         ┆  ╎
+╎         ┆ logging/rotation.ts  ipc/framing.ts  eventlog/*.ts      ┆  ╎
 ╎         ┆ No Deno.*, no node:*, no npm:*, no platform/ or sdk/.   ┆  ╎
 ╎         └┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┘  ╎
 ╎                                                                      ╎

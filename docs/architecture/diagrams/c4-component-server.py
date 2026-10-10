@@ -110,13 +110,13 @@ row = cv.up(config_bottom + 1, LC, "(8)")
 cv.up(config_bottom + 1, RC, "(8)")
 
 core_bottom = cv.box(row, L, 59, [
-    "core/   pure kernel   (items 02, 04-09)",
+    "core/ + platform/services.ts   (items 02, 04-09)",
     "",
-    "errors.ts  schema.ts  plan.ts  events.ts",
+    "landed (item 02): errors.ts, platform/services.ts",
+    "",
+    "planned: schema.ts  plan.ts  events.ts",
     "compile/{dialect,ddl,select,write,decode}.ts",
-    "logging/rotation.ts  ipc/framing.ts",
-    "eventlog/{ddl,offsets}.ts",
-    "",
+    "logging/rotation.ts  ipc/framing.ts  eventlog/*.ts",
     "No Deno.*, no node:*, no npm:*, no platform/ or sdk/.",
 ], planned=True, top=(12, 45))
 

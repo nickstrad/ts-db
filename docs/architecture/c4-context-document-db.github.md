@@ -21,21 +21,21 @@ flowchart TB
 
     s3["<b>S3-compatible object storage</b><br/>[External system]<br/>immutable snapshot and manifest<br/>objects under <code>apps/&lt;appId&gt;/</code>"]
     duck["<b>DuckDB analytics consumer</b> (planned)<br/>[External system]<br/>any DuckDB CLI or notebook reading<br/><code>logs/duckdb/events.duckdb</code>"]
-    k6["<b>k6 load generator</b> (planned)<br/>[External system]<br/>drives the same HTTP API; its results<br/>are joined to platform events by trace id"]
+    k6["<b>k6 load generator</b><br/>[External system]<br/>k6 v0.56.0 and the smoke scenario (item 03);<br/>more scenarios in item 14, and the trace-id join<br/>to platform events in item 25"]
 
     dev -->|"(1) writes app/schema.ts and app/functions.ts;<br/>runs deno task serve"| plat
     player -->|"(2) HTTPS/JSON: handler name + args,<br/>bearer token per app"| plat
     op -->|"(3) POST /admin/backup/:appId;<br/>(planned) /admin/logs/ingest, deno task logs:query"| plat
     plat -->|"(4) PUT snapshot, manifest, then latest.json;<br/>GET on restore"| s3
     plat -->|"(5) (planned) materialises the JSONL event log<br/>into append-only DuckDB tables"| duck
-    k6 -->|"(6) (planned) HTTP load, X-Trace-Id per iteration"| plat
+    k6 -->|"(6) HTTP load; X-Trace-Id per iteration (planned, item 14)"| plat
 
     classDef planned stroke-dasharray: 5 3
     classDef person fill:#fff,stroke-width:2px
     classDef external fill:#f4f4f4
     class dev,player,op person
     class s3,duck,k6 external
-    class op,duck,k6 planned
+    class op,duck planned
 ```
 
 ## Relationships
@@ -47,7 +47,7 @@ flowchart TB
 | 3 | Platform operator (planned) | Document DB platform | `POST /admin/backup/<appId>` with the admin token today; `POST /admin/logs/ingest` and `deno task logs:query <name>` once items 21–23 land. |
 | 4 | Document DB platform | S3-compatible object storage | `VACUUM INTO` snapshot → `PRAGMA quick_check` → SHA-256 → PUT the snapshot, PUT its manifest, and only then PUT `apps/<appId>/latest.json`. `scripts/restore.ts` reads the same objects back. |
 | 5 | Document DB platform | DuckDB analytics consumer (planned) | The reader process ingests the rotating JSONL event log into `logs/duckdb/events.duckdb`; any DuckDB client can then read those append-only tables (plan item 21). |
-| 6 | k6 load generator (planned) | Document DB platform | Load scenarios against the same HTTP API, one `X-Trace-Id` per iteration so client-side latency can be joined to server-side event durations (plan items 03, 14, 25). |
+| 6 | k6 load generator | Document DB platform | Load scenarios against the same HTTP API. The k6 binary and `perf/smoke.js` landed with plan item 03; the mutation/query/mixed scenarios are item 14, and the `X-Trace-Id` per iteration that lets client-side latency join server-side event durations is items 14 and 25. |
 
 ## Notes on scope
 
