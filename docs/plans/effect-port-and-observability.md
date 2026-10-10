@@ -297,7 +297,7 @@ deno task perf:ingest   # k6 JSON output -> DuckDB k6_points
 
 ## 3. Batches and items
 
-Summary first; full item specs follow.
+29 items in 11 batches (0–10). Summary first; full item specs follow.
 
 | Batch | Items              | Concurrency                                           | Gate to next batch                                 |
 | ----- | ------------------ | ----------------------------------------------------- | -------------------------------------------------- |
@@ -311,6 +311,7 @@ Summary first; full item specs follow.
 | 7     | 22                 | single item, **SYNC**                                 | server runs entirely on layers                     |
 | 8     | 23, 24, 25         | 3 concurrent                                          | analysis CLI, retention sweeper, integration       |
 | 9     | 26, 27             | 2 concurrent                                          | wrappers removed, docs true                        |
+| 10    | 28, 29             | 2 concurrent; starts only after batch 9 lands         | runnable demos, platform user guide                |
 
 ---
 
@@ -1227,6 +1228,164 @@ and emits events through `EventSink`, replacing `platform/registry.ts:trace`.
 
 ---
 
+### Batch 10 — demos and user guide (2 concurrent)
+
+Items 28 and 29 run **concurrently** and are **independent of each other**: disjoint `Owns` sets, and neither
+reads the other's output (`docs.md` does not link to `demos/`, and `demos/README.md` does not link to
+`docs.md`; cross-linking is a follow-up once both have landed). The whole batch runs **after batch 9 has
+landed**, because both items describe the settled platform: the wrapper-free API from item 26, and the
+`README.md`, `docs/observability.md` and `docs/testing.md` that item 27 makes true.
+
+Neither item edits `deno.json` (§2.2): item 01 wrote it once. Item 28's demos therefore run via documented
+`deno run` commands, not new `demo:*` tasks, and item 29's parity test is picked up by the existing
+`tests/unit/**/*.ts` glob in `deno task test`.
+
+#### Item 28 — `demos/`: self-contained runnable demos
+
+- **Scoping:** CONCURRENT with 29; the two items are independent of each other. Starts only after batch 9 has
+  landed (both 26 and 27).
+- **Model:** **Sonnet.** Bounded and mechanical: every interface the demos touch (the Effect client from item
+  10, the HTTP and admin routes from item 22, the analysis catalog from item 23, the restore script) is fixed
+  by earlier items, the file list is short, and each demo is checked by running one command.
+- **Owns:** `demos/README.md`, and everything under `demos/documents/`, `demos/backup-restore/` and
+  `demos/observability/` (each holds a `main.ts` plus any helper files private to that demo). Nothing outside
+  `demos/`; in particular not `deno.json`, and no `demos/deno.json`.
+- **Reads:** `README.md` (Configuration, Run, Backups and restore, Deliberate limits), `platform/config.ts`
+  (`OPTIONS`), `sdk/client.ts`, `sdk/functions.ts`, `app/schema.ts`, `app/functions.ts`, `core/errors.ts`,
+  `platform/http/router.ts` (route shapes, admin endpoints, request-body shape for named analysis queries),
+  `platform/analysis/catalog.ts`, `scripts/restore.ts`, `scripts/demo.ts` (call order),
+  `docs/observability.md`, `deno.json` (the `serve` and `restore` task definitions).
+- **Why the demos use the registered apps rather than new schemas:** the deployment registry is static.
+  `platform/config.ts` lists exactly `tic-tac-toe` (columns) and `tic-tac-toe-json` (json), and both the
+  server and the reader child load their schemas and handlers from `app/` via `platform/registry.ts`. A notes
+  or task-tracker demo with its own schema would have to edit files owned by items 08, 16 and 22, so each demo
+  instead shows one platform capability end to end over the registered apps. Revisit if a later item adds an
+  app-registration seam.
+- **Work:**
+  1. Each demo is one Effect program at `demos/<name>/main.ts`, run from the repo root with
+     `deno run -A demos/<name>/main.ts`, so the root import map and `deno.lock` apply. Do not add
+     `demos/deno.json`: a nested config would need its own import map and lockfile, duplicating the §1.5 pins.
+  2. Self-containment: a demo imports only from `sdk/`, `app/` (types and schema), `core/errors.ts` and
+     `effect`. It never imports from `platform/`, and never from another demo directory. Each demo carries its
+     own copy of the small server-lifecycle helper (about 30 lines). That duplication is deliberate, so any
+     single demo directory can be copied out as a starting point.
+  3. Server lifecycle, in every demo: create one temp root (`Deno.makeTempDir`); pick a free port; spawn the
+     command the `serve` task runs (`deno run -A platform/server.ts`) with `PORT`, `DATA_DIR`, `LOG_DIR` and
+     `LOCAL_OBJECT_DIR` pointing into the temp root (only option names from the item-08 table); poll
+     `GET /health` with a bounded timeout; and release it all in `Effect.acquireRelease`: SIGTERM, await exit,
+     remove the temp root. A demo leaves no `./data`, `./logs` or `./object-store` in the repo and no stray
+     server or reader process, even when it fails.
+  4. `demos/documents/main.ts` covers documents and queries on both storage layouts. Using the typed Effect
+     `createClient`, run the same script against `tic-tac-toe` and `tic-tac-toe-json`: `createGame`,
+     `getGame`, a sequence of `makeMove`s, `listGames` filtered by status, `moveHistory`, and `winsByMark`
+     (`countBy`). Then make a stale `expectedVersion` move and handle the 409 as a typed `ConflictError` with
+     `Effect.catchTag`; make an argument-validation failure and handle the 400 the same way. Assert that both
+     layouts return the same document shapes and aggregate results (ignoring `_id` and `_creationTime`).
+  5. `demos/backup-restore/main.ts` covers backups. Create and play a game, then take a backup with
+     `POST /admin/backup/tic-tac-toe` (admin token). Read `apps/tic-tac-toe/latest.json` from
+     `LOCAL_OBJECT_DIR` and print its key and SHA-256. Make one more move after the backup. Stop the server,
+     run the restore script (`deno run -A scripts/restore.ts tic-tac-toe <tmp>/restored/tic-tac-toe.sqlite`)
+     with the same `LOCAL_OBJECT_DIR`, then start a second server with `DATA_DIR=<tmp>/restored`. Assert that
+     the restored game has the backed-up `_version`, not the post-backup one. That assertion is the README's
+     "asynchronous backup, not high availability" point, made visible.
+  6. `demos/observability/main.ts` covers logs and the DuckDB analysis queries. Run a small workload with a
+     caller-supplied `X-Trace-Id` on one request, and include one deliberate 409 and one unknown-handler 404.
+     Call `POST /admin/logs/ingest`, retrying with a bounded timeout of at most 10 s until the trace id is
+     queryable, since the event sink flushes asynchronously. Then run the named queries `handler-throughput`,
+     `error-rate-by-handler` (it must show the 409 and the 404), `slowest-sql` and `trace` (with the trace id
+     as its parameter) through `POST /admin/logs/analysis/:name`, and print each result as a table. Finally,
+     print the `LOG_DIR` tree to show the `logs/<role>/<date>/` layout from §4.2.
+  7. Each demo prints `DEMO OK: <name>` as its last line only after its assertions pass. On any failed
+     assertion it exits non-zero with a message naming the assertion.
+  8. `demos/README.md`: one section per demo giving the run command, what it demonstrates, which platform
+     features and analysis queries it touches, and the expected tail of its output. Add a note that demos run
+     via `deno run` because `deno.json` is frozen after item 01.
+- **Acceptance criteria:**
+  - With `export PATH="$HOME/.deno/bin:$PATH"`, each of `deno run -A demos/documents/main.ts`,
+    `deno run -A demos/backup-restore/main.ts` and `deno run -A demos/observability/main.ts` exits 0 and
+    prints `DEMO OK: <name>` as its last line.
+  - All three run concurrently (`… & … & … & wait`) and all exit 0, which shows that ports and temp dirs are
+    independent.
+  - After the runs, `git status --porcelain` is unchanged; `./data`, `./logs` and `./object-store` were not
+    created by the demos; and `pgrep -f "platform/(server|reader).ts"` prints nothing.
+  - Demos assert, not just print. The reviewer flips one expected value locally (for example the restored
+    `_version`) and confirms that the demo exits non-zero without printing `DEMO OK`.
+  - `grep -rnE 'from "[^"]*platform/' demos/` returns nothing, and no file under `demos/<a>/` imports from
+    `demos/<b>/`.
+  - `deno check demos/*/main.ts`, `deno task fmt:check` and `deno task lint` pass.
+  - `git diff --name-only <base>..HEAD` lists only paths under `demos/`, and `deno.json` is untouched.
+
+#### Item 29 — `docs.md`: platform user guide
+
+- **Scoping:** CONCURRENT with 28; the two items are independent of each other. Starts only after batch 9 has
+  landed (both 26 and 27).
+- **Model:** **Sonnet.** This one is a judgment call. The guide needs editorial choices about what a newcomer
+  must learn first and how to explain Effect-typed handlers. But every fact it states is fixed by landed items
+  and existing docs, the outline is prescribed below, and acceptance is mechanical: a parity test against the
+  item-08 options table and the item-23 catalog, plus running every snippet. That matches item 27, which is
+  also prose over a settled codebase. The `reviewer-opus-high` pass covers the judgment that is left: whether
+  the guide's statements about consistency, backup and error guarantees are accurate.
+- **Owns:** `docs.md` (new, repo root), `tests/unit/docs_guide_test.ts`.
+- **Reads:** `README.md` (the Configuration section is the source of truth for options; also Run, Query
+  language, Transaction contract, Backups and restore, Deliberate limits), `platform/config.ts` (`OPTIONS`),
+  `sdk/schema.ts`, `sdk/db.ts`, `sdk/functions.ts`, `sdk/client.ts`, `app/schema.ts`, `app/functions.ts`,
+  `app/rules.ts`, `core/errors.ts` (`toHttpStatus`), `platform/registry.ts`, `platform/http/router.ts`,
+  `platform/analysis/catalog.ts`, `scripts/logs.ts`, `scripts/restore.ts`, `docs/observability.md`,
+  `docs/testing.md`, `perf/README.md`, `docs/adr/*`, `deno.json`.
+- **Work:**
+  1. Write `docs.md` for a developer new to the platform, with exactly these H2 sections in this order:
+     `## Installation`, `## Configuration`, `## Core concepts`, `## SDK walkthrough`, `## Running the server`,
+     `## Backups and restore`, `## Observability`, `## Troubleshooting`. Above them, a short introduction with
+     the process diagram and a pointer to README "Deliberate limits".
+  2. Installation: Deno 2.9.5 and the `PATH` line, the committed `deno.lock`, and the first-run network
+     requirement for npm packages and the DuckDB `sqlite` extension.
+  3. Configuration: link to [README → Configuration](README.md#configuration) as the single source of truth
+     and **do not copy the options table**. Explain only the handful of options a newcomer touches first
+     (`PORT`, `DATA_DIR`, the three tokens, `BACKUP_INTERVAL_MS`, `LOG_DIR`), and write any default as
+     `` `ENV_VAR` (default `value`) `` so the parity test can check it. Explain fail-fast `ConfigError` at
+     startup.
+  4. Core concepts: documents (fields, platform-owned `_id`, `_creationTime` and `_version`), collections
+     (state once that the code calls them tables, via `defineTable` and `db.find("games", …)`, then use one
+     term consistently), the two storage layouts, functions (query vs mutation, where each runs, the
+     transaction contract), and the static deployment registry. Say plainly that adding an app means editing
+     `platform/registry.ts` and `platform/config.ts`, because there is no plugin loading.
+  5. SDK walkthrough: a schema, one query, one mutation written with `Effect.gen` (the pattern from §1.4), the
+     typed Effect client, and handling a typed error with `Effect.catchTag`. Every TypeScript block is a
+     complete module with imports: no `…` elisions and no fragments.
+  6. Running the server: `deno task serve`, the health check, the two registered apps, the dev-only token
+     warning, and the error-to-HTTP-status table from §1.3, including the 409 and 503 behaviour changes.
+  7. Backups and restore: the manual backup endpoint, the timer, the local stand-in versus S3, offline
+     restore, and the "asynchronous backup, not HA" caveat. Mark any S3 block
+     `# not run: needs S3
+     credentials` on its first line.
+  8. Observability: the `logs/<role>/<date>/` layout, `logs:ingest`, `logs:query` and `logs:sweep`, the admin
+     ingest and analysis endpoints, each named query in one line, and the trace-id workflow. Link to
+     `docs/observability.md` for table schemas rather than repeating them.
+  9. Troubleshooting: one entry per symptom, as symptom → cause → fix. Cover at least: `deno` not found;
+     `ConfigError` at startup (`BACKUP_INTERVAL_MS=500`, or `S3_BASE_URL` without credentials); DuckDB
+     extension download failure; schema drift on an existing data file; 401, 404, 409, 413 and 503 responses;
+     reader exited / 502; and port already in use.
+  10. `tests/unit/docs_guide_test.ts` reads `docs.md` and asserts: (a) every env-var-shaped token
+      (`[A-Z][A-Z0-9]*_[A-Z0-9_]+`, plus `PORT`) is an `OPTIONS` `envVar`, apart from a small, commented
+      allowlist of non-config names; (b) every `` `ENV_VAR` (default `value`) `` matches that option's
+      `defaultLabel` exactly; (c) every backticked analysis query name is a key of the item-23 catalog; (d)
+      every `deno task <name>` it mentions exists in `deno.json`'s `tasks`; (e) it links to
+      `README.md#configuration` and contains no Markdown table with an `Env var` column; (f) the eight H2
+      headings from step 1 are present, in order.
+- **Acceptance criteria:**
+  - `deno task test` passes, including `tests/unit/docs_guide_test.ts`.
+  - Config parity is enforced. The reviewer adds a fake `FOO_BAR` mention, or changes one stated default to a
+    wrong value, and confirms that the test fails. Every config option docs.md mentions matches the item-08
+    options table exactly.
+  - Every snippet is copy-paste runnable. The reviewer runs every `sh` block in order from a fresh clone with
+    a temp `DATA_DIR`; each exits 0, except blocks whose first line is `# not run: <reason>`. The reviewer
+    also writes each `ts` block to a temp file at the repo root and runs `deno check` on it, then runs the
+    client snippets against the server that the guide's own commands started.
+  - `grep -c '^## ' docs.md` shows the eight required sections, and `deno task fmt:check` passes.
+  - `git diff --name-only <base>..HEAD` lists exactly `docs.md` and `tests/unit/docs_guide_test.ts`.
+
+---
+
 ## 4. Observability data model (reference for items 07, 11, 21, 23, 24)
 
 ### 4.1 DuckDB append-only tables — `logs/duckdb/events.duckdb`
@@ -1321,6 +1480,7 @@ hour change, or size. Today's directory and the open file are never swept.
 | 5 — Observability (DuckDB analysis, folder rotation + retention) | 06, 11, 21, 23, 24                         |
 | 6 — Perf (k6 + DuckDB analysis)                                  | 03, 14, 25                                 |
 | Docs and boundary enforcement                                    | 02, 23, 26, 27                             |
+| Onboarding (runnable demos, platform user guide)                 | 28, 29                                     |
 
 ---
 
@@ -1337,13 +1497,14 @@ hour change, or size. Today's directory and the open file are never swept.
 | Retention deletes the wrong files                                                          | Policy is pure and property-tested (06, 12) before any deletion code exists (24); `--dry-run`, `LOG_DIR` prefix check, open-file and today's-dir exclusions |
 | k6 or DuckDB unavailable in the executing environment                                      | Items 03, 16, 25 require the commit message to state exactly which assertions were not executed; a skip is never reported as a pass                         |
 | Effect 3 → 4 migration debt                                                                | ADR 0001 records the pin and the reason; revisit after this phase                                                                                           |
+| User guide and demos drift from the platform they describe                                 | Item 29's parity test checks `docs.md` against `OPTIONS`, the analysis catalog and `deno.json`; item 28's demos assert their own results and exit non-zero  |
 | Batch concurrency causes merge conflicts                                                   | `Owns`/`Reads` sets are disjoint per batch, `deno.json` is written once in item 01, and reviewers reject diffs outside an item's `Owns` set                 |
 
 ---
 
 ## Future work: deterministic simulation testing
 
-**Not in scope for this phase.** Nothing in items 01–27 attempts deterministic simulation testing (DST), and
+**Not in scope for this phase.** Nothing in items 01–29 attempts deterministic simulation testing (DST), and
 no item's acceptance criteria depend on it. It is the stated next goal, and this phase is deliberately shaped
 to make it reachable rather than to deliver it.
 
