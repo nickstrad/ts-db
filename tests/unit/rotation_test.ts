@@ -4,6 +4,7 @@ import {
   currentPath,
   defaultRotationPolicy,
   type FileEntry,
+  InvalidDateBucketError,
   InvalidLogRoleError,
   plan,
   type RollState,
@@ -217,12 +218,80 @@ test("plan is idempotent: re-running on the post-plan file set yields empty gzip
   assert.notDeepEqual(first.gzip, []);
   assert.notDeepEqual(first.delete, []);
 
-  // Post-plan file set: delete paths are gone, gzip source paths are gone (compressed in place).
-  const removed = new Set([...first.gzip, ...first.delete]);
-  const remaining = entries.filter((e) => !removed.has(e.path));
+  // Post-plan file set per plan §4.2's on-disk layout: `delete` paths are gone, and each `gzip`
+  // source persists in its dated directory as `<path>.gz` (smaller — it was compressed).
+  const gzipped = new Set(first.gzip);
+  const deleted = new Set(first.delete);
+  const remaining = entries
+    .filter((e) => !deleted.has(e.path))
+    .map((e) => gzipped.has(e.path) ? entry(`${e.path}.gz`, e.dir, Math.ceil(e.bytes / 5), e.mtime) : e);
 
   const second = plan(remaining, NOW, defaultRotationPolicy);
   assert.deepEqual(second.gzip, []);
   assert.deepEqual(second.delete, []);
   assert.deepEqual(second.keep, remaining.map((e) => e.path).sort());
+});
+
+test("already-compressed .gz files are never re-gzipped but are still deleted past keepDays", () => {
+  const entries = [
+    entry("logs/server/2026-10-08/events-00-1-001.jsonl.gz", "2026-10-08", 4, new Date(2026, 9, 8)), // age 2: keep
+    entry("logs/server/2026-09-26/events-00-1-001.jsonl.gz", "2026-09-26", 4, new Date(2026, 8, 26)), // age 14: delete
+  ];
+  const result = plan(entries, NOW, defaultRotationPolicy);
+  assert.deepEqual(result.gzip, []);
+  assert.deepEqual(result.delete, ["logs/server/2026-09-26/events-00-1-001.jsonl.gz"]);
+  assert.deepEqual(result.keep, ["logs/server/2026-10-08/events-00-1-001.jsonl.gz"]);
+});
+
+test(".gz bytes still count toward maxTotalBytes when pruning under the cap", () => {
+  const entries = [
+    entry("logs/server/2026-10-10/events-14-1-001.jsonl", TODAY, 50, new Date(2026, 9, 10, 14)),
+    entry("logs/server/2026-10-09/events-00-1-001.jsonl", "2026-10-09", 100, new Date(2026, 9, 9)),
+    entry("logs/server/2026-10-08/events-00-1-001.jsonl.gz", "2026-10-08", 100, new Date(2026, 9, 8)),
+  ];
+  const policy: RotationPolicy = { ...defaultRotationPolicy, maxTotalBytes: 150 };
+  const result = plan(entries, NOW, policy);
+  // total = 250 > 150: the oldest non-today dir (10-08, holding the .gz) is pruned first.
+  assert.deepEqual(result.delete, ["logs/server/2026-10-08/events-00-1-001.jsonl.gz"]);
+  assert.deepEqual(result.gzip, []);
+  assert.deepEqual(result.keep, [
+    "logs/server/2026-10-09/events-00-1-001.jsonl",
+    "logs/server/2026-10-10/events-14-1-001.jsonl",
+  ]);
+});
+
+test("plan throws InvalidDateBucketError for a full-path dir instead of silently keeping", () => {
+  const entries = [
+    entry("logs/server/2026-09-01/old.jsonl", "logs/server/2026-09-01", 10, new Date(2026, 8, 1)),
+  ];
+  assert.throws(() => plan(entries, NOW, defaultRotationPolicy), InvalidDateBucketError);
+});
+
+test("plan throws InvalidDateBucketError for a non-date dir", () => {
+  const entries = [entry("logs/server/latest/old.jsonl", "latest", 10, new Date(2026, 8, 1))];
+  assert.throws(() => plan(entries, NOW, defaultRotationPolicy), InvalidDateBucketError);
+});
+
+test("plan throws InvalidDateBucketError for an impossible calendar date", () => {
+  const entries = [
+    entry("logs/server/2026-02-30/old.jsonl", "2026-02-30", 10, new Date(2026, 1, 28)),
+  ];
+  assert.throws(() => plan(entries, NOW, defaultRotationPolicy), InvalidDateBucketError);
+});
+
+test("cap pruning treats same-date directories across roles as one pruning unit", () => {
+  const entries = [
+    entry("logs/server/2026-10-08/events-00-1-001.jsonl", "2026-10-08", 100, new Date(2026, 9, 8)),
+    entry("logs/reader/2026-10-08/events-00-2-001.jsonl", "2026-10-08", 100, new Date(2026, 9, 8)),
+    entry("logs/server/2026-10-10/events-14-1-001.jsonl", TODAY, 50, new Date(2026, 9, 10, 14)),
+  ];
+  const policy: RotationPolicy = { ...defaultRotationPolicy, maxTotalBytes: 150 };
+  const result = plan(entries, NOW, policy);
+  // 250 bytes > 150, but removing either 100-byte dir alone would meet the cap — both prune
+  // because they share one date-bucket pruning unit.
+  assert.deepEqual(result.delete, [
+    "logs/reader/2026-10-08/events-00-2-001.jsonl",
+    "logs/server/2026-10-08/events-00-1-001.jsonl",
+  ]);
+  assert.deepEqual(result.keep, ["logs/server/2026-10-10/events-14-1-001.jsonl"]);
 });

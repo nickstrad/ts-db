@@ -11,6 +11,8 @@
  * `role` is one of the four known roles. `YYYY-MM-DD` and `HH` are the local calendar date and
  * hour at the moment the file was opened (local time, not UTC — logs should read in the operator's
  * wall clock). `seq` is zero-padded to 3 digits, matching the plan's worked example.
+ * A gzipped file stays in its dated directory and gains a `.gz` suffix:
+ *   logs/<role>/<YYYY-MM-DD>/events-<HH>-<pid>-<seq>.jsonl.gz
  */
 import { Data } from "effect";
 
@@ -24,6 +26,12 @@ export class InvalidLogRoleError extends Data.TaggedError("InvalidLogRoleError")
   readonly role: string;
 }> {}
 
+/** A `FileEntry.dir` was not a bare `YYYY-MM-DD` date bucket. Thrown by `plan` so a mis-shaped
+ * inventory fails loudly instead of being silently kept forever. */
+export class InvalidDateBucketError extends Data.TaggedError("InvalidDateBucketError")<{
+  readonly dir: string;
+}> {}
+
 /** Rotation and retention thresholds. All byte and day values are inclusive lower bounds for the
  * state they name (e.g. a file exactly `maxFileBytes` old is already due to roll). */
 export interface RotationPolicy {
@@ -31,7 +39,8 @@ export interface RotationPolicy {
   readonly keepDays: number;
   /** Dated directories at least this old, but within `keepDays`, are gzipped. */
   readonly gzipAfterDays: number;
-  /** Total bytes across all non-today log files before oldest dated directories are pruned. */
+  /** Total bytes across all log files — including today's directory — before the oldest dated
+   * directories are pruned back under the cap. */
   readonly maxTotalBytes: number;
   /** Bytes written to the open file before it rolls. */
   readonly maxFileBytes: number;
@@ -49,7 +58,8 @@ export const defaultRotationPolicy: RotationPolicy = {
 
 /** State of the currently-open log file, as tracked by whatever last called `currentPath`. */
 export interface RollState {
-  /** The dated directory the open file lives in: `logs/<role>/<YYYY-MM-DD>`. */
+  /** The full dated directory the open file lives in: `logs/<role>/<YYYY-MM-DD>`. This is a path,
+   * not the bare `YYYY-MM-DD` bucket — contrast `FileEntry.dir`, which is the bucket alone. */
   readonly dir: string;
   /** The `YYYY-MM-DD` the file was opened in. */
   readonly dateBucket: string;
@@ -107,7 +117,9 @@ export function shouldRoll(
   return "no";
 }
 
-/** One file on disk under `logs/<role>/<dir>/`. `dir` is the `YYYY-MM-DD` dated directory name. */
+/** One file on disk under `logs/<role>/<dir>/`. `dir` is the bare `YYYY-MM-DD` date bucket —
+ * NOT the full `logs/<role>/<YYYY-MM-DD>` path (contrast `RollState.dir`). A malformed bucket
+ * fails `plan` loudly via `InvalidDateBucketError` rather than being silently kept. */
 export interface FileEntry {
   readonly path: string;
   readonly dir: string;
@@ -123,9 +135,22 @@ export interface RetentionPlan {
   readonly keep: readonly string[];
 }
 
+const DATE_BUCKET_PATTERN = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+
+/** Parse a `YYYY-MM-DD` date bucket to a local-midnight `Date`. Rejects anything that is not a
+ * real calendar date in bucket shape — including full `logs/<role>/<date>` paths — with
+ * `InvalidDateBucketError`, so `plan` fails loudly instead of silently keeping the entry. */
 function parseDateBucket(bucket: string): Date {
+  if (!DATE_BUCKET_PATTERN.test(bucket)) {
+    throw new InvalidDateBucketError({ dir: bucket });
+  }
   const [y, m, d] = bucket.split("-").map(Number);
-  return new Date(y, m - 1, d);
+  const date = new Date(y, m - 1, d);
+  if (dateBucketOf(date) !== bucket) {
+    // Pattern-shaped but not a real date, e.g. 2026-02-30 (`Date` overflows into March).
+    throw new InvalidDateBucketError({ dir: bucket });
+  }
+  return date;
 }
 
 /** Whole days between dated directory `dir` and `today`, both `YYYY-MM-DD`. Computed via local
@@ -142,14 +167,18 @@ function ageInDays(dir: string, today: string): number {
  * Today's dated directory is always kept in full — it holds the currently-open file, which is
  * never gzipped or deleted. Non-today directories are deleted once they are `keepDays` old or more,
  * gzipped once they are `gzipAfterDays` old or more (and not yet due for deletion), and otherwise
- * kept. If the bytes still on disk (kept + gzip-pending) exceed `maxTotalBytes`, whole non-today
- * directories are moved to `delete` oldest-first — overriding any gzip decision for that
- * directory — until the total is back under the cap or only today's directory remains.
+ * kept. A path already ending in `.gz` was compressed by an earlier sweep and is gzip-ineligible:
+ * it falls through to `keep`, while its bytes still count toward `maxTotalBytes` and it remains
+ * eligible for age-based `delete`. If the bytes still on disk (kept + gzip-pending) exceed
+ * `maxTotalBytes`, whole non-today directories are moved to `delete` oldest-first — overriding any
+ * gzip decision for that directory — until the total is back under the cap or only today's
+ * directory remains.
  *
- * Idempotent: re-running `plan` with the same `now` against the entries that remain after deleting
- * `delete` and removing `gzip` (the gzip source files are gone once compressed) yields an empty
- * `gzip` and `delete` — see `tests/unit/rotation_test.ts`'s idempotency case for the exact
- * post-plan file set this assumes.
+ * Idempotent: re-running `plan` with the same `now` against the post-plan file set — `delete`
+ * paths gone, each `gzip` source replaced in place by `<path>.gz` per §4.2's on-disk layout —
+ * yields an empty `gzip` and `delete`. See `tests/unit/rotation_test.ts`'s idempotency case.
+ *
+ * Throws `InvalidDateBucketError` if any entry's `dir` is not a bare `YYYY-MM-DD` date bucket.
  */
 export function plan(
   entries: readonly FileEntry[],
@@ -164,6 +193,10 @@ export function plan(
     if (list) list.push(entry);
     else byDir.set(entry.dir, [entry]);
   }
+  // NOTE: the pruning unit is the bare date bucket, so same-date directories across roles
+  // (e.g. server/2026-10-08 and reader/2026-10-08) prune as a single unit. Whole-directory
+  // pruning inherently overshoots the cap; the wider unit is within spec ("oldest dated
+  // directories pruned first") but worth knowing when sizing `maxTotalBytes`.
 
   const gzipSet = new Set<string>();
   const deleteSet = new Set<string>();
@@ -188,7 +221,11 @@ export function plan(
     }
 
     if (age >= policy.gzipAfterDays) {
-      for (const entry of list) gzipSet.add(entry.path);
+      for (const entry of list) {
+        // §4.2: already compressed by an earlier sweep — gzip-ineligible, falls through to keep.
+        if (entry.path.endsWith(".gz")) keepSet.add(entry.path);
+        else gzipSet.add(entry.path);
+      }
     } else {
       for (const entry of list) keepSet.add(entry.path);
     }
