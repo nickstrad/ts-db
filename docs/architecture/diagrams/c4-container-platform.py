@@ -41,6 +41,7 @@ reader_bottom = cv.box(row, 40, 30, [
     "platform/reader.ts",
     "query handlers + DuckDB",
     "with the sqlite extension.",
+    "Effect program (item 16).",
     "Never imports node:sqlite.",
 ], bottom=(14,))
 cv.right(row + 3, 33, 39, "(2)")

@@ -12,17 +12,19 @@ The separately running things inside the platform boundary on the request path �
 library, the app database files — and the one external store they talk to. Inside the server process is
 expanded at [Level 3](c4-component-server.github.md).
 
-Everything here exists on `main` today. The client SDK is already Effect-based (item 10); the two processes
-are still the pre-port code, although `platform/ipc.ts` already frames the RPC stream with the pure decoder
-from `core/ipc/framing.ts` (item 05). The Effect-TS port changes _what is inside_ the server and reader
-processes (Level 3), not this container topology.
+Everything here exists on `main` today. The client SDK is already Effect-based (item 10); the reader child
+process is a scoped Effect program since item 16 and the parent-side IPC is the scoped `ReaderClient` service
+(item 17) – although `platform/server.ts` is still the pre-port code and reaches the reader through the
+temporary `ReaderRPC` bridge until item 22 composes `ReaderClientLive`. `platform/ipc.ts` frames the RPC
+stream with the pure decoder from `core/ipc/framing.ts` (item 05). The Effect-TS port changes _what is inside_
+the server and reader processes (Level 3), not this container topology.
 
 ```mermaid
 flowchart TB
     subgraph host["Document DB platform — one host, one local filesystem"]
         sdk["<b>Typed client SDK</b> (item 10)<br/>[library, runs in the caller's process]<br/><code>sdk/client.ts</code> + an <code>import type</code> of the app's<br/>handler map, so no server code or driver is shipped.<br/>Sends a handler name, JSON args and an X-Trace-Id, never SQL.<br/>30 s AbortSignal.timeout per call."]
         server["<b>Server process</b><br/>[Deno process, 127.0.0.1:8000]<br/><code>platform/server.ts</code><br/>HTTP API, auth, mutation handlers, one SQLite<br/>writer per app, backup timer.<br/>Never opens DuckDB."]
-        reader["<b>Reader process</b><br/>[Deno child process]<br/><code>platform/reader.ts</code><br/>query handlers + DuckDB with the sqlite<br/>extension.<br/>Never imports node:sqlite."]
+        reader["<b>Reader process</b><br/>[Deno child process]<br/><code>platform/reader.ts</code> (Effect program, item 16)<br/>query handlers + DuckDB with the sqlite<br/>extension.<br/>Never imports node:sqlite."]
         files["<b>App SQLite files</b><br/>[SQLite 3, WAL mode, STRICT tables]<br/><code>data/&lt;appId&gt;.sqlite</code> (+ <code>-wal</code>, <code>-shm</code>)<br/>One file per app: <code>tic-tac-toe</code> (columns layout) and<br/><code>tic-tac-toe-json</code> (one <code>doc TEXT</code> column). The schema<br/>descriptor lives in the file; drift fails loudly."]
     end
 
@@ -44,7 +46,7 @@ flowchart TB
 | # | From             | To                         | What travels over it                                                                                                                                                                                                                                                                                                                                                |
 | - | ---------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 1 | Typed client SDK | Server process             | `POST /apps/<appId>/<query\|mutation>/<name>`, `Authorization: Bearer <app token>`, JSON body capped at 64 KiB. `import type` keeps server handlers and database drivers out of the client bundle. Since item 10 every call carries an `X-Trace-Id` (caller-supplied or a fresh UUID); the server echoes it and annotates its events with it once item 22 lands.    |
-| 2 | Server process   | Reader process             | The server spawns the reader at startup and pings it. Requests and replies are newline-delimited JSON over the child's stdin/stdout, correlated by request id, framed by the pure decoder in `core/ipc/framing.ts` (item 05). The reader's **stdout is reserved for this protocol** — its logs go to stderr today, and to its own log directory after plan item 16. |
+| 2 | Server process   | Reader process             | The server spawns the reader at startup and pings it. The parent-side client is the scoped `ReaderClient` service (`ReaderClientLive` in `platform/ipc.ts`, item 17): it owns the child under `Effect.acquireRelease`, correlates replies through a `Ref` of `Deferred`s, caps the outbox at 1000 calls (`QueueFullError`) and times out each call (default 30 s). Requests and replies are newline-delimited JSON over the child's stdin/stdout, framed by the pure decoder in `core/ipc/framing.ts` (item 05). The reader's **stdout is reserved for this protocol** — its logs go to its own `<LOG_DIR>/reader/` log directory since item 16. |
 | 3 | Server process   | App SQLite files           | `node:sqlite` `DatabaseSync`. One writer per app, serialized by a per-app queue; each mutation runs in one `BEGIN IMMEDIATE … COMMIT`, and the handler's own `db.get`/`db.find` calls execute inside that same transaction.                                                                                                                                         |
 | 4 | Reader process   | App SQLite files           | DuckDB's `sqlite` extension, `ATTACH … (TYPE SQLITE, READ_ONLY)` against the **live** file — there is no second copy and no replication lag. Query handlers are serialized, one at a time, each in a fresh transaction.                                                                                                                                             |
 | 5 | Server process   | S3-compatible object store | `VACUUM INTO` a temp snapshot (serialized with mutations) → `PRAGMA quick_check` → SHA-256 → PUT the immutable snapshot → PUT its manifest → only then PUT `latest.json`. The upload runs after the mutation queue is released. A failed upload never advances `latest.json`.                                                                                       |

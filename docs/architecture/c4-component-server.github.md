@@ -12,15 +12,15 @@ The Effect services and layers that make up the server process after the port, a
 other. Read it bottom-up: `core/` is pure, `Config` is the only thing that touches the environment, and each
 tier above is provided by the tiers below it. `platform/layers.ts` composes the whole stack as `PlatformLive`.
 
-**The bottom three tiers are built, plus ObjectStore (item 18); the remaining top services are planned.** Items 02 and 04–09 landed the pure kernel
+**The bottom three tiers are built, plus Storage (item 15), ObjectStore (item 18) and ReaderClient (item 17); the remaining top services are planned.** Items 02 and 04–09 landed the pure kernel
 (`core/errors.ts`, `schema.ts`, `plan.ts`, `events.ts`, `compile/*`, `logging/rotation.ts`, `ipc/framing.ts`)
 and the `platform/services.ts` `Context.Tag` declarations; item 08 landed `ConfigLive`/`ConfigTest`; item 11
 landed the `EventSink` service and the JSONL `Logger` layer, which is the first live layer to consume
 `Config`; item 18 landed the `ObjectStore` scoped service – the `ObjectStoreLocal` and `ObjectStoreS3`
 live layers in `platform/object_store.ts`, with an aws4fetch-signed S3 client, exponential retry with
-jitter, and one `backup/put-object` event per put. Nothing else above the kernel tier is a service yet:
+jitter, and one `backup/put-object` event per put. item 15 landed the `Storage` scoped service – the `StorageLive` layer in `platform/sqlite.ts`, a single-writer queue capped at 1000 (`QueueFullError`), per-statement tx-expiry guards, `TestClock`/`IdGen` injection, and `VACUUM INTO` running in-queue-but-outside-transaction; a thin `SQLiteWriter` compatibility wrapper remains until items 19/20/22 port their call sites (item 26 deletes it); item 17 landed the `ReaderClient` scoped service – `ReaderClientLive` in `platform/ipc.ts`, which spawns the reader child under `Effect.acquireRelease` (the finalizer closes stdin, waits for exit, then escalates SIGTERM → SIGKILL), correlates replies through a `Ref` of `Deferred`s, caps the outbox at 1000 calls (`QueueFullError`) and times out each call (default 30 s) with typed `CallError`s, emitting queue and lifecycle events via `EventSink`. Nothing else above the kernel tier is a service yet:
 `platform/server.ts` is still the pre-port code (classes, top-level `await`, its own `Deno.env` reads)
-and does **not** mount `ConfigLive` or `LoggingLive` until item 22, so at runtime the landed layers are
+and does **not** mount `ConfigLive`, `StorageLive`, `LoggingLive` or `ReaderClientLive` until item 22 – it talks to the reader through the temporary `ReaderRPC` bridge in the meantime – so at runtime the landed layers are
 exercised only by their unit tests. The pre-port code does already
 call into `core/` — `platform/compiler.ts` wraps `core/compile/*`, `platform/ipc.ts` uses
 `core/ipc/framing.ts`, `sdk/` uses `core/schema.ts` and `core/plan.ts`. The plan item number in each box says
@@ -32,8 +32,8 @@ service table and §1.3 for the error channel.
 flowchart TB
     subgraph proc["Server process — Effect layers (platform/layers.ts: PlatformLive, item 22, planned)"]
         http["<b>HTTP API</b> (planned, item 22)<br/><code>platform/http/{router,auth,handlers}.ts</code><br/>GET /health; POST /apps/:appId/:kind/:name;<br/>POST /admin/backup/:appId; POST /admin/logs/ingest;<br/>POST /admin/logs/analysis/:name<br/>Bearer auth, 64 KiB body cap, X-Trace-Id in and out,<br/>toHttpStatus(error) replaces today's blanket HTTP 400"]
-        storage["<b>Storage</b> (planned, item 15)<br/><code>platform/sqlite.ts</code><br/>scoped node:sqlite handle, Semaphore(1)<br/>write queue, BEGIN IMMEDIATE per mutation"]
-        rclient["<b>ReaderClient</b> (planned, item 17)<br/><code>platform/ipc.ts</code><br/>scoped child process, Deferred correlation<br/>map, per-call timeout, QueueFullError cap"]
+        storage["<b>Storage</b> (item 15)<br/><code>platform/sqlite.ts</code><br/>scoped node:sqlite handle, Semaphore(1)<br/>write queue, BEGIN IMMEDIATE per mutation"]
+        rclient["<b>ReaderClient</b> (item 17)<br/><code>platform/ipc.ts</code><br/>scoped child process, Deferred correlation<br/>map, per-call timeout, QueueFullError cap"]
         backups["<b>Backups</b> (planned, item 19)<br/><code>platform/backup.ts</code><br/>snapshot → verify → hash → PUT object →<br/>PUT manifest → only then latest.json"]
         objstore["<b>ObjectStore</b> (item 18)<br/><code>platform/object_store.ts</code><br/>ObjectStoreLocal or ObjectStoreS3, chosen<br/>by Config; retrying put/get"]
         registry["<b>AppRegistry</b> (planned, item 22)<br/><code>platform/registry.ts</code><br/>appId → schema, functions, token and<br/>file path; no Deno.env of its own"]
@@ -74,7 +74,7 @@ flowchart TB
 
     classDef planned stroke-dasharray: 5 3
     classDef external fill:#f4f4f4
-    class http,storage,rclient,backups,registry planned
+    class http,backups,registry planned
     class files,reader,store,jsonl external
 ```
 
@@ -88,7 +88,7 @@ flowchart TB
 | 4  | HTTP API     | AppRegistry           | Resolve `appId` to its schema, handler map, bearer token and database file path, or fail `UnknownAppError` → 404.                                                                                                                                                                                                                                                                                        |
 | 5  | Backups      | ObjectStore           | PUT the immutable snapshot, PUT its manifest, and **only then** PUT `latest.json`. A failed upload must not advance `latest.json`.                                                                                                                                                                                                                                                                       |
 | 6  | Backups      | Storage               | `VACUUM INTO` a consistent snapshot, including uncheckpointed WAL commits. Snapshot creation takes the mutation queue slot; the upload does not.                                                                                                                                                                                                                                                         |
-| 7  | Config       | every component above | Validated configuration, read from `Deno.env` **once** at layer construction. A bad value fails startup with `ConfigError` and is never served. Landed: `ConfigLive`/`ConfigTest` (item 08) and the one consumer that exists, `LoggingLive` (item 11). The other arrows are planned with their targets (items 15–19, 22).                                                                                |
+| 7  | Config       | every component above | Validated configuration, read from `Deno.env` **once** at layer construction. A bad value fails startup with `ConfigError` and is never served. Landed: `ConfigLive`/`ConfigTest` (item 08) and the consumers that exist, `LoggingLive` (item 11) and `StorageLive` (item 15). The other arrows are planned with their targets (items 19, 22).                                                                                |
 | 8  | `core/`      | every component       | Total, `Either`-returning schema validation, SQL compilation, plan normalisation, event construction and the `Data.TaggedError` taxonomy that `toHttpStatus` maps to a status code. Landed into `Config` (`ConfigError`) and `Logger + EventSink` (`core/events.ts`, `core/logging/rotation.ts`); the pre-port `platform/*.ts` reaches `core/` through the compatibility seam in `platform/compiler.ts`. |
 | 9  | HTTP API     | Logger + EventSink    | One `http` event per request (method, path, app, handler, status, duration, bytes in/out), with the request's trace id annotated onto its fiber so every downstream event carries it.                                                                                                                                                                                                                    |
 | 10 | Storage      | Logger + EventSink    | `sql` events per statement, `tx` events per transaction (commit/rollback/interrupted), `queue` events on rejection. Replaces `platform/registry.ts:trace` and `TRACE_SQL=1`.                                                                                                                                                                                                                             |

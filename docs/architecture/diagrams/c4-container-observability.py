@@ -42,8 +42,8 @@ jsonl_bottom = cv.box(row, 3, 67, [
     "role = server | reader | restore | cli. One JSON object per",
     "line. Rolls on date, hour or 64 MiB. Sweep (item 24, planned):",
     "gzip after 7 days, keep 30 days, 1 GiB cap; today's dir kept.",
-    "Written by platform/logging/{logger,file_sink}.ts, which the",
-    "server and reader entrypoints mount in items 22 and 16.",
+    "Written by platform/logging/{logger,file_sink}.ts; mounted by",
+    "the reader entrypoint since item 16; server mounts in item 22.",
 ], top=(14, 51), bottom=(51,))
 
 row = cv.down(jsonl_bottom + 1, RDR, "(3)")

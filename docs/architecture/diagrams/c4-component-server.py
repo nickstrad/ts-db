@@ -35,7 +35,7 @@ storage_bottom = cv.box(row, L, LW, [
     "handle, Semaphore(1)",
     "write queue, BEGIN",
     "IMMEDIATE per mutation",
-], planned=True, top=(12,), bottom=(12,))
+], planned=False, top=(12,), bottom=(12,))
 cv.box(row, R, RW, [
     "ReaderClient  (item 17)",
     "platform/ipc.ts",
@@ -44,7 +44,7 @@ cv.box(row, R, RW, [
     "Deferred correlation",
     "map, per-call timeout,",
     "QueueFullError cap",
-], planned=True, top=(13,))
+], planned=False, top=(13,))
 
 row = cv.up(storage_bottom + 1, LC, "(6)")
 
