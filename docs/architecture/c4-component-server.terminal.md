@@ -11,13 +11,13 @@ The Effect services and layers that make up the server process after the port, a
 other. Read it bottom-up: `core/` is pure, `Config` is the only thing that touches the environment, and each
 tier above is provided by the tiers below it. `platform/layers.ts` composes the whole stack as `PlatformLive`.
 
-**The bottom three tiers are built, plus Storage (item 15), ObjectStore (item 18) and ReaderClient (item 17); the remaining top services are planned.** Items 02 and 04–09 landed the pure kernel
+**The bottom three tiers are built, plus Storage (item 15), ObjectStore (item 18), ReaderClient (item 17) and Backups (item 19); only the HTTP API and AppRegistry above the kernel tier are still planned.** Items 02 and 04–09 landed the pure kernel
 (`core/errors.ts`, `schema.ts`, `plan.ts`, `events.ts`, `compile/*`, `logging/rotation.ts`, `ipc/framing.ts`)
 and the `platform/services.ts` `Context.Tag` declarations; item 08 landed `ConfigLive`/`ConfigTest`; item 11
 landed the `EventSink` service and the JSONL `Logger` layer, which is the first live layer to consume
 `Config`; item 18 landed the `ObjectStore` scoped service – the `ObjectStoreLocal` and `ObjectStoreS3`
 live layers in `platform/object_store.ts`, with an aws4fetch-signed S3 client, exponential retry with
-jitter, and one `backup/put-object` event per put. item 15 landed the `Storage` scoped service – the `StorageLive` layer in `platform/sqlite.ts`, a single-writer queue capped at 1000 (`QueueFullError`), per-statement tx-expiry guards, `TestClock`/`IdGen` injection, and `VACUUM INTO` running in-queue-but-outside-transaction; a thin `SQLiteWriter` compatibility wrapper remains until items 19/20/22 port their call sites (item 26 deletes it); item 17 landed the `ReaderClient` scoped service – `ReaderClientLive` in `platform/ipc.ts`, which spawns the reader child under `Effect.acquireRelease` (the finalizer closes stdin, waits for exit, then escalates SIGTERM → SIGKILL), correlates replies through a `Ref` of `Deferred`s, caps the outbox at 1000 calls (`QueueFullError`) and times out each call (default 30 s) with typed `CallError`s, emitting queue and lifecycle events via `EventSink`. Nothing else above the kernel tier is a service yet:
+jitter, and one `backup/put-object` event per put. item 15 landed the `Storage` scoped service – the `StorageLive` layer in `platform/sqlite.ts`, a single-writer queue capped at 1000 (`QueueFullError`), per-statement tx-expiry guards, `TestClock`/`IdGen` injection, and `VACUUM INTO` running in-queue-but-outside-transaction; a thin `SQLiteWriter` compatibility wrapper remains until items 20/22 port their call sites (item 26 deletes it); item 17 landed the `ReaderClient` scoped service – `ReaderClientLive` in `platform/ipc.ts`, which spawns the reader child under `Effect.acquireRelease` (the finalizer closes stdin, waits for exit, then escalates SIGTERM → SIGKILL), correlates replies through a `Ref` of `Deferred`s, caps the outbox at 1000 calls (`QueueFullError`) and times out each call (default 30 s) with typed `CallError`s, emitting queue and lifecycle events via `EventSink`; item 19 landed the `Backups` scoped service – `BackupsLive` in `platform/backup.ts`, built over `Storage` (`VACUUM INTO` snapshots), `ObjectStore`, `EventSink`, `Clock` and `IdGen`. `take(appId)` runs the phases snapshot → verify (`PRAGMA quick_check`) → hash → object PUT → manifest PUT → publish `latest.json`, emitting exactly one `backup` event per phase (object PUTs additionally emit ObjectStore's own `put-object` events); a per-app guard (`Ref` of `HashSet`, held under `Effect.acquireRelease`) rejects a second concurrent backup as `BackupAlreadyRunning`, and the temp working directory is created and removed under `acquireRelease`; a deprecated `Backups` class remains for `platform/server.ts` until item 22. Nothing else above the kernel tier is a service yet:
 `platform/server.ts` is still the pre-port code (classes, top-level `await`, its own `Deno.env` reads)
 and does **not** mount `ConfigLive`, `StorageLive`, `LoggingLive` or `ReaderClientLive` until item 22 – it talks to the reader through the temporary `ReaderRPC` bridge in the meantime – so at runtime the landed layers are
 exercised only by their unit tests. The pre-port code does already
@@ -53,15 +53,15 @@ table and §1.3 for the error channel.
 ╎     │   └───────────┬────────────┘      └─────────────────────────┘  ╎
 ╎     │               ▲ (6)                                            ╎
 ╎     │               │                                                ╎
-╎     │   ┌┄┄┄┄┄┄┄┄┄┄┄┬┄┄┄┄┄┄┄┄┄┄┄┄┐      ┌─────────────────────────┐  ╎
-╎     │   ┆ Backups   (item 19)    ┆      │ ObjectStore   (item 18) │  ╎
-╎     │   ┆ platform/backup.ts     ┆      │ platform/object_store   │  ╎
-╎     │(3)┆                        ┆      │                         │  ╎
-╎     ├──►┆ snapshot -> verify ->  ├─(5)─►│ ObjectStoreLocal or     │  ╎
-╎     │   ┆ hash -> PUT object ->  ┆      │ ObjectStoreS3, chosen   │  ╎
-╎     │   ┆ PUT manifest -> only   ┆      │ by Config; retrying     │  ╎
-╎     │   ┆ then latest.json       ┆      │ put / get               │  ╎
-╎     │   └┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┘      └─────────────────────────┘  ╎
+╎     │   ┌───────────┬────────────┐      ┌─────────────────────────┐  ╎
+╎     │   │ Backups   (item 19)    │      │ ObjectStore   (item 18) │  ╎
+╎     │   │ platform/backup.ts     │      │ platform/object_store   │  ╎
+╎     │(3)│                        │      │                         │  ╎
+╎     ├──►│ snapshot -> verify ->  ├─(5)─►│ ObjectStoreLocal or     │  ╎
+╎     │   │ hash -> PUT object ->  │      │ ObjectStoreS3, chosen   │  ╎
+╎     │   │ PUT manifest -> only   │      │ by Config; retrying     │  ╎
+╎     │   │ then latest.json       │      │ put / get               │  ╎
+╎     │   └────────────────────────┘      └─────────────────────────┘  ╎
 ╎     │                                                                ╎
 ╎     │   ┌┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┐      ┌─────────────────────────┐  ╎
 ╎     │   ┆ AppRegistry (item 22)  ┆      │ Logger + EventSink (11) │  ╎
@@ -107,7 +107,7 @@ table and §1.3 for the error channel.
 | 4  | HTTP API     | AppRegistry           | Resolve `appId` to its schema, handler map, bearer token and database file path, or fail `UnknownAppError` → 404.                                                                                                                                                                                                                                                                                        |
 | 5  | Backups      | ObjectStore           | PUT the immutable snapshot, PUT its manifest, and **only then** PUT `latest.json`. A failed upload must not advance `latest.json`.                                                                                                                                                                                                                                                                       |
 | 6  | Backups      | Storage               | `VACUUM INTO` a consistent snapshot, including uncheckpointed WAL commits. Snapshot creation takes the mutation queue slot; the upload does not.                                                                                                                                                                                                                                                         |
-| 7  | Config       | every component above | Validated configuration, read from `Deno.env` **once** at layer construction. A bad value fails startup with `ConfigError` and is never served. Landed: `ConfigLive`/`ConfigTest` (item 08) and the consumers that exist, `LoggingLive` (item 11) and `StorageLive` (item 15). The other arrows are planned with their targets (items 19, 22).                                                                                |
+| 7  | Config       | every component above | Validated configuration, read from `Deno.env` **once** at layer construction. A bad value fails startup with `ConfigError` and is never served. Landed: `ConfigLive`/`ConfigTest` (item 08) and the consumers that exist, `LoggingLive` (item 11) and `StorageLive` (item 15). The other arrows are planned with their targets (item 22); the config→backups arrow covers the planned backup sweep interval.                                                                                |
 | 8  | `core/`      | every component       | Total, `Either`-returning schema validation, SQL compilation, plan normalisation, event construction and the `Data.TaggedError` taxonomy that `toHttpStatus` maps to a status code. Landed into `Config` (`ConfigError`) and `Logger + EventSink` (`core/events.ts`, `core/logging/rotation.ts`); the pre-port `platform/*.ts` reaches `core/` through the compatibility seam in `platform/compiler.ts`. |
 | 9  | HTTP API     | Logger + EventSink    | One `http` event per request (method, path, app, handler, status, duration, bytes in/out), with the request's trace id annotated onto its fiber so every downstream event carries it.                                                                                                                                                                                                                    |
 | 10 | Storage      | Logger + EventSink    | `sql` events per statement, `tx` events per transaction (commit/rollback/interrupted), `queue` events on rejection. Replaces `platform/registry.ts:trace` and `TRACE_SQL=1`.                                                                                                                                                                                                                             |

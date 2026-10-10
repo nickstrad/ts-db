@@ -56,7 +56,7 @@ backups_bottom = cv.box(row, L, LW, [
     "hash -> PUT object ->",
     "PUT manifest -> only",
     "then latest.json",
-], planned=True, top=(12,), right=(4,))
+], planned=False, top=(12,), right=(4,))
 cv.box(row, R, RW, [
     "ObjectStore   (item 18)",
     "platform/object_store",
