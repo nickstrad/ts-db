@@ -33,36 +33,21 @@ import type {
   UnknownAnalysisQuery,
   UnknownAppError,
 } from "../core/errors.ts";
-import type { EventRecord } from "../core/events.ts";
+import type { EventRecord, Level as EventLevel, Role } from "../core/events.ts";
 import type { Schema } from "../sdk/schema.ts";
 import type { AnyDefinition, Functions } from "../sdk/functions.ts";
 
 // ===========================================================================
-// Placeholder types owned by later items
+// Event types owned by core/events.ts, re-exported
 // ===========================================================================
 
-/** The processes that write log records. Each gets its own `logs/<role>/` tree (plan §4.2). */
-export type Role = "server" | "reader" | "restore" | "cli";
-
-/** PLACEHOLDER — owned by item 07 (`core/events.ts`). */
-export type EventKind =
-  | "http"
-  | "handler"
-  | "sql"
-  | "tx"
-  | "queue"
-  | "backup"
-  | "lifecycle"
-  | "ingest";
-
-/** PLACEHOLDER — owned by item 07 (`core/events.ts`). */
-export type EventLevel = "debug" | "info" | "warn" | "error";
-
 /**
- * The canonical event record: `core/events.ts`'s discriminated union over `kind`, re-exported so
- * `EventSink` and existing importers of this module keep one name for it.
+ * The event vocabulary lives in `core/events.ts`; these are re-exported so `EventSink` and existing
+ * importers of this module keep one name for each. `EventRecord` is the canonical discriminated
+ * union over `kind`, `Role` the process that writes a record (each gets its own `logs/<role>/`
+ * tree, plan §4.2), and `EventLevel` is core's `Level`.
  */
-export type { EventRecord };
+export type { EventLevel, EventRecord, Role };
 
 /**
  * A registered app. Structurally what `platform/registry.ts:loadApps` returns today; item 22 turns
