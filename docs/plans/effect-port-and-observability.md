@@ -536,7 +536,7 @@ compatibility wrapper so the existing 20 tests stay green within the same commit
 - **Scoping:** CONCURRENT with 04–07.
 - **Model:** **Sonnet.** Mechanical consolidation of nine `Deno.env.get` call sites behind one
   service, with validation rules that already exist in the code.
-- **Owns:** `platform/config.ts`, `tests/unit/config_test.ts`.
+- **Owns:** `platform/config.ts`, `tests/unit/config_test.ts`, plus the "Configuration" section of `README.md` (nothing else in that file).
 - **Reads:** `core/errors.ts`, `platform/services.ts`, and every current `Deno.env` site
   (`registry.ts`, `server.ts`, `object_store.ts`).
 - **Work:**
@@ -551,6 +551,16 @@ compatibility wrapper so the existing 20 tests stay green within the same commit
   3. `ConfigTest(partial)` merges over documented defaults for tests.
   4. Keep the dev-token defaults (`dev-only`) **and** emit a `lifecycle` warn-level event when a
      default token is in use, replacing today's unconditional `console.error` banner.
+  5. Design the module for extension over time: every option is declared exactly once in a
+     single options table (option name, env var, type, default, human description). Adding a
+     new option later is one row in that table — no new plumbing, no new call sites.
+  6. Enforce the schema with Effect Schema (`effect/Schema`), which is already a dependency.
+     Zod is the fallback only if Effect Schema cannot express a rule — if used, document in a
+     code comment exactly which rule forced the fallback. Do not add Zod speculatively.
+  7. `README.md` gains a "Configuration" section that documents every option: name, env var,
+     default, and what it does, so the README explains how to configure the current platform
+     version. The builder keeps this section in sync with the options table — they must match
+     exactly.
 - **Acceptance criteria:**
   - `deno task test` passes; unit tests cover each validation rule and each default.
   - `grep -rn "Deno.env" platform/ sdk/ core/ | grep -v platform/config.ts` returns nothing after
@@ -558,6 +568,8 @@ compatibility wrapper so the existing 20 tests stay green within the same commit
     message lists them with their owning item numbers.
   - A test proves `ConfigLive` fails with `ConfigError` for `BACKUP_INTERVAL_MS=500` and for
     `S3_BASE_URL` set without credentials.
+  - The reviewer verifies the README "Configuration" section lists exactly the options in the
+    options table (same names, env vars, defaults).
 
 ---
 
