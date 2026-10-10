@@ -25,17 +25,17 @@
  * 3. **The consumer drains, it does not accumulate.** Every iteration takes *everything* queued
  *    (`Queue.takeAll`, which is atomic and cannot lose a value to interruption the way a timed-out
  *    `take` can), writes it in `BATCH_MAX` slices, and sleeps only when it drained less than a full
- *    slice. So there is no long-lived accumulator to grow unboundedly (sq-01 pitfall 2) and a
- *    backlog is never parked behind the flush timer, while a trickle still costs one write per
- *    `eventFlushMs`.
+ *    slice — and only until a producer finds a full slice queued, which ends the sleep early. So
+ *    there is no long-lived accumulator to grow unboundedly (sq-01 pitfall 2) and a backlog is
+ *    never parked behind the flush timer, while a trickle still costs one write per `eventFlushMs`.
  * 4. **Finalizer order is load-bearing.** Finalizers run LIFO, so they are added in reverse:
  *    `close` first, `drain` second, `forkScoped`'s interrupt last. Shutdown therefore runs
  *    interrupt → drain → close: the consumer stops, what it left behind (plus anything still in the
  *    queue) is written, and only then is the handle closed. Reverse that order and the drain writes
  *    into a closed handle (sq-01 pitfall 1).
  *
- * Writes are `Effect.uninterruptible`, so an interrupt arriving mid-flush cannot leave a half-written
- * batch for the drain to duplicate. Signal handling is *not* wired here: graceful shutdown is
+ * Take-and-write is `Effect.uninterruptible`, so an interrupt arriving mid-flush cannot leave a
+ * half-written batch for the drain to duplicate, nor strand a batch already taken off the queue. Signal handling is *not* wired here: graceful shutdown is
  * whatever closes this layer's scope, and the server/reader entrypoints (items 16 and 22) own the
  * SIGTERM/SIGINT wiring that gets there (sq-01 pitfall 4).
  *
@@ -47,6 +47,7 @@ import {
   Cause,
   Chunk,
   Clock,
+  Deferred,
   Duration,
   Effect,
   Exit,
@@ -75,7 +76,7 @@ import {
   EventSink,
   type EventSinkService,
 } from "../services.ts";
-import { type FileSink, makeFileSink } from "./file_sink.ts";
+import { type FileSink, makeFileSink, SinkIoError } from "./file_sink.ts";
 
 /** Hard batch threshold: one append carries at most this many records (plan item 11 step 2). */
 const BATCH_MAX = 256;
@@ -332,6 +333,19 @@ function renderCause(cause: Cause.Cause<unknown>): string {
   }
 }
 
+/** A sink failure as one stderr-sized line: the operation, the path, and what went wrong. */
+function describeFailure(cause: Cause.Cause<unknown>): string {
+  try {
+    const failure = Option.getOrUndefined(Cause.failureOption(cause));
+    if (failure instanceof SinkIoError) {
+      return `${failure.operation} ${failure.path}: ${String(failure.cause)}`;
+    }
+  } catch {
+    // Fall through to the generic rendering.
+  }
+  return renderCause(cause);
+}
+
 /** What one sink instance exposes: the frozen service, plus the `Logger` that shares its queue. */
 interface SinkParts {
   readonly service: EventSinkService;
@@ -382,7 +396,7 @@ function makeSink(role: LogRole): Effect.Effect<SinkParts, never, Config | Scope
       counters.lastStderrMs = nowMs;
       console.error(
         `ts-db event sink (${role}): ${counters.failed} record(s) lost to I/O failure; ` +
-          `latest: ${renderCause(cause)}`,
+          `latest: ${describeFailure(cause)}`,
       );
     };
 
@@ -442,29 +456,47 @@ function makeSink(role: LogRole): Effect.Effect<SinkParts, never, Config | Scope
       );
 
     /**
-     * The batching fiber: drain, write, and sleep only when there was nothing left to drain.
+     * Takes everything queued and writes it, returning how many records it took.
      *
-     * `Queue.takeAll` is a single atomic poll, so interruption can never strand a record the way an
-     * interrupted `take` can; a full slice means there is a backlog, and the loop goes straight
-     * round again instead of waiting out the timer.
+     * Uninterruptible from the take onward: `Queue.takeAll` is a single atomic poll, and an interrupt
+     * landing between it and `flush` would strand the records it just took.
+     */
+    const drainOnce: Effect.Effect<number> = Effect.uninterruptible(
+      Effect.flatMap(Queue.takeAll(queue), (chunk) => {
+        const records = Chunk.toReadonlyArray(chunk);
+        return Effect.as(flush(records), records.length);
+      }),
+    );
+
+    /**
+     * Completed by `offer` once a full batch is waiting, so the consumer does not sleep out the flush
+     * period while the queue overflows. Replaced after every pause, before the next take, so an offer
+     * that lands mid-flush wakes the next pause rather than a deferred nobody awaits.
+     */
+    let wake = Deferred.unsafeMake<void>(FiberId.none);
+
+    const pause: Effect.Effect<void> = Effect.zipRight(
+      Effect.suspend(() => Effect.raceFirst(Effect.sleep(Duration.millis(periodMs)), Deferred.await(wake))),
+      Effect.sync(() => {
+        wake = Deferred.unsafeMake<void>(FiberId.none);
+      }),
+    );
+
+    /**
+     * The batching fiber: drain, write, and pause only when there was less than a full slice.
+     *
+     * A full slice means there is a backlog, and the loop goes straight round again instead of
+     * waiting out the timer; a pause ends early when `offer` signals a full batch.
      */
     const consumer: Effect.Effect<never> = Effect.gen(function* () {
       while (true) {
-        const drained = Chunk.toReadonlyArray(yield* Queue.takeAll(queue));
-        if (drained.length === 0 && counters.dropped === 0) {
-          yield* Effect.sleep(Duration.millis(periodMs));
-          continue;
-        }
-        yield* flush(drained);
-        if (drained.length < BATCH_MAX) yield* Effect.sleep(Duration.millis(periodMs));
+        const drained = yield* drainOnce;
+        if (drained < BATCH_MAX) yield* pause;
       }
     });
 
     /** Last writes of the process: whatever is still queued, then the open handle is closed. */
-    const drain: Effect.Effect<void> = Effect.gen(function* () {
-      const remaining = Chunk.toReadonlyArray(yield* Queue.takeAll(queue));
-      yield* flush(remaining);
-    });
+    const drain: Effect.Effect<void> = Effect.asVoid(drainOnce);
 
     // Finalizers run LIFO, so they are registered in reverse of the order they must run in:
     // `close` (added first, runs last), `drain` (added second, runs before close), and
@@ -483,17 +515,21 @@ function makeSink(role: LogRole): Effect.Effect<SinkParts, never, Config | Scope
      *
      * Returns nothing and throws nothing: a record below the configured level is skipped, a record
      * the queue will not take is counted. `unsafeOffer` is what keeps this one step with no fiber
-     * yield, which is what "logging never blocks a mutation" means in practice.
+     * yield, which is what "logging never blocks a mutation" means in practice. Waking the consumer
+     * is synchronous too: `unsafeDone` on an already-completed deferred is a no-op.
      */
     const offer = (record: EventRecord): void => {
       try {
         if (rankOf(record.level) < LEVEL_ORDER[minimum]) return;
-        if (!Queue.unsafeOffer(queue, record)) {
+        const accepted = Queue.unsafeOffer(queue, record);
+        const depth = Option.getOrElse(queue.unsafeSize(), () => capacity);
+        if (!accepted) {
           counters.dropped += 1;
           // Depth as it was when the record was rejected, not as the next flush finds it: by then
           // the consumer has drained the queue and the number would understate the saturation.
-          counters.droppedDepth = Option.getOrElse(queue.unsafeSize(), () => capacity);
+          counters.droppedDepth = depth;
         }
+        if (depth >= BATCH_MAX) Deferred.unsafeDone(wake, Effect.void);
       } catch {
         // Unreachable in practice (the gate reads one field and the offer cannot fail), but `emit`
         // promises `Effect<void, never>`, so even a hostile record only costs a counted loss.

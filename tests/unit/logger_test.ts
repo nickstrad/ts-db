@@ -313,6 +313,44 @@ test("a date boundary driven by TestClock opens a new dated directory", async ()
   });
 });
 
+test("shutdown after a timer flush drains into the open file, then closes it", async () => {
+  await withTempDir(async (dir) => {
+    // One timer flush opens the file; the second record is emitted with virtual time frozen, so only
+    // the drain finalizer can write it. Drain-before-close appends it to the same `-001` file; the
+    // reverse order (close, then drain) would reopen onto a second `-002` file and leak its handle.
+    const flushMs = 1_000;
+    const settle = Effect.promise(() => realSleep(50));
+    const first = event();
+    const second = event();
+
+    const body = Effect.gen(function* () {
+      const sink = yield* eventSink;
+      yield* settle;
+      yield* sink.emit(first);
+      yield* settle;
+      yield* TestClock.adjust(Duration.millis(flushMs));
+      const flushed = yield* waitFor(async () => (await readLines(dir)).length === 1);
+      yield* sink.emit(second);
+      return flushed;
+    });
+
+    const flushed = await Effect.runPromise(
+      body.pipe(
+        Effect.provide(eventSinkLayer("server")),
+        Effect.provide(ConfigTest({ logging: { dir, eventFlushMs: flushMs } })),
+        Effect.provide(TestContext.TestContext),
+      ),
+    );
+
+    assert.ok(flushed, "the timer flush never reached disk");
+    const files = await logFiles(dir);
+    assert.equal(files.length, 1, `expected one data file, got ${files.join(", ")}`);
+    assert.match(files[0], /-001\.jsonl$/);
+    const parsed = await readRecords(dir);
+    assert.deepEqual(parsed.map((r) => r["eventId"]), [first.eventId, second.eventId]);
+  });
+});
+
 test("exceeding maxFileBytes rolls onto -002 within the same hour", async () => {
   await withTempDir(async (dir) => {
     const first = [event(), event(), event()];
