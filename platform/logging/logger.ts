@@ -70,12 +70,7 @@ import {
   toJsonLine,
 } from "../../core/events.ts";
 import type { LogRole, RotationPolicy } from "../../core/logging/rotation.ts";
-import {
-  Config,
-  type EventRecord as DeclaredEventRecord,
-  EventSink,
-  type EventSinkService,
-} from "../services.ts";
+import { Config, EventSink, type EventSinkService } from "../services.ts";
 import { type FileSink, makeFileSink, SinkIoError } from "./file_sink.ts";
 
 /** Hard batch threshold: one append carries at most this many records (plan item 11 step 2). */
@@ -171,28 +166,13 @@ function isoOf(ms: number): string {
   }
 }
 
-/** What `emit` accepts: `core/events.ts`'s union, or `platform/services.ts`'s envelope placeholder. */
-export type EmittableEvent = EventRecord | DeclaredEventRecord;
-
 /**
- * `EventSink` as this item implements it.
- *
- * `platform/services.ts` is frozen at item 02's placeholder envelope, whose `ts` is epoch millis
- * and whose payload is an `attrs` bag; item 07's `EventRecord` carries an ISO-8601 `ts` and its
- * payload inline, and item 07 did not rewrite the placeholder (declarations are item 02's file).
- * So the declared parameter type and the record type every other item builds no longer match.
- *
- * `EventSinkLive` accepts both — `toEventRecord` normalizes either — but the frozen `Context.Tag`
- * can only advertise the placeholder. This interface and the `eventSink` accessor below restore the
- * precision the tag cannot express, in one place instead of a cast at every emit site. When a later
- * item replaces the placeholder in `platform/services.ts` (as item 07's comment anticipates), this
- * pair collapses into `EventSinkService` and `EventSink`.
+ * `EventSink` with `emit` typed for `core/events.ts` records. `EventSinkService` now declares the
+ * same canonical type, so this is an alias kept for the existing `eventSink` accessor's callers.
  */
-export interface EventSinkRecordService {
-  emit(event: EmittableEvent): Effect.Effect<void>;
-}
+export type EventSinkRecordService = EventSinkService;
 
-/** Widens a sink service to the canonical record type. See `EventSinkRecordService`. */
+/** Identity: a sink service is already typed for canonical records. See `EventSinkRecordService`. */
 export function asRecordSink(sink: EventSinkService): EventSinkRecordService {
   return sink;
 }
@@ -202,38 +182,6 @@ export const eventSink: Effect.Effect<EventSinkRecordService, never, EventSink> 
   EventSink,
   asRecordSink,
 );
-
-/**
- * Normalizes an emitted event into the record `toJsonLine` serializes.
- *
- * Two shapes reach `emit`, because `platform/services.ts` is frozen at item 02's placeholder
- * envelope (`ts` as epoch millis, with a kind-specific `attrs` bag) while item 07's `EventRecord`
- * carries an ISO-8601 `ts` and its payload inline. A placeholder record is converted: `ts` becomes
- * ISO-8601 and `attrs` is flattened into the payload, which is where the per-kind fields live.
- *
- * An already-canonical record is returned **by identity**, deliberately: `sqlEvent`'s opt-in marker
- * for bind values is a symbol property, and spreading the record would strip it, silently turning
- * an authorized `bindValues` into `null`.
- *
- * Total: a hostile getter or an unconvertible `ts` yields a usable record rather than a throw.
- */
-export function toEventRecord(event: EmittableEvent): EventRecord {
-  try {
-    const source = event as unknown as Record<string, unknown>;
-    const ts = source["ts"];
-    const attrs = source["attrs"];
-    if (typeof ts === "string" && attrs === undefined) return event as EventRecord;
-    const { attrs: _attrs, ...rest } = source;
-    const payload = attrs !== null && typeof attrs === "object" ? attrs : {};
-    return {
-      ...payload,
-      ...rest,
-      ts: typeof ts === "number" ? isoOf(ts) : typeof ts === "string" ? ts : isoOf(0),
-    } as unknown as EventRecord;
-  } catch {
-    return event as EventRecord;
-  }
-}
 
 /** Reads `annotations` as a plain object. Values stay `unknown`; `toJsonLine` redacts them. */
 function annotationsOf(entry: Logger.Logger.Options<unknown>): Record<string, unknown> {
@@ -538,9 +486,11 @@ function makeSink(role: LogRole): Effect.Effect<SinkParts, never, Config | Scope
     };
 
     const service: EventSinkService = {
-      emit: (event: EmittableEvent): Effect.Effect<void> =>
+      emit: (event: EventRecord): Effect.Effect<void> =>
         Effect.sync(() => {
-          offer(toEventRecord(event));
+          // Identity, deliberately: `sqlEvent`'s bind-value marker is a symbol property that a
+          // spread would strip, silently turning an authorized `bindValues` into `null`.
+          offer(event);
         }),
     };
 

@@ -425,7 +425,7 @@ function assemble(values: Decoded): Effect.Effect<ConfigService, ConfigError> {
     jsonAppToken === DEV_TOKEN_DEFAULT
   ) {
     // HOOK(item-07, item-22): emit a lifecycle warn-level event
-    // { kind: "lifecycle", level: "warn", attrs: { message: "default dev-only token in use" } }
+    // { kind: "lifecycle", level: "warn", phase: "config", detail: "default dev-only token in use" }
     // via core/events.ts's EventSink once item 07 lands. OWNERSHIP: item 22 (server port) owns
     // this as a named acceptance follow-up — when item 22 ports server.ts onto this Config it
     // must emit this warning whenever a dev-only token default is in effect, replacing today's

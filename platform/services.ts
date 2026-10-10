@@ -33,50 +33,21 @@ import type {
   UnknownAnalysisQuery,
   UnknownAppError,
 } from "../core/errors.ts";
+import type { EventRecord, Level as EventLevel, Role } from "../core/events.ts";
 import type { Schema } from "../sdk/schema.ts";
 import type { AnyDefinition, Functions } from "../sdk/functions.ts";
 
 // ===========================================================================
-// Placeholder types owned by later items
+// Event types owned by core/events.ts, re-exported
 // ===========================================================================
 
-/** The processes that write log records. Each gets its own `logs/<role>/` tree (plan §4.2). */
-export type Role = "server" | "reader" | "restore" | "cli";
-
-/** PLACEHOLDER — owned by item 07 (`core/events.ts`). */
-export type EventKind =
-  | "http"
-  | "handler"
-  | "sql"
-  | "tx"
-  | "queue"
-  | "backup"
-  | "lifecycle"
-  | "ingest";
-
-/** PLACEHOLDER — owned by item 07 (`core/events.ts`). */
-export type EventLevel = "debug" | "info" | "warn" | "error";
-
 /**
- * PLACEHOLDER — owned by item 07 (`core/events.ts`), which replaces this with the discriminated
- * union over `kind`. Only the shared envelope is fixed here, because that is all `EventSink` needs
- * in order to be typed. Item 07 keeps these envelope field names.
+ * The event vocabulary lives in `core/events.ts`; these are re-exported so `EventSink` and existing
+ * importers of this module keep one name for each. `EventRecord` is the canonical discriminated
+ * union over `kind`, `Role` the process that writes a record (each gets its own `logs/<role>/`
+ * tree, plan §4.2), and `EventLevel` is core's `Level`.
  */
-export interface EventRecord {
-  readonly kind: EventKind;
-  readonly eventId: string;
-  /** Epoch milliseconds, from the `Clock` service. */
-  readonly ts: number;
-  readonly level: EventLevel;
-  readonly role: Role;
-  readonly pid: number;
-  readonly traceId: string;
-  readonly spanId?: string;
-  readonly parentSpanId?: string;
-  readonly appId?: string;
-  /** Kind-specific payload; item 07 replaces this with per-kind fields. */
-  readonly attrs?: Readonly<Record<string, unknown>>;
-}
+export type { EventLevel, EventRecord, Role };
 
 /**
  * A registered app. Structurally what `platform/registry.ts:loadApps` returns today; item 22 turns
