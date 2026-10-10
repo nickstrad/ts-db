@@ -12,8 +12,10 @@ The separately running things inside the platform boundary on the request path �
 library, the app database files — and the one external store they talk to. Inside the server process is
 expanded at Level 3 (`c4-component-server.terminal.md`).
 
-Everything here exists on `main` today, in its pre-Effect-port form. The Effect-TS port changes _what is
-inside_ the server and reader processes (Level 3), not this container topology.
+Everything here exists on `main` today. The client SDK is already Effect-based (item 10); the two processes
+are still the pre-port code, although `platform/ipc.ts` already frames the RPC stream with the pure decoder
+from `core/ipc/framing.ts` (item 05). The Effect-TS port changes _what is inside_ the server and reader
+processes (Level 3), not this container topology.
 
 <!-- c4-render: diagrams/c4-container-platform.py -->
 
@@ -24,9 +26,10 @@ inside_ the server and reader processes (Level 3), not this container topology.
 ╎  │ Typed client SDK           │                                      ╎
 ╎  │ [library, caller process]  │                                      ╎
 ╎  │                            │                                      ╎
-╎  │ sdk/client.ts + an import  │                                      ╎
-╎  │ type of the app's handler  │                                      ╎
-╎  │ map. Sends a name, no SQL. │                                      ╎
+╎  │ sdk/client.ts (item 10) +  │                                      ╎
+╎  │ an import type of the      │                                      ╎
+╎  │ app's handler map. Sends a │                                      ╎
+╎  │ name + X-Trace-Id, no SQL. │                                      ╎
 ╎  └─────────────┬──────────────┘                                      ╎
 ╎                │ (1)                                                 ╎
 ╎                ▼                                                     ╎
@@ -67,13 +70,13 @@ inside_ the server and reader processes (Level 3), not this container topology.
 
 ## Relationships
 
-| # | From             | To                         | What travels over it                                                                                                                                                                                                                                                                                 |
-| - | ---------------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1 | Typed client SDK | Server process             | `POST /apps/<appId>/<query\|mutation>/<name>`, `Authorization: Bearer <app token>`, JSON body capped at 64 KiB. `import type` keeps server handlers and database drivers out of the client bundle. Planned: an `X-Trace-Id` header in and out (plan items 10, 22).                                   |
-| 2 | Server process   | Reader process             | The server spawns the reader at startup and pings it. Requests and replies are newline-delimited JSON over the child's stdin/stdout, correlated by request id. The reader's **stdout is reserved for this protocol** — its logs go to stderr today, and to its own log directory after plan item 16. |
-| 3 | Server process   | App SQLite files           | `node:sqlite` `DatabaseSync`. One writer per app, serialized by a per-app queue; each mutation runs in one `BEGIN IMMEDIATE … COMMIT`, and the handler's own `db.get`/`db.find` calls execute inside that same transaction.                                                                          |
-| 4 | Reader process   | App SQLite files           | DuckDB's `sqlite` extension, `ATTACH … (TYPE SQLITE, READ_ONLY)` against the **live** file — there is no second copy and no replication lag. Query handlers are serialized, one at a time, each in a fresh transaction.                                                                              |
-| 5 | Server process   | S3-compatible object store | `VACUUM INTO` a temp snapshot (serialized with mutations) → `PRAGMA quick_check` → SHA-256 → PUT the immutable snapshot → PUT its manifest → only then PUT `latest.json`. The upload runs after the mutation queue is released. A failed upload never advances `latest.json`.                        |
+| # | From             | To                         | What travels over it                                                                                                                                                                                                                                                                                                                                                |
+| - | ---------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1 | Typed client SDK | Server process             | `POST /apps/<appId>/<query\|mutation>/<name>`, `Authorization: Bearer <app token>`, JSON body capped at 64 KiB. `import type` keeps server handlers and database drivers out of the client bundle. Since item 10 every call carries an `X-Trace-Id` (caller-supplied or a fresh UUID); the server echoes it and annotates its events with it once item 22 lands.    |
+| 2 | Server process   | Reader process             | The server spawns the reader at startup and pings it. Requests and replies are newline-delimited JSON over the child's stdin/stdout, correlated by request id, framed by the pure decoder in `core/ipc/framing.ts` (item 05). The reader's **stdout is reserved for this protocol** — its logs go to stderr today, and to its own log directory after plan item 16. |
+| 3 | Server process   | App SQLite files           | `node:sqlite` `DatabaseSync`. One writer per app, serialized by a per-app queue; each mutation runs in one `BEGIN IMMEDIATE … COMMIT`, and the handler's own `db.get`/`db.find` calls execute inside that same transaction.                                                                                                                                         |
+| 4 | Reader process   | App SQLite files           | DuckDB's `sqlite` extension, `ATTACH … (TYPE SQLITE, READ_ONLY)` against the **live** file — there is no second copy and no replication lag. Query handlers are serialized, one at a time, each in a fresh transaction.                                                                                                                                             |
+| 5 | Server process   | S3-compatible object store | `VACUUM INTO` a temp snapshot (serialized with mutations) → `PRAGMA quick_check` → SHA-256 → PUT the immutable snapshot → PUT its manifest → only then PUT `latest.json`. The upload runs after the mutation queue is released. A failed upload never advances `latest.json`.                                                                                       |
 
 Edge 5 is routed down the left-hand channel so it can leave the boundary without crossing the SQLite-files
 box; it starts at the **server process**, not at the database files.

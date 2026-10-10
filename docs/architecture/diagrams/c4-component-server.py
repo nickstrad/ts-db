@@ -80,14 +80,14 @@ registry_bottom = cv.box(row, L, LW, [
     "of its own",
 ], planned=True, bottom=(12,))
 cv.box(row, R, RW, [
-    "Logger + EventSink",
-    "platform/logging/ (11)",
+    "Logger + EventSink (11)",
+    "platform/logging/*.ts",
     "",
     "Effect Logger -> JSONL",
     "sink; dropping queue,",
-    "never fails a mutation;",
-    "retention sweep (24)",
-], planned=True, bottom=(13,))
+    "never fails a mutation.",
+    "Sweeper: 24 (planned)",
+], bottom=(13,))
 registry_tap = row + 4
 
 # Two edges from the HTTP API skip the tier below it, so they route down the channel.
@@ -104,22 +104,23 @@ config_bottom = cv.box(row, L, 59, [
     "The only module that reads Deno.env. One options table",
     "(name, env var, type, default) validated with Effect",
     "Schema; fails at layer construction, not at first use.",
-], planned=True, top=(12, 45), bottom=(12, 45))
+    "Used by the logging layer today; server.ts ports in 22.",
+], top=(12, 45), bottom=(12, 45))
 
 row = cv.up(config_bottom + 1, LC, "(8)")
 cv.up(config_bottom + 1, RC, "(8)")
 
 core_bottom = cv.box(row, L, 59, [
-    "core/ + platform/services.ts   (items 02, 04-09)",
+    "core/ + platform/services.ts   (items 02, 04-09, 21)",
     "",
-    "landed (item 02): errors.ts, platform/services.ts",
-    "",
-    "planned: schema.ts  plan.ts  events.ts",
-    "compile/{dialect,ddl,select,write,decode}.ts",
-    "logging/rotation.ts  ipc/framing.ts  eventlog/*.ts",
+    "landed (items 02, 04-09): errors.ts  schema.ts  plan.ts",
+    "events.ts  compile/{dialect,ddl,select,write,decode}.ts",
+    "logging/rotation.ts  ipc/framing.ts; services.ts tags",
+    "planned (item 21): eventlog/{ddl,offsets}.ts",
     "No Deno.*, no node:*, no npm:*, no platform/ or sdk/.",
-], planned=True, top=(12, 45))
+], top=(12, 45))
 
-cv.frame(0, 0, core_bottom + 2, 71, "Server process - Effect layers (PlatformLive, planned)")
+cv.frame(0, 0, core_bottom + 2, 71,
+         "Server process - Effect layers (PlatformLive, item 22, planned)")
 
 print(cv.render())

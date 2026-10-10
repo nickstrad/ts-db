@@ -69,7 +69,7 @@ cv.box(row, 24, 22, [
     "[External] planned",
     "",
     "any DuckDB client",
-    "over events.duckdb",
+    "on eventlog.duckdb",
 ], planned=True, top=(11,))
 cv.box(row, 48, 22, [
     "k6 load generator",

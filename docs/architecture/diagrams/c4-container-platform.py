@@ -16,9 +16,10 @@ client_bottom = cv.box(2, 3, 30, [
     "Typed client SDK",
     "[library, caller process]",
     "",
-    "sdk/client.ts + an import",
-    "type of the app's handler",
-    "map. Sends a name, no SQL.",
+    "sdk/client.ts (item 10) +",
+    "an import type of the",
+    "app's handler map. Sends a",
+    "name + X-Trace-Id, no SQL.",
 ], bottom=(14,))
 
 row = cv.down(client_bottom + 1, SRV, "(1)")

@@ -37,12 +37,14 @@ cv.down(srv_bottom + 1, RDR, "(2)")
 
 jsonl_bottom = cv.box(row, 3, 67, [
     "JSONL log directories                   [filesystem] (item 11)",
-    "logs/<role>/<YYYY-MM-DD>/events-<HH>-<pid>-<seq>.jsonl",
+    "<LOG_DIR>/<role>/<YYYY-MM-DD>/events-<HH>-<pid>-<seq>.jsonl",
     "",
     "role = server | reader | restore | cli. One JSON object per",
-    "line. Rolls on date, hour or 64 MiB. Retention: gzip after 2",
-    "days, keep 14 days, 2 GiB cap; today's dir is never swept.",
-], planned=True, top=(14, 51), bottom=(51,))
+    "line. Rolls on date, hour or 64 MiB. Sweep (item 24, planned):",
+    "gzip after 7 days, keep 30 days, 1 GiB cap; today's dir kept.",
+    "Written by platform/logging/{logger,file_sink}.ts, which the",
+    "server and reader entrypoints mount in items 22 and 16.",
+], top=(14, 51), bottom=(51,))
 
 row = cv.down(jsonl_bottom + 1, RDR, "(3)")
 
@@ -59,7 +61,8 @@ duck_bottom = cv.box(row, 40, 30, [
     "DuckDB event log",
     "(item 21) [DuckDB file]",
     "",
-    "logs/duckdb/events.duckdb",
+    "EVENTLOG_DUCKDB, default",
+    "<DATA_DIR>/eventlog.duckdb",
     "append-only tables plus",
     "_ingest_state offsets;",
     "INSERT only",
