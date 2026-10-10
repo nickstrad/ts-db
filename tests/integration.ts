@@ -1,7 +1,8 @@
 /** Real Deno + DuckDB integration checks. Run separately from core tests. */
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
-import { createClient } from "../sdk/client.ts";
+// TEMPORARY BRIDGE (item 10): the Effect client's promise wrapper, until this file is ported.
+import { createPromiseClient } from "../sdk/client.ts";
 import type { functions } from "../app/functions.ts";
 import type { ResultOf } from "../sdk/functions.ts";
 import { sha256 } from "../platform/object_store.ts";
@@ -36,7 +37,7 @@ try {
   assert.ok(ready, "Server never became ready");
   const games: Record<string, string> = {};
   for (const appId of ["tic-tac-toe", "tic-tac-toe-json"]) {
-    const client = createClient<typeof functions>(base, appId, "dev-only");
+    const client = createPromiseClient<typeof functions>(base, appId, "dev-only");
     const { gameId } = await client.mutation("createGame", { xPlayer: "alice", oPlayer: "bob" });
     games[appId] = gameId;
     let game = await client.query("getGame", { gameId });
@@ -62,7 +63,7 @@ try {
     assert.equal(await sha256(snapshot), manifest.sha256);
     snapshots.push(manifest);
   }
-  const client = createClient<typeof functions>(base, "tic-tac-toe-json", "dev-only");
+  const client = createPromiseClient<typeof functions>(base, "tic-tac-toe-json", "dev-only");
   assert.equal(await client.query("getGame", { gameId: games["tic-tac-toe"] }), null, "Files must be app-scoped");
   const response = await fetch(`${base}/apps/tic-tac-toe/query/listGames`, {
     method: "POST", body: JSON.stringify({ status: "won" }),

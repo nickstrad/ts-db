@@ -1,8 +1,9 @@
 // Reader process ONLY. It deliberately never imports node:sqlite.
 import { DuckDBInstance, type DuckDBConnection } from "@duckdb/node-api";
+import { Effect } from "effect";
 import { Documents } from "../sdk/db.ts";
 import type { Schema } from "../sdk/schema.ts";
-import type { AnyDefinition } from "../sdk/functions.ts";
+import { type AnyDefinition, runHandlerAsPromise } from "../sdk/functions.ts";
 import { compileSelect, decode, literal, type SQL } from "./compiler.ts";
 // Keep this type local: do NOT import the SQLite module merely for its logger.
 type Trace = (engine: "sqlite" | "duckdb", sql: SQL) => void;
@@ -29,17 +30,22 @@ export class DuckReader<S extends Schema> {
     if (definition.kind !== "query") throw new Error("Expected a query");
     await this.connection.run("BEGIN TRANSACTION");
     let active = true;
-    const db = new Documents<S>(async (operation) => {
-      if (!active) throw new Error("Query context has expired");
-      if (operation.kind !== "select") throw new Error("Queries cannot write");
-      const sql = compileSelect(this.schema, operation, "duckdb");
-      this.trace("duckdb", sql);
-      const parameters = Object.fromEntries(sql.values.map((value, i) => [`p${i + 1}`, value]));
-      const reader = await this.connection.runAndReadAll(sql.text, parameters);
-      return decode(this.schema, operation, reader.getRowObjects());
-    });
+    // TEMPORARY BRIDGE (item 10): removed by item 16, which turns this class into the scoped
+    // `Reader` service and builds an Effect `Execute` directly. Same shape as the writer's bridge:
+    // `Effect.promise` adapts the promise-returning executor, and the handler effect is run here.
+    const db = new Documents<S>((operation) =>
+      Effect.promise(async () => {
+        if (!active) throw new Error("Query context has expired");
+        if (operation.kind !== "select") throw new Error("Queries cannot write");
+        const sql = compileSelect(this.schema, operation, "duckdb");
+        this.trace("duckdb", sql);
+        const parameters = Object.fromEntries(sql.values.map((value, i) => [`p${i + 1}`, value]));
+        const reader = await this.connection.runAndReadAll(sql.text, parameters);
+        return decode(this.schema, operation, reader.getRowObjects());
+      })
+    );
     try {
-      const result = await definition.invoke(db, args);
+      const result = await runHandlerAsPromise(definition, db, args);
       const safeResult = JSON.parse(JSON.stringify(result ?? null));
       await this.connection.run("COMMIT");
       return safeResult;

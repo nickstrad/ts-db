@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { Effect } from "effect";
 import { SQLiteWriter } from "../platform/sqlite.ts";
 import { compileDDL, compileSelect, decode } from "../platform/compiler.ts";
 import { defineFunctions } from "../sdk/functions.ts";
@@ -13,16 +14,20 @@ import { schema } from "../app/schema.ts";
 import { functions } from "../app/functions.ts";
 import type { ArgsOf, Names, ResultOf } from "../sdk/functions.ts";
 
+// Handlers are Effects since item 10, so the three ad-hoc definitions in this file are
+// `Effect.gen` bodies. Every assertion below is untouched; item 20 ports the file to the Effect
+// test runner and the test layers.
 const inspector = defineFunctions(schema).mutation({
   args: {},
-  async handler({ db }) {
-    return {
-      games: await db.find("games").limit(1000).collect(),
-      moves: await db.find("moves").sort("moveNumber").limit(1000).collect(),
-      wins: await db.find("games", { status: "won" }).countBy("winner"),
-      count: await db.find("games").count(),
-    };
-  },
+  handler: ({ db }) =>
+    Effect.gen(function* () {
+      return {
+        games: yield* db.find("games").limit(1000).collect(),
+        moves: yield* db.find("moves").sort("moveNumber").limit(1000).collect(),
+        wins: yield* db.find("games", { status: "won" }).countBy("winner"),
+        count: yield* db.find("games").count(),
+      };
+    }),
 });
 async function fixture(storage: Storage, run: (ctx: {
   writer: SQLiteWriter<typeof schema>;
@@ -85,11 +90,12 @@ for (const storage of ["columns", "json"] as const) {
       const { gameId } = await call("createGame", { xPlayer: "alice", oPlayer: "bob" });
       const broken = defineFunctions(schema).mutation({
         args: { gameId: v.string() },
-        async handler({ db }, { gameId }) {
-          await db.patch("games", gameId, { board: ["X", null, null, null, null, null, null, null, null] });
-          await db.insert("moves", { gameId, playerId: "alice", mark: "X", cell: 0, moveNumber: 1 });
-          throw new Error("Injected failure after both writes");
-        },
+        handler: ({ db }, { gameId }) =>
+          Effect.gen(function* () {
+            yield* db.patch("games", gameId, { board: ["X", null, null, null, null, null, null, null, null] });
+            yield* db.insert("moves", { gameId, playerId: "alice", mark: "X", cell: 0, moveNumber: 1 });
+            return yield* Effect.fail(new Error("Injected failure after both writes"));
+          }),
       });
       await assert.rejects(writer.mutation(broken, { gameId }), /Injected failure/);
       const state = await inspect();
@@ -160,10 +166,16 @@ test("each app file has its own data, even when IDs collide", async () => {
 
 test("same logical plan generates both dialects and both storage layouts", async () => {
   let plan: import("../sdk/db.ts").SelectPlan | undefined;
-  const db = new Documents<typeof schema>(async (op) => {
-    assert.equal(op.kind, "select"); plan = op as import("../sdk/db.ts").SelectPlan; return [];
-  });
-  await db.find("games", { status: "playing" }).sort("_creationTime", "desc").limit(20).collect();
+  const db = new Documents<typeof schema>((op) =>
+    Effect.sync(() => {
+      assert.equal(op.kind, "select");
+      plan = op as import("../sdk/db.ts").SelectPlan;
+      return [];
+    })
+  );
+  await Effect.runPromise(
+    db.find("games", { status: "playing" }).sort("_creationTime", "desc").limit(20).collect(),
+  );
   const columnSQL = compileSelect(schema, plan!, "duckdb");
   const jsonSQL = compileSelect(withStorage(schema, "json"), plan!, "duckdb");
   const sqliteSQL = compileSelect(withStorage(schema, "json"), plan!, "sqlite");
