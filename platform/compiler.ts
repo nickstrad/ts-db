@@ -61,6 +61,8 @@ export function formatCompileError(error: CompileError): Error {
         return "Invalid limit";
       case "invalid-ordering":
         return "Invalid ordering";
+      case "empty-enum":
+        return `Enum has no values: ${error.field}`;
       default:
         return EffectFunction.absurd<string>(error.reason);
     }
@@ -70,8 +72,8 @@ export function formatCompileError(error: CompileError): Error {
 
 /**
  * Renders a decode failure. `unsafe-integer` keeps the pre-port wording; the other two reasons are
- * new — the old code let `JSON.parse`'s own `SyntaxError` escape, and never checked for a missing
- * column at all.
+ * new — the old code let `JSON.parse`'s own `SyntaxError` escape, and a column missing from the
+ * row now surfaces as `missing-column` instead of failing downstream.
  */
 export function formatDecodeError(error: DecodeError): Error {
   const message = ((): string => {

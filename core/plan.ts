@@ -43,6 +43,9 @@ export type SelectPlan = {
 };
 
 /** The inclusive bounds every plan's `limit` must sit within. The MVP has no pagination cursor. */
+// Coordination (item 09 -> item 10): `sdk/db.ts:34` still carries its own 1..1000 limit check.
+// Item 10 should import MIN_LIMIT/MAX_LIMIT rather than duplicating the rule, so the two copies
+// cannot drift.
 export const MIN_LIMIT = 1;
 export const MAX_LIMIT = 1000;
 

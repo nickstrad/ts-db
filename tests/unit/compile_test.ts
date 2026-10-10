@@ -488,6 +488,23 @@ test("compileDDL rejects names that are not identifiers", () => {
   );
 });
 
+test("compileDDL refuses an enum with zero values instead of emitting an unconstrained column", () => {
+  // `v.enum` requires at least one value, so a zero-value node can only be built by hand —
+  // defense in depth for a descriptor no write could ever populate.
+  const empty: Schema = { t: new Table({ e: { node: { kind: "enum", values: [] } } }) };
+  const error = expectCompile(compileDDL(empty), "empty-enum");
+  assert.equal(error.field, "e");
+  assert.equal(error.table, "t");
+  // The throwing wrapper renders the new reason too.
+  assert.throws(() => Compiler.compileDDL(empty), { message: "Enum has no values: e" });
+});
+
+test("compileDDL omits the CHECK when an enum node has no values at all", () => {
+  const absent: Schema = { t: new Table({ e: { node: { kind: "enum" } } }) };
+  const [create] = expectRight(compileDDL(absent));
+  assert.match(create, /"e" TEXT NOT NULL\) STRICT/);
+});
+
 // ---------------------------------------------------------------------------
 // write.ts
 // ---------------------------------------------------------------------------
@@ -637,6 +654,14 @@ test("decode fails with a value, not a raised SyntaxError, on a corrupt row", ()
   expectCompile(decode(columns, { ...base, table: "nope" }, []), "unknown-collection");
   // Storage that has drifted from the schema fails the same validation an insert would.
   expectSchema(decode(columns, base, [{ ...row, e: "not-in-enum" }]), "type-mismatch");
+});
+
+test("decode reports a missing column explicitly instead of coercing it downstream", () => {
+  const partial = { ...row };
+  delete (partial as Partial<typeof row>).e;
+  const error = expectDecode(decode(columns, base, [partial]), "missing-column");
+  assert.equal(error.field, "e");
+  assert.equal(error.table, "probe");
 });
 
 // ---------------------------------------------------------------------------

@@ -94,6 +94,14 @@ export function decode(
       } else {
         body = {};
         for (const [name, field] of Object.entries(table.fields)) {
+          // A column missing from the row is a decode failure of its own, not a value to
+          // coerce: surfacing it here is what keeps the `missing-column` reason (and the
+          // `absurd` exhaustiveness guard over `DecodeFailure`) honest.
+          if (!Object.hasOwn(row, name)) {
+            return yield* Either.left(
+              new DecodeError({ reason: "missing-column", field: name, table: plan.table }),
+            );
+          }
           body[name] = yield* decodeValue(field.node, row[name], name, plan.table);
         }
       }

@@ -11,7 +11,7 @@
  * this database through `ATTACH`, so the writer's DDL is the only DDL.
  */
 import { Either } from "effect";
-import type { CompileError, SchemaError } from "../errors.ts";
+import { CompileError, type SchemaError } from "../errors.ts";
 import type { Schema } from "../schema.ts";
 import { literal, quote } from "./dialect.ts";
 import { columnType, expression } from "./select.ts";
@@ -31,12 +31,27 @@ export function compileDDL(schema: Schema): Either.Either<string[], CompileError
         for (const [field, { node }] of Object.entries(table.fields)) {
           const column = yield* quote(field);
           let col = `${column} ${columnType(node)}${node.nullable ? "" : " NOT NULL"}`;
-          // An `enum` node without values cannot come from the `v.enum` builder, and `IN ()` is not
-          // legal SQL, so the CHECK is simply omitted rather than emitted empty. The pre-port code
-          // raised a `TypeError` on the non-null assertion here instead.
-          const allowed = node.values ?? [];
-          if (node.kind === "enum" && allowed.length) {
-            col += ` CHECK (${column} IN (${allowed.map(literal).join(", ")}))`;
+          if (node.kind === "enum") {
+            // `v.enum` requires at least one value, so a zero-value node can only be built by
+            // hand — and `IN ()` is not legal SQL. Refuse loudly rather than emit an
+            // unconstrained column: `validate` rejects every value for such a node, so no write
+            // could ever populate it. (An *absent* `values` is different: the pre-port code
+            // crashed on it with a `TypeError`, and there is no constraint to declare, so the
+            // CHECK is simply omitted for that case.)
+            if (node.values !== undefined && node.values.length === 0) {
+              return yield* Either.left(
+                new CompileError({
+                  reason: "empty-enum",
+                  field,
+                  table: name,
+                  detail: "enum declares no values",
+                }),
+              );
+            }
+            const allowed = node.values ?? [];
+            if (allowed.length) {
+              col += ` CHECK (${column} IN (${allowed.map(literal).join(", ")}))`;
+            }
           }
           if (node.kind === "boolean") col += ` CHECK (${column} IN (0, 1))`;
           if (node.kind === "array") col += ` CHECK (${column} IS NULL OR json_valid(${column}))`;
