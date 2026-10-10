@@ -12,7 +12,8 @@ import {
   toJsonLine,
   txEvent,
 } from "../../core/events.ts";
-import { NotFoundError } from "../../core/errors.ts";
+import type { AnyError } from "../../core/errors.ts";
+import { ConfigError, DecodeError, NotFoundError, StorageError } from "../../core/errors.ts";
 
 const envelope = {
   eventId: "evt-1",
@@ -143,6 +144,37 @@ test("ingest event: golden fixture", () => {
   assert.equal(toJsonLine(record), expected);
 });
 
+test("constructors return narrow per-kind variants (fields typecheck without narrowing)", () => {
+  const http = httpEvent({
+    ...envelope,
+    method: "GET",
+    path: "/",
+    handlerKind: "query",
+    name: "getGame",
+    status: 200,
+    durationMs: 1,
+    bytesIn: 0,
+    bytesOut: 0,
+  });
+  const status: number = http.status;
+  const kind: "http" = http.kind;
+  assert.equal(status, 200);
+  assert.equal(kind, "http");
+
+  const sql = sqlEvent({
+    ...envelope,
+    engine: "sqlite",
+    dialect: "sqlite",
+    statementKind: "select",
+    sqlText: "SELECT 1",
+    bindCount: 0,
+    durationMs: 1,
+    outcome: "ok",
+  });
+  const text: string = sql.sqlText;
+  assert.equal(text, "SELECT 1");
+});
+
 test("sql redaction: bind values withheld unless includeBindValues is true", () => {
   const injection = "O'Reilly'); DROP TABLE games; --";
   const record = sqlEvent(
@@ -183,7 +215,27 @@ test("sql redaction: bind values withheld unless includeBindValues is true", () 
   assert.ok(toJsonLine(withValues).includes(injection));
 });
 
-test("redacts bearer tokens and authorization headers unconditionally", () => {
+test("toJsonLine withholds bindValues from hand-built records (defense in depth)", () => {
+  const injection = "O'Reilly'); DROP TABLE games; --";
+  const record = {
+    ...envelope,
+    kind: "sql" as const,
+    engine: "sqlite" as const,
+    dialect: "sqlite",
+    statementKind: "select" as const,
+    tableName: "games",
+    sqlText: "SELECT * FROM games WHERE id = ?",
+    bindCount: 1,
+    bindValues: [injection],
+    durationMs: 0.8,
+    outcome: "ok" as const,
+  };
+  const line = toJsonLine(record);
+  assert.ok(!line.includes(injection));
+  assert.ok(line.includes('"bindValues":null'));
+});
+
+test("redacts Bearer tokens and authorization headers unconditionally", () => {
   const error = fromPlatformError(new NotFoundError({ table: "games", id: "game-1" }));
   const record = handlerEvent({
     ...envelope,
@@ -211,6 +263,193 @@ test("redacts bearer tokens and authorization headers unconditionally", () => {
   assert.ok(line.includes('"gameId":"game-1"'));
 });
 
+test("redacts S3 credentials in every spelling, plus cookies and raw tokens", () => {
+  const line = toJsonLine(lifecycleEvent({
+    ...envelope,
+    phase: "backup",
+    detail: {
+      AWS_SECRET_ACCESS_KEY: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+      AWS_ACCESS_KEY_ID: "AKIAIOSFODNN7EXAMPLE",
+      AWS_SESSION_TOKEN: "FwoGZXIvYXdzEExample",
+      awsAccessKeyId: "AKIA-camel-case-key",
+      aws_secret_access_key: "snake-case-secret",
+      "Proxy-Authorization": "Basic cHJveHk6c2VjcmV0",
+      Cookie: "session=secret-cookie-value",
+      "Set-Cookie": "id=cookie-secret-value",
+      COLUMN_APP_TOKEN: "app-token-secret",
+      ADMIN_TOKEN: "admin-token-secret",
+      presigned:
+        "https://s3.example.net/x?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20261010%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Signature=presigned-signature-secret&X-Amz-Security-Token=presigned-token-secret",
+      playerId: "alice",
+      gameId: "game-1",
+      docId: "doc-9",
+    },
+  }));
+  for (
+    const secret of [
+      "wJalrXUtnFEMI",
+      "AKIAIOSFODNN7EXAMPLE",
+      "FwoGZXIvYXdzEExample",
+      "AKIA-camel-case-key",
+      "snake-case-secret",
+      "cHJveHk6c2VjcmV0",
+      "secret-cookie-value",
+      "cookie-secret-value",
+      "app-token-secret",
+      "admin-token-secret",
+      "presigned-signature-secret",
+      "presigned-token-secret",
+    ]
+  ) {
+    assert.ok(!line.includes(secret), `leaked secret: ${secret}`);
+  }
+  assert.ok(!line.includes("AKIAIOSFODNN7EXAMPLE%2F20261010"));
+  assert.ok(line.includes('"AWS_SECRET_ACCESS_KEY":"<redacted>"'));
+  assert.ok(line.includes("X-Amz-Credential=<redacted>"));
+  assert.ok(line.includes("X-Amz-Signature=<redacted>"));
+  assert.ok(line.includes("X-Amz-Security-Token=<redacted>"));
+  // Player and document ids are data, not secrets, and must survive redaction.
+  assert.ok(line.includes('"playerId":"alice"'));
+  assert.ok(line.includes('"gameId":"game-1"'));
+  assert.ok(line.includes('"docId":"doc-9"'));
+});
+
+test("fromPlatformError preserves the non-enumerable cause", () => {
+  const cols = fromPlatformError(
+    new StorageError({
+      operation: "commit",
+      table: "games",
+      detail: "disk I/O error",
+      cause: { code: "SQLITE_BUSY" },
+    }),
+  );
+  assert.equal(cols.errorTag, "StorageError");
+  const line = toJsonLine(handlerEvent({
+    ...envelope,
+    handlerKind: "mutation",
+    name: "commitGame",
+    outcome: "error",
+    durationMs: 1,
+    errorTag: cols.errorTag,
+    errorDetail: cols.errorDetail,
+  }));
+  assert.ok(line.includes('"cause":{"code":"SQLITE_BUSY"}'));
+});
+
+test("secrets smuggled in via cause are still redacted", () => {
+  const cols = fromPlatformError(
+    new StorageError({
+      operation: "commit",
+      table: "games",
+      cause: { AWS_SECRET_ACCESS_KEY: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" },
+    }),
+  );
+  const line = toJsonLine(handlerEvent({
+    ...envelope,
+    handlerKind: "mutation",
+    name: "commitGame",
+    outcome: "error",
+    durationMs: 1,
+    errorTag: cols.errorTag,
+    errorDetail: cols.errorDetail,
+  }));
+  assert.ok(!line.includes("wJalrXUtnFEMI"));
+  assert.ok(line.includes('"AWS_SECRET_ACCESS_KEY":"<redacted>"'));
+});
+
+test("fromPlatformError accepts any AnyError member (ConfigError needs no cast)", () => {
+  const cols = fromPlatformError(
+    new ConfigError({ key: "PORT", reason: "malformed", detail: "not a number" }),
+  );
+  assert.equal(cols.errorTag, "ConfigError");
+  assert.deepEqual(cols.errorDetail, { key: "PORT", reason: "malformed", detail: "not a number" });
+});
+
+test("fromPlatformError never throws on non-object or foreign inputs", () => {
+  for (const bad of [null, undefined, "boom", 42] as const) {
+    const cols = fromPlatformError(bad as unknown as AnyError);
+    assert.equal(cols.errorTag, "UnknownError");
+  }
+  const foreign = fromPlatformError(new Error("kaboom") as unknown as AnyError);
+  assert.equal(foreign.errorTag, "UnknownError");
+  assert.deepEqual(foreign.errorDetail, {});
+  const line = toJsonLine(handlerEvent({
+    ...envelope,
+    handlerKind: "query",
+    name: "getGame",
+    outcome: "error",
+    durationMs: 1,
+    errorTag: foreign.errorTag,
+    errorDetail: foreign.errorDetail,
+  }));
+  assert.ok(line.includes('"errorTag":"UnknownError"'));
+});
+
+test("toJsonLine serializes BigInt instead of throwing (DecodeError.actual)", () => {
+  const cols = fromPlatformError(
+    new DecodeError({
+      reason: "unsafe-integer",
+      table: "wins",
+      field: "total",
+      actual: 9007199254740993n,
+    }),
+  );
+  const line = toJsonLine(handlerEvent({
+    ...envelope,
+    handlerKind: "query",
+    name: "getWins",
+    outcome: "error",
+    durationMs: 1,
+    errorTag: cols.errorTag,
+    errorDetail: cols.errorDetail,
+  }));
+  assert.ok(line.includes('"actual":"9007199254740993"'));
+  assert.equal(line.split("\n").length, 1);
+});
+
+test("toJsonLine survives cyclic structures", () => {
+  const cyclic: Record<string, unknown> = { depth: 1 };
+  cyclic.self = cyclic;
+  const line = toJsonLine(lifecycleEvent({ ...envelope, phase: "startup", detail: cyclic }));
+  assert.ok(line.includes("<circular>"));
+  assert.equal(line.split("\n").length, 1);
+});
+
+test("toJsonLine survives throwing getters", () => {
+  const evil = {
+    get boom(): unknown {
+      throw new Error("getter exploded");
+    },
+    fine: "ok",
+  };
+  const line = toJsonLine(lifecycleEvent({ ...envelope, phase: "startup", detail: evil }));
+  assert.ok(line.includes("<unreadable>"));
+  assert.ok(line.includes('"fine":"ok"'));
+});
+
+test("toJsonLine caps hostile nesting depth instead of throwing", () => {
+  let deep: unknown = { leaf: true };
+  for (let i = 0; i < 50000; i++) deep = { next: deep };
+  const line = toJsonLine(lifecycleEvent({ ...envelope, phase: "startup", detail: deep }));
+  assert.ok(line.includes("<max-depth>"));
+  assert.equal(line.split("\n").length, 1);
+});
+
+test("toJsonLine falls back to an envelope-only line instead of throwing", () => {
+  const hostile = new Proxy({}, {
+    ownKeys() {
+      throw new Error("nope");
+    },
+  });
+  const line = toJsonLine(lifecycleEvent({ ...envelope, phase: "startup", detail: hostile }));
+  assert.ok(line.includes('"serialization":"serialization-failed"'));
+  assert.ok(line.includes('"eventId":"evt-1"'));
+  assert.ok(line.includes('"traceId":"trace-1"'));
+  assert.equal(line.split("\n").length, 1);
+  // The fallback is still a valid JSON line.
+  JSON.parse(line);
+});
+
 test("toJsonLine never contains a newline, even when inputs do", () => {
   const record = lifecycleEvent({
     ...envelope,
@@ -223,8 +462,21 @@ test("toJsonLine never contains a newline, even when inputs do", () => {
   assert.ok(line.includes("line one line two line three"));
 });
 
-test("toJsonLine is stable across repeated calls on the same record", () => {
-  const record = httpEvent({
+test("toJsonLine strips U+2028/U+2029 like other line breaks", () => {
+  const record = lifecycleEvent({
+    ...envelope,
+    phase: "a\u2028b\u2029c",
+    detail: { note: "x\u2028y\u2029z" },
+  });
+  const line = toJsonLine(record);
+  assert.ok(!line.includes("\u2028"));
+  assert.ok(!line.includes("\u2029"));
+  assert.ok(line.includes("a b c"));
+  assert.ok(line.includes("x y z"));
+});
+
+test("toJsonLine is canonical: source key order does not change output", () => {
+  const ordered = httpEvent({
     ...envelope,
     method: "GET",
     path: "/api/app-1/game",
@@ -235,5 +487,30 @@ test("toJsonLine is stable across repeated calls on the same record", () => {
     bytesIn: 0,
     bytesOut: 64,
   });
-  assert.equal(toJsonLine(record), toJsonLine(record));
+  const shuffled = httpEvent({
+    bytesOut: 64,
+    bytesIn: 0,
+    durationMs: 2,
+    status: 200,
+    name: "getGame",
+    handlerKind: "query",
+    path: "/api/app-1/game",
+    method: "GET",
+    ...envelope,
+  });
+  assert.equal(toJsonLine(ordered), toJsonLine(shuffled));
+  assert.equal(toJsonLine(ordered), toJsonLine(ordered));
+  // Nested payloads are canonical too: same logical detail, different insertion order.
+  const a = lifecycleEvent({
+    ...envelope,
+    phase: "startup",
+    detail: { b: 1, a: 2, nested: { z: 0, y: 1 } },
+  });
+  const b = lifecycleEvent({
+    ...envelope,
+    phase: "startup",
+    detail: { a: 2, nested: { y: 1, z: 0 }, b: 1 },
+  });
+  assert.equal(toJsonLine(a), toJsonLine(b));
+  assert.ok(toJsonLine(a).includes('"detail":{"a":2,"b":1,"nested":{"y":1,"z":0}}'));
 });

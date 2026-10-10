@@ -11,19 +11,39 @@
  *
  * - `sql` events never carry bind values unless the constructor is given
  *   `{ includeBindValues: true }`, mirroring today's `TRACE_SQL=1` caveat that it logs
- *   application values.
- * - Bearer tokens (`Bearer <token>`), `authorization` headers (any casing) and S3 credential
- *   fields are redacted unconditionally, regardless of any flag, wherever they appear in
- *   free-form payload data (`errorDetail`, `lifecycle` detail, bind values).
+ *   application values. As defense in depth, `toJsonLine` withholds `bindValues` from any
+ *   record that wasn't built with that opt-in — a hand-built record literal can't leak them.
+ * - Bearer <redacted> (`Bearer <token>`), `authorization`/`proxy-authorization` headers (any
+ *   casing or separator style), `Cookie`/`Set-Cookie`, S3 credential fields (any casing or
+ *   separator style — `AWS_SECRET_ACCESS_KEY`, `awsAccessKeyId`, `aws_secret_access_key`,
+ *   …), any key ending in `token` (`COLUMN_APP_TOKEN`, `ADMIN_TOKEN`, …), and presigned-URL
+ *   `X-Amz-Credential`/`X-Amz-Signature`/`X-Amz-Security-Token` parameters are redacted
+ *   unconditionally, regardless of any flag, wherever they appear in free-form payload data
+ *   (`errorDetail`, `lifecycle` detail, bind values).
  * - Player ids and document ids are never redacted: they are the data this log exists to
  *   analyse.
+ *
+ * `toJsonLine` is total: it never throws. Item 11's `emit` is `Effect<void, never>` and calls
+ * this serializer, so bigint values, cycles, hostile nesting depth, and throwing getters are
+ * all neutralized; any residual failure falls back to a minimal envelope-only line carrying a
+ * `"serialization":"serialization-failed"` marker.
  *
  * Field naming note: the plan's per-kind field lists for `http` and `handler` include a `kind`
  * field (the routed handler's `"query" | "mutation"`). That name collides with this union's own
  * discriminant (`EventRecord["kind"]`, one of the eight event kinds below), so the handler's
  * query/mutation distinction is carried here as `handlerKind` instead.
+ *
+ * Column mapping for the DuckDB tables in §4.1 (items 11 and 23 need this stated, not inferred):
+ * - `handlerKind` → `http_events.kind` (the handler's `query`/`mutation`; §4.3's
+ *   `mutation-vs-query-latency` needs it) and, for handler events, `platform_events.kind`.
+ * - The union discriminant `kind` (`"http" | "handler" | "sql" | …`) → `platform_events.kind`
+ *   in the generic table.
+ * - There is no `attrs` field on `EventRecord`, although §4.1's `platform_events` declares
+ *   `attrs JSON` and `core/errors.ts` says analysis queries "drill into `attrs.reason`":
+ *   today `reason` (and the rest of an error's payload) lands in `errorDetail`, so item 11
+ *   should map `errorDetail` → `attrs`.
  */
-import type { BackupPhase, HandlerKind, PlatformError, QueueName } from "./errors.ts";
+import type { AnyError, BackupPhase, HandlerKind, QueueName } from "./errors.ts";
 
 // ---------------------------------------------------------------------------
 // Shared envelope
@@ -150,54 +170,78 @@ export interface IngestPayload {
 // EventRecord: the discriminated union over `kind`
 // ---------------------------------------------------------------------------
 
+/** One variant per event kind; constructors return these so fields typecheck without narrowing. */
+export type HttpEventRecord = EventEnvelope & { readonly kind: "http" } & HttpPayload;
+export type HandlerEventRecord = EventEnvelope & { readonly kind: "handler" } & HandlerPayload;
+export type SqlEventRecord = EventEnvelope & { readonly kind: "sql" } & SqlPayload;
+export type TxEventRecord = EventEnvelope & { readonly kind: "tx" } & TxPayload;
+export type QueueEventRecord = EventEnvelope & { readonly kind: "queue" } & QueuePayload;
+export type BackupEventRecord = EventEnvelope & { readonly kind: "backup" } & BackupPayload;
+export type LifecycleEventRecord = EventEnvelope & { readonly kind: "lifecycle" } & LifecyclePayload;
+export type IngestEventRecord = EventEnvelope & { readonly kind: "ingest" } & IngestPayload;
+
 export type EventRecord =
-  | (EventEnvelope & { readonly kind: "http" } & HttpPayload)
-  | (EventEnvelope & { readonly kind: "handler" } & HandlerPayload)
-  | (EventEnvelope & { readonly kind: "sql" } & SqlPayload)
-  | (EventEnvelope & { readonly kind: "tx" } & TxPayload)
-  | (EventEnvelope & { readonly kind: "queue" } & QueuePayload)
-  | (EventEnvelope & { readonly kind: "backup" } & BackupPayload)
-  | (EventEnvelope & { readonly kind: "lifecycle" } & LifecyclePayload)
-  | (EventEnvelope & { readonly kind: "ingest" } & IngestPayload);
+  | HttpEventRecord
+  | HandlerEventRecord
+  | SqlEventRecord
+  | TxEventRecord
+  | QueueEventRecord
+  | BackupEventRecord
+  | LifecycleEventRecord
+  | IngestEventRecord;
 
 // ---------------------------------------------------------------------------
 // Constructors — total, deterministic, one per kind
 // ---------------------------------------------------------------------------
 
-export function httpEvent(input: EventEnvelope & HttpPayload): EventRecord {
+export function httpEvent(input: EventEnvelope & HttpPayload): HttpEventRecord {
   return { ...input, kind: "http" };
 }
 
-export function handlerEvent(input: EventEnvelope & HandlerPayload): EventRecord {
+export function handlerEvent(input: EventEnvelope & HandlerPayload): HandlerEventRecord {
   return { ...input, kind: "handler" };
 }
+
+/**
+ * Opt-in marker set only by `sqlEvent` when the caller passes `{ includeBindValues: true }`.
+ * Symbols never appear in `Object.keys`/`JSON.stringify`, so this can't leak into the log;
+ * `canonicalize` reads it as the backstop that withholds `bindValues` from hand-built records.
+ */
+const BIND_VALUES_INCLUDED = Symbol.for("ts-db.events.bindValuesIncluded");
 
 export function sqlEvent(
   input: EventEnvelope & SqlPayload,
   opts: SqlEventOptions = {},
-): EventRecord {
+): SqlEventRecord {
   const includeBindValues = opts.includeBindValues ?? false;
   const { bindValues, ...rest } = input;
-  return includeBindValues ? { ...rest, bindValues, kind: "sql" } : { ...rest, kind: "sql" };
+  const record: SqlEventRecord = includeBindValues
+    ? { ...rest, bindValues, kind: "sql" }
+    : { ...rest, kind: "sql" };
+  if (includeBindValues) {
+    // Excess-property checks reject a symbol key in the literal above, so mark it afterwards.
+    (record as unknown as Record<symbol, unknown>)[BIND_VALUES_INCLUDED] = true;
+  }
+  return record;
 }
 
-export function txEvent(input: EventEnvelope & TxPayload): EventRecord {
+export function txEvent(input: EventEnvelope & TxPayload): TxEventRecord {
   return { ...input, kind: "tx" };
 }
 
-export function queueEvent(input: EventEnvelope & QueuePayload): EventRecord {
+export function queueEvent(input: EventEnvelope & QueuePayload): QueueEventRecord {
   return { ...input, kind: "queue" };
 }
 
-export function backupEvent(input: EventEnvelope & BackupPayload): EventRecord {
+export function backupEvent(input: EventEnvelope & BackupPayload): BackupEventRecord {
   return { ...input, kind: "backup" };
 }
 
-export function lifecycleEvent(input: EventEnvelope & LifecyclePayload): EventRecord {
+export function lifecycleEvent(input: EventEnvelope & LifecyclePayload): LifecycleEventRecord {
   return { ...input, kind: "lifecycle" };
 }
 
-export function ingestEvent(input: EventEnvelope & IngestPayload): EventRecord {
+export function ingestEvent(input: EventEnvelope & IngestPayload): IngestEventRecord {
   return { ...input, kind: "ingest" };
 }
 
@@ -206,14 +250,36 @@ export function ingestEvent(input: EventEnvelope & IngestPayload): EventRecord {
 // ---------------------------------------------------------------------------
 
 /**
- * Every `PlatformError` is a `Data.TaggedError`, whose only own enumerable keys are `_tag` plus
- * its payload fields (verified against `effect@3.22.2`). `errorTag` is the stable, low-cardinality
- * analysis column; `errorDetail` is the rest of the payload, redacted like everything else by
- * `toJsonLine`.
+ * Splits a repo error into a stable, low-cardinality `errorTag` plus the structured payload
+ * (`errorDetail`), which `toJsonLine` redacts like everything else.
+ *
+ * Accepts any `AnyError` (see `core/errors.ts`: "Every error this repo defines. Useful for
+ * `core/events.ts`'s `error_tag` column"), so `ConfigError`, `SchemaDriftError`, `RestoreError`
+ * and `RemoteError` need no cast. Non-object inputs (a foreign `throw "boom"`, `null`, …)
+ * yield `errorTag: "UnknownError"` instead of throwing — defects reaching item 11's logger are
+ * exactly where this gets called.
+ *
+ * `cause` needs explicit handling: every repo error is a `Data.TaggedError`, and Effect routes
+ * `cause` through the `Error` constructor options, where V8 defines it as a NON-enumerable own
+ * property — so a plain `{ _tag, ...rest }` spread silently drops it (likewise `stack`;
+ * `message` is absent on these classes, and neither leaks into the log). `cause` carries the
+ * underlying driver error, the single most useful diagnostic for the classes that declare it
+ * (`StorageError`, `ReaderError`, `IpcError`, `ObjectStoreError`, `BackupError`, `IngestError`,
+ * `AnalysisError`), so it is read explicitly here.
  */
-export function fromPlatformError(e: PlatformError): ErrorColumns {
-  const { _tag, ...rest } = e;
-  return { errorTag: _tag, errorDetail: rest };
+export function fromPlatformError(e: AnyError): ErrorColumns {
+  if (e === null || e === undefined || typeof e !== "object") {
+    return { errorTag: "UnknownError", errorDetail: { value: String(e) } };
+  }
+  const source = e as unknown as Record<string, unknown>;
+  const detail: Record<string, unknown> = {};
+  for (const key of Object.keys(source)) {
+    if (key === "_tag") continue;
+    detail[key] = safeRead(source, key);
+  }
+  if ("cause" in source) detail["cause"] = safeRead(source, "cause");
+  const tag = source["_tag"];
+  return { errorTag: typeof tag === "string" ? tag : "UnknownError", errorDetail: detail };
 }
 
 // ---------------------------------------------------------------------------
@@ -267,51 +333,145 @@ const KIND_KEYS: Record<EventRecord["kind"], readonly string[]> = {
   ingest: ["sourceFile", "bytesIngested", "runId", "status", "errorTag", "errorDetail"],
 };
 
+/** Property read that can't throw: a throwing getter becomes the `"<unreadable>"` marker. */
+function safeRead(source: Record<string, unknown>, key: string): unknown {
+  try {
+    return source[key];
+  } catch {
+    return "<unreadable>";
+  }
+}
+
 /** Builds the canonical, fully-populated (absent optionals as `null`) plain object for a record. */
 function canonicalize(record: EventRecord): Record<string, unknown> {
-  // deno-lint-ignore no-explicit-any
-  const r = record as any;
+  const r = record as unknown as Record<string, unknown>;
   const out: Record<string, unknown> = {};
-  for (const key of ENVELOPE_KEYS) out[key] = r[key] ?? null;
-  out.kind = record.kind;
-  for (const key of KIND_KEYS[record.kind]) {
-    out[key] = r[key] === undefined ? null : r[key];
+  for (const key of ENVELOPE_KEYS) out[key] = safeRead(r, key) ?? null;
+  const kind = safeRead(r, "kind");
+  out["kind"] = kind;
+  const kindKeys: readonly string[] | undefined = KIND_KEYS[kind as EventRecord["kind"]];
+  for (const key of kindKeys ?? []) {
+    const v = safeRead(r, key);
+    out[key] = v === undefined ? null : v;
+  }
+  if (
+    kind === "sql" &&
+    (record as unknown as Record<symbol, unknown>)[BIND_VALUES_INCLUDED] !== true
+  ) {
+    // Defense in depth: bind values reach the log only when the `sqlEvent` constructor was
+    // explicitly given `{ includeBindValues: true }` (marked via BIND_VALUES_INCLUDED). A
+    // hand-built record literal carries no opt-in marker, so its `bindValues` are withheld
+    // here — `toJsonLine` never leaks them regardless of how the record was constructed.
+    out["bindValues"] = null;
   }
   return out;
 }
 
 const BEARER_PATTERN = /Bearer\s+\S+/gi;
-const SECRET_KEY_PATTERN = /^(authorization|accesskeyid|secretaccesskey|sessiontoken)$/;
+const AMZ_PARAM_PATTERN = /X-Amz-(Signature|Credential|Security-Token)=[^&\s"']+/gi;
+// Keys are normalized (lower-cased, separators stripped) and matched on SUFFIX, so every
+// spelling is caught: `AWS_SECRET_ACCESS_KEY` → `awssecretaccesskey`,
+// `Proxy-Authorization` → `proxyauthorization`, `Set-Cookie` → `setcookie`,
+// `COLUMN_APP_TOKEN` → `columnapptoken`.
+const SECRET_KEY_PATTERN =
+  /(authorization|accesskeyid|secretaccesskey|sessiontoken|securitytoken|cookie|token)$/;
 
 function normalizeKey(key: string): string {
   return key.toLowerCase().replace(/[^a-z]/g, "");
 }
 
 function redactString(s: string): string {
-  return s.replace(BEARER_PATTERN, "Bearer <redacted>");
+  return s
+    .replace(BEARER_PATTERN, "Bearer <redacted>")
+    .replace(AMZ_PARAM_PATTERN, "X-Amz-$1=<redacted>");
 }
 
 function sanitizeNewlines(s: string): string {
-  return s.replace(/[\r\n]+/g, " ");
+  return s.replace(/[\r\n\u2028\u2029]+/g, " ");
 }
 
-/** Depth-first redaction (bearer tokens, `authorization`, S3 credentials) and newline sanitization. */
-function redactAndSanitize(value: unknown): unknown {
+/** Nesting deeper than this is replaced with `"<max-depth>"` — hostile input can't blow the stack. */
+const MAX_SERIALIZE_DEPTH = 32;
+
+/**
+ * Depth-first redaction (Bearer <redacted>, secret keys, X-Amz URL params) and newline
+ * sanitization. Total by construction:
+ * - `bigint` coerces to its decimal string (`DecodeError.actual` is a DuckDB BIGINT),
+ * - cycles become `"<circular>"` and over-deep structures `"<max-depth>"`,
+ * - throwing getters become `"<unreadable>"`,
+ * - nested object keys are sorted, so equal payloads serialize identically regardless of
+ *   caller insertion order.
+ */
+function redactAndSanitize(value: unknown, depth: number, seen: Set<object>): unknown {
   if (typeof value === "string") return sanitizeNewlines(redactString(value));
-  if (Array.isArray(value)) return value.map(redactAndSanitize);
-  if (value !== null && typeof value === "object") {
+  if (typeof value === "bigint") return value.toString();
+  if (value === null || typeof value !== "object") return value;
+  if (seen.has(value)) return "<circular>";
+  if (depth >= MAX_SERIALIZE_DEPTH) return "<max-depth>";
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) {
+      return value.map((item) => redactAndSanitize(item, depth + 1, seen));
+    }
+    const source = value as Record<string, unknown>;
     const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value)) {
-      out[k] = SECRET_KEY_PATTERN.test(normalizeKey(k)) ? "<redacted>" : redactAndSanitize(v);
+    for (const key of Object.keys(source).sort()) {
+      const cleanKey = sanitizeNewlines(key);
+      out[cleanKey] = SECRET_KEY_PATTERN.test(normalizeKey(key))
+        ? "<redacted>"
+        : redactAndSanitize(safeRead(source, key), depth + 1, seen);
     }
     return out;
+  } finally {
+    seen.delete(value);
   }
-  return value;
 }
 
-/** Serializes a record to one canonical, key-ordered, newline-free JSON line. */
+/**
+ * Serializes a record to one canonical, key-ordered, newline-free JSON line.
+ *
+ * Total: item 11's `emit` is `Effect<void, never>` and calls this serializer, so it must never
+ * fail. `bigint` coerces to string, cycles and over-deep structures become markers, and throwing
+ * getters become `"<unreadable>"`; any residual failure (a hostile Proxy, …) falls back to a
+ * minimal envelope-only line carrying a `"serialization":"serialization-failed"` marker.
+ */
 export function toJsonLine(record: EventRecord): string {
-  const ordered = canonicalize(record);
-  const redacted = redactAndSanitize(ordered);
-  return JSON.stringify(redacted);
+  try {
+    const ordered = canonicalize(record);
+    // The top level keeps canonicalize's fixed key order — redact each value in place
+    // without re-sorting. Nested objects are still sorted inside redactAndSanitize.
+    const seen = new Set<object>();
+    const redacted: Record<string, unknown> = {};
+    for (const key of Object.keys(ordered)) {
+      redacted[key] = redactAndSanitize(ordered[key], 1, seen);
+    }
+    const line = JSON.stringify(redacted);
+    if (typeof line !== "string") throw new Error("toJsonLine: unstringifiable record");
+    return line;
+  } catch {
+    return fallbackJsonLine(record);
+  }
+}
+
+/**
+ * Last-resort serializer: envelope fields only, each read and stringified defensively, so a log
+ * line is always produced and always carries the failure marker.
+ */
+function fallbackJsonLine(record: EventRecord): string {
+  const parts = ['"serialization":"serialization-failed"'];
+  const source = record as unknown as Record<string, unknown>;
+  for (const key of ENVELOPE_KEYS) {
+    parts.push(`${JSON.stringify(key)}:${safeJson(safeRead(source, key) ?? null)}`);
+  }
+  return `{${parts.join(",")}}`;
+}
+
+/** `JSON.stringify` that returns a string no matter what the input does. */
+function safeJson(value: unknown): string {
+  try {
+    const line = JSON.stringify(redactAndSanitize(value, 0, new Set()));
+    return typeof line === "string" ? line : "null";
+  } catch {
+    return '"<unserializable>"';
+  }
 }
