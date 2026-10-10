@@ -87,6 +87,29 @@ not re-verified against the landed diff. If an item touches no diagram-relevant 
 follow-up agent says so in one line in its commit message (`docs: item NN touches no C4 surface`)
 and moves on.
 
+## File sync protocol
+
+This repo maintains two instruction files: **AGENTS.md** (agent orchestration and repo structure)
+and **CLAUDE.md** (repo conventions for the Claude Code CLI). The CLI auto-discovers only
+CLAUDE.md, never AGENTS.md — empirically validated in sq-05.
+
+- **AGENTS.md** is the single source of truth for agent orchestration, work protocols, model
+  assignments, and repo structure. It is read by human coordinators and agent prompts, never
+  auto-discovered by the CLI.
+- **CLAUDE.md** is auto-discovered by the `claude` CLI and defines CLI-facing repo conventions
+  (environment setup, branch/worktree etiquette, docs-only session boundaries, commit style).
+  The two files are deliberately disjoint — CLAUDE.md is not a summary of AGENTS.md and neither
+  is derivable from the other.
+- **Keep the overlap in sync, in both directions.** The files share exactly two topics:
+  branch/worktree etiquette and commit style. When either file changes one of those, update the
+  other to match. Everything else lives in exactly one file: orchestration protocol, model
+  assignments, and batch rules live only in AGENTS.md; environment setup and docs-only session
+  boundaries live only in CLAUDE.md.
+- **Do not replace CLAUDE.md with a symlink to AGENTS.md.** A symlink technically works (the CLI
+  opens the `CLAUDE.md` path and the filesystem resolves the link — verified 3/3 in review),
+  but it would collapse two intentionally different documents, written for different audiences,
+  into one.
+
 ## Stopping-point convention
 
 Work proceeds item by item (or quest by quest) and stops at the item the human and coordinator
