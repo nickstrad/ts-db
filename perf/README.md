@@ -93,11 +93,11 @@ mkdir -p "logs/k6/$K6_RUN_ID"
 K6_OUT="json=logs/k6/$K6_RUN_ID/raw.json" deno task perf:mixed
 ```
 
-Both `logs/k6/<run-id>/raw.json` (newline-delimited JSON; filter `type = 'Point'` before `read_json_auto`, see
-`docs/haiku-experiments/findings/sq-04.md`) and `summary.json` (written by the scenario's `handleSummary`,
-with `run_id` and `scenario` added) land there. `K6_RUN_ID` also feeds the `X-Trace-Id` suffix, so trace ids
-in the server's events match the directory name. If you forget it the run id falls back to `k6-smoke`, which
-is smoke's directory — always set it.
+Both `logs/k6/<run-id>/raw.json` (newline-delimited JSON; `read_json_auto` reads the mixed file directly, then
+filter `WHERE type='Point'`, see `docs/haiku-experiments/findings/sq-04.md`) and `summary.json` (written by
+the scenario's `handleSummary`, with `run_id` and `scenario` added) land there. `K6_RUN_ID` also feeds the
+`X-Trace-Id` suffix, so once item 22 lands the trace ids in the server's events match the directory name. If
+you forget it the run id falls back to `k6-smoke`, which is smoke's directory — always set it.
 
 `work-scripts/bash/k6-scenario-run.sh <perf:task> [run-id] [k6 args]` does all of the above against a
 throwaway server on a free port with a fresh scratch `DATA_DIR`:

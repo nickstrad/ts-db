@@ -6,27 +6,25 @@ import { check } from "k6";
 import { Counter } from "k6/metrics";
 import { mutation, query, RUN_ID } from "./api.js";
 
-export { RUN_ID };
-
 // A stale-version write that the server rejects. Counted here instead of in http_req_failed, which
 // is why `staleMove` widens the expected statuses for that one request.
-export const conflicts = new Counter("conflicts");
+const conflicts = new Counter("conflicts");
 
 // Artifacts. k6 writes raw.json only when started with `--out json=<RAW_PATH>` (or K6_OUT), and
 // creates neither directory; the caller mkdirs OUT_DIR. See perf/README.md.
-export const OUT_DIR = `logs/k6/${RUN_ID}`;
-export const RAW_PATH = `${OUT_DIR}/raw.json`;
-export const SUMMARY_PATH = `${OUT_DIR}/summary.json`;
+const OUT_DIR = `logs/k6/${RUN_ID}`;
+const RAW_PATH = `${OUT_DIR}/raw.json`;
+const SUMMARY_PATH = `${OUT_DIR}/summary.json`;
 
 // `_version` of a freshly inserted document (createGame returns only the id).
 const INITIAL_VERSION = 1;
 
-// Cell sequences played alternately X, O, X, ...; `outcome` is the game status once they are done.
+// Cell sequences played alternately X, O, X, ...
 export const GAME_SCRIPTS = {
-  xWins: { cells: [0, 3, 1, 4, 2], outcome: "won" },
-  oWins: { cells: [0, 3, 1, 4, 8, 5], outcome: "won" },
-  draw: { cells: [0, 1, 2, 4, 3, 5, 7, 6, 8], outcome: "draw" },
-  playing: { cells: [0, 3], outcome: "playing" },
+  xWins: { cells: [0, 3, 1, 4, 2] },
+  oWins: { cells: [0, 3, 1, 4, 8, 5] },
+  draw: { cells: [0, 1, 2, 4, 3, 5, 7, 6, 8] },
+  playing: { cells: [0, 3] },
 };
 
 function failureText(r) {
@@ -81,7 +79,7 @@ export function playNext(game, cells) {
 
 // True for a stale-version rejection: 409 once the server maps ConflictError (plan item 22), or the
 // 400 `{"error":"ConflictError"}` it returns before then.
-export function isConflict(r) {
+function isConflict(r) {
   if (r.res.status === 409) return true;
   return r.res.status === 400 && String(r.body?.error?.tag ?? r.body?.error).includes("ConflictError");
 }
@@ -119,7 +117,7 @@ export function seedGames(count) {
       const moved = playNext(game, cells);
       if (moved.res.status !== 200) throw new Error(`seed: makeMove failed: ${failureText(moved)}`);
     }
-    seeded.push({ gameId: game.gameId, kind });
+    seeded.push({ gameId: game.gameId });
   }
   return seeded;
 }

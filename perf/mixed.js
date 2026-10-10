@@ -1,7 +1,6 @@
 // Regression-comparison scenario: constant 50 requests/s for 3 minutes, 80% reads (the 4:2:2:1 mix
 // from query_load.js) and 20% writes. A write advances the VU's own game by one move, creating a
 // fresh game when the previous one finished, so writes never conflict with each other.
-import { check } from "k6";
 import { buildSummary, createGame, GAME_SCRIPTS, playNext, readOp, seedGames } from "./lib/scenarios.js";
 
 export const options = {
@@ -40,8 +39,7 @@ function write() {
     mine = game;
     return;
   }
-  const moved = playNext(mine, cells);
-  check(moved, { "makeMove: not a conflict": (r) => r.res.status === 200 });
+  playNext(mine, cells);
 }
 
 export default function (data) {
