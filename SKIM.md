@@ -1,10 +1,14 @@
 # Skim the document-platform MVP
 
-The app author writes TypeScript document operations. The SDK records operations; the platform compiles them. No app handler supplies SQL.
+The app author writes TypeScript document operations. The SDK records operations; the platform compiles them.
+No app handler supplies SQL.
 
-Two long-lived processes share each app's local SQLite file: the API/SQLite writer and a DuckDB query worker. The writer also runs an optional backup timer.
+Two long-lived processes share each app's local SQLite file: the API/SQLite writer and a DuckDB query worker.
+The writer also runs an optional backup timer.
 
-**Verification:** 20 core tests passed using Node's real SQLite adapter. Core TypeScript passed strict checking. The Deno server, native DuckDB execution, end-to-end integration test, and S3 upload were not run in this environment. See README.md for exact commands and limits.
+**Verification:** 20 core tests passed using Node's real SQLite adapter. Core TypeScript passed strict
+checking. The Deno server, native DuckDB execution, end-to-end integration test, and S3 upload were not run in
+this environment. See README.md for exact commands and limits.
 
 ## 1. App schema — app/schema.ts
 
@@ -34,7 +38,8 @@ export const schema = defineSchema({
 
 ## 2. App handlers — app/functions.ts
 
-The application contains the game rules, but no database-specific code. Reads inside mutations use the mutation's SQLite transaction; public query handlers receive the DuckDB adapter.
+The application contains the game rules, but no database-specific code. Reads inside mutations use the
+mutation's SQLite transaction; public query handlers receive the DuckDB adapter.
 
 ```ts
 // Application code: no SQL, database drivers, file paths, or storage-mode branches.
@@ -43,8 +48,14 @@ import { v } from "../sdk/schema.ts";
 import { schema } from "./schema.ts";
 const { query, mutation } = defineFunctions(schema);
 const lines = [
-  [0, 1, 2], [3, 4, 5], [6, 7, 8],
-  [0, 3, 6], [1, 4, 7], [2, 5, 8], [0, 4, 8], [2, 4, 6],
+  [0, 1, 2],
+  [3, 4, 5],
+  [6, 7, 8],
+  [0, 3, 6],
+  [1, 4, 7],
+  [2, 5, 8],
+  [0, 4, 8],
+  [2, 4, 6],
 ];
 
 export const functions = {
@@ -55,8 +66,12 @@ export const functions = {
         throw new Error("Provide two distinct players");
       }
       const gameId = await db.insert("games", {
-        xPlayer, oPlayer, board: Array(9).fill(null),
-        turn: "X", status: "playing", winner: null,
+        xPlayer,
+        oPlayer,
+        board: Array(9).fill(null),
+        turn: "X",
+        status: "playing",
+        winner: null,
       });
       return { gameId };
     },
@@ -76,15 +91,22 @@ export const functions = {
 
       const board = [...game.board];
       board[cell] = game.turn;
-      const won = lines.some(([a, b, c]) => board[a] === game.turn && board[b] === game.turn && board[c] === game.turn);
+      const won = lines.some(([a, b, c]) =>
+        board[a] === game.turn && board[b] === game.turn && board[c] === game.turn
+      );
       const status = won ? "won" : board.every((x) => x !== null) ? "draw" : "playing";
 
       await db.patch("games", gameId, {
-        board, status, winner: won ? game.turn : null,
+        board,
+        status,
+        winner: won ? game.turn : null,
         turn: game.turn === "X" ? "O" : "X",
       });
       await db.insert("moves", {
-        gameId, playerId, mark: game.turn, cell,
+        gameId,
+        playerId,
+        mark: game.turn,
+        cell,
         moveNumber: board.filter((x) => x !== null).length,
       });
       // Board update + move insertion + this read all share one SQLite transaction.
@@ -99,14 +121,16 @@ export const functions = {
 
   listGames: query({
     args: { status: v.enum("playing", "won", "draw") },
-    handler: ({ db }, { status }) => db.find("games", { status })
-      .sort("_creationTime", "desc").limit(20).collect(),
+    handler: ({ db }, { status }) =>
+      db.find("games", { status })
+        .sort("_creationTime", "desc").limit(20).collect(),
   }),
 
   moveHistory: query({
     args: { gameId: v.string() },
-    handler: ({ db }, { gameId }) => db.find("moves", { gameId })
-      .sort("moveNumber").limit(9).collect(),
+    handler: ({ db }, { gameId }) =>
+      db.find("moves", { gameId })
+        .sort("moveNumber").limit(9).collect(),
   }),
 
   winsByMark: query({
@@ -151,7 +175,8 @@ console.log("Won games:", await client.query("listGames", { status: "won" }));
 
 ## 4. Query API to plan — sdk/db.ts, excerpts
 
-Each chained method creates a new plan. collect/first/count/countBy execute it. The full file includes typing, validation, additional methods, and writes.
+Each chained method creates a new plan. collect/first/count/countBy execute it. The full file includes typing,
+validation, additional methods, and writes.
 
 ```ts
 export type Filter = { field: string; op: "eq" | "gt"; value: unknown };
@@ -167,23 +192,32 @@ export type SelectPlan = {
 export class Find<T> {
   constructor(private execute: Execute, readonly plan: SelectPlan) {}
   where<K extends ScalarKey<T>>(field: K, value: T[K]): Find<T> {
-    return new Find(this.execute, { ...this.plan, filters: [...this.plan.filters, { field, op: "eq", value }] });
+    return new Find(this.execute, {
+      ...this.plan,
+      filters: [...this.plan.filters, { field, op: "eq", value }],
+    });
   }
   // ... sort and limit create modified copies of this same plan ...
-  async collect(): Promise<T[]> { return await this.execute(this.plan) as T[]; }
+  async collect(): Promise<T[]> {
+    return await this.execute(this.plan) as T[];
+  }
 }
 ```
 
 ## 5. Plan to SQL — platform/compiler.ts, excerpt
 
-This is platform code, not app code. The remaining compiler helpers handle schema metadata, JSON extraction/casts, bound values, DDL, writes, and row decoding.
+This is platform code, not app code. The remaining compiler helpers handle schema metadata, JSON
+extraction/casts, bound values, DDL, writes, and row decoding.
 
 ```ts
 export function compileSelect(schema: Schema, plan: SelectPlan, dialect: Dialect): SQL {
   const table = tableFor(schema, plan.table);
   if (!Number.isInteger(plan.limit) || plan.limit < 1 || plan.limit > 1000) throw new Error("Invalid limit");
   const values: Bind[] = [];
-  const bind = (value: Bind) => { values.push(value); return dialect === "sqlite" ? "?" : `$p${values.length}`; };
+  const bind = (value: Bind) => {
+    values.push(value);
+    return dialect === "sqlite" ? "?" : `$p${values.length}`;
+  };
   const where = plan.filters.map((filter) => {
     const node = scalar(table, filter.field);
     validate(node, filter.value, filter.field);
@@ -208,51 +242,54 @@ export function compileSelect(schema: Schema, plan: SelectPlan, dialect: Dialect
     if (plan.order) {
       if (!["asc", "desc"].includes(plan.order.direction)) throw new Error("Invalid ordering");
       const { field, direction } = plan.order;
-      text += ` ORDER BY ${expression(table, field, dialect)} ${direction.toUpperCase()} NULLS ${direction === "asc" ? "FIRST" : "LAST"}, "_id" ASC`;
+      text += ` ORDER BY ${expression(table, field, dialect)} ${direction.toUpperCase()} NULLS ${
+        direction === "asc" ? "FIRST" : "LAST"
+      }, "_id" ASC`;
     } else text += ' ORDER BY "_id" ASC';
   }
   // count counts all matching documents; countBy limits returned groups, not input rows.
   if (plan.aggregate?.kind !== "count") text += ` LIMIT ${bind(plan.limit)}`;
   return { text, values };
 }
-
 ```
 
 ## 6. SQLite mutation boundary — platform/sqlite.ts, excerpt
 
-The exclusive queue prevents asynchronous handlers from interleaving on the same SQLite connection. All document operations inside the handler use this transaction.
+The exclusive queue prevents asynchronous handlers from interleaving on the same SQLite connection. All
+document operations inside the handler use this transaction.
 
 ```ts
-  async mutation(definition: AnyDefinition, args: unknown): Promise<unknown> {
-    if (definition.kind !== "mutation") throw new Error("Expected a mutation");
-    return await this.exclusive(async () => {
-      this.database.exec("BEGIN IMMEDIATE");
-      let active = true;
-      const documents = new Documents<S>(async (op) => {
-        if (!active) throw new Error("Transaction context has expired");
-        return this.execute(op);
-      });
-      try {
-        const result = await definition.invoke(documents, args);
-        // Catch non-JSON results before committing; transport cannot serialize them later.
-        const safeResult = JSON.parse(JSON.stringify(result ?? null));
-        this.database.exec("COMMIT");
-        return safeResult;
-      } catch (e) {
-        this.database.exec("ROLLBACK");
-        throw e;
-      } finally { active = false; }
+async mutation(definition: AnyDefinition, args: unknown): Promise<unknown> {
+  if (definition.kind !== "mutation") throw new Error("Expected a mutation");
+  return await this.exclusive(async () => {
+    this.database.exec("BEGIN IMMEDIATE");
+    let active = true;
+    const documents = new Documents<S>(async (op) => {
+      if (!active) throw new Error("Transaction context has expired");
+      return this.execute(op);
     });
-  }
+    try {
+      const result = await definition.invoke(documents, args);
+      // Catch non-JSON results before committing; transport cannot serialize them later.
+      const safeResult = JSON.parse(JSON.stringify(result ?? null));
+      this.database.exec("COMMIT");
+      return safeResult;
+    } catch (e) {
+      this.database.exec("ROLLBACK");
+      throw e;
+    } finally { active = false; }
+  });
+}
 ```
 
 ## 7. DuckDB execution — platform/duckdb.ts
 
-This module is only loaded in the reader OS process. It attaches the live SQLite file read-only; it does not create a second persistent database.
+This module is only loaded in the reader OS process. It attaches the live SQLite file read-only; it does not
+create a second persistent database.
 
 ```ts
 // Reader process ONLY. It deliberately never imports node:sqlite.
-import { DuckDBInstance, type DuckDBConnection } from "npm:@duckdb/node-api@1.5.6";
+import { type DuckDBConnection, DuckDBInstance } from "npm:@duckdb/node-api@1.5.6";
 import { Documents } from "../sdk/db.ts";
 import type { Schema } from "../sdk/schema.ts";
 import type { AnyDefinition } from "../sdk/functions.ts";
@@ -267,7 +304,11 @@ export class DuckReader<S extends Schema> {
     private schema: S,
     private trace: Trace,
   ) {}
-  static async open<S extends Schema>(file: string, schema: S, trace: Trace = () => {}): Promise<DuckReader<S>> {
+  static async open<S extends Schema>(
+    file: string,
+    schema: S,
+    trace: Trace = () => {},
+  ): Promise<DuckReader<S>> {
     const instance = await DuckDBInstance.create(":memory:", { threads: "2", memory_limit: "256MB" });
     const connection = await instance.connect();
     try {
@@ -275,7 +316,11 @@ export class DuckReader<S extends Schema> {
       await connection.run("LOAD sqlite");
       await connection.run(`ATTACH ${literal(file)} AS "app" (TYPE SQLITE, READ_ONLY)`);
       return new DuckReader(instance, connection, schema, trace);
-    } catch (e) { connection.closeSync(); instance.closeSync(); throw e; }
+    } catch (e) {
+      connection.closeSync();
+      instance.closeSync();
+      throw e;
+    }
   }
   // The worker serializes whole query handlers: never share an active transaction.
   async query(definition: AnyDefinition, args: unknown): Promise<unknown> {
@@ -299,15 +344,23 @@ export class DuckReader<S extends Schema> {
     } catch (e) {
       await this.connection.run("ROLLBACK");
       throw e;
-    } finally { active = false; }
+    } finally {
+      active = false;
+    }
   }
-  close(): void { this.connection.closeSync(); this.instance.closeSync(); }
+  close(): void {
+    this.connection.closeSync();
+    this.instance.closeSync();
+  }
 }
 ```
 
 ## 8. Object-storage backup
 
-`platform/backup.ts` obtains a consistent `VACUUM INTO` snapshot, checks integrity, computes a checksum, uploads an immutable object, and only then advances a latest manifest. `platform/object_store.ts` supplies a local stand-in or a signed S3-compatible adapter. `scripts/restore.ts` verifies a snapshot and restores to a fresh, absent file while the service is stopped.
+`platform/backup.ts` obtains a consistent `VACUUM INTO` snapshot, checks integrity, computes a checksum,
+uploads an immutable object, and only then advances a latest manifest. `platform/object_store.ts` supplies a
+local stand-in or a signed S3-compatible adapter. `scripts/restore.ts` verifies a snapshot and restores to a
+fresh, absent file while the service is stopped.
 
 A mutation response acknowledges local commit, not off-host replication. A backup is not automatic failover.
 
@@ -324,4 +377,5 @@ deno task check
 deno task integration
 ```
 
-See README.md for all configuration, security limits, object-storage settings, source references, and restore instructions.
+See README.md for all configuration, security limits, object-storage settings, source references, and restore
+instructions.

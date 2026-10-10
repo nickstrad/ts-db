@@ -23,7 +23,7 @@ function buildRecord(targetBytes: number, recordIndex: number): string {
   }) + "\n";
 
   // Calculate how much padding we need
-  let padLength = Math.max(0, targetBytes - baseLine.length);
+  const padLength = Math.max(0, targetBytes - baseLine.length);
   const padding = "x".repeat(padLength);
 
   const record = JSON.stringify({
@@ -41,7 +41,7 @@ function buildRecord(targetBytes: number, recordIndex: number): string {
 async function runTrial(
   sizeBytes: number,
   numRecords: number,
-  trialNum: number
+  trialNum: number,
 ): Promise<BenchmarkResult> {
   const filePath = `/tmp/append-bench-${sizeBytes}b-trial${trialNum}-${Date.now()}.jsonl`;
   const file = await Deno.open(filePath, {
@@ -67,7 +67,7 @@ async function runTrial(
     const durationMs = endMs - startMs;
     const totalBytes = sizeBytes * (numRecords + 1); // Include warmup
     const totalMb = totalBytes / (1024 * 1024);
-    const eventsPerSec = (numRecords / (durationMs / 1000));
+    const eventsPerSec = numRecords / (durationMs / 1000);
     const mbPerSec = totalMb / (durationMs / 1000);
 
     return {
@@ -113,7 +113,7 @@ async function main() {
       const result = await runTrial(size, numRecords, trial);
       results[size].push(result);
       console.log(
-        `  Trial ${trial}: ${result.eventsPerSec} events/sec, ${result.mbPerSec} MB/sec (${result.durationMs}ms)`
+        `  Trial ${trial}: ${result.eventsPerSec} events/sec, ${result.mbPerSec} MB/sec (${result.durationMs}ms)`,
       );
     }
   }
@@ -148,7 +148,9 @@ async function main() {
     const status = meetsBar ? "✓ PASS" : "✗ FAIL";
     const headroom = result.eventsPerSec - 5000;
     console.log(
-      `${result.sizeBytes}B: ${status} (${result.eventsPerSec} events/sec, ${headroom >= 0 ? "+" : ""}${headroom} headroom)`
+      `${result.sizeBytes}B: ${status} (${result.eventsPerSec} events/sec, ${
+        headroom >= 0 ? "+" : ""
+      }${headroom} headroom)`,
     );
   }
 }

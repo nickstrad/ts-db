@@ -1,10 +1,10 @@
 # Haiku experiments and side quests
 
-Purpose: this is the log for experimenting with Claude Haiku 4.5 (`claude-haiku-4-5-20251001`) —
-fast and cheap — on real
-items from [`docs/plans/effect-port-and-observability.md`](plans/effect-port-and-observability.md),
-plus a running side-quest board for small investigative tasks that produce useful findings while
-the longer plan items (01-27, coordinated separately) are in flight.
+Purpose: this is the log for experimenting with Claude Haiku 4.5 (`claude-haiku-4-5-20251001`) — fast and
+cheap — on real items from
+[`docs/plans/effect-port-and-observability.md`](plans/effect-port-and-observability.md), plus a running
+side-quest board for small investigative tasks that produce useful findings while the longer plan items
+(01-27, coordinated separately) are in flight.
 
 This file is docs-only. Nothing here touches plan item files, the `item/NN-slug` worktrees under
 `/root/Software/tsdb-work/`, or `agent-work/` (the coordinator's own scratch space).
@@ -13,30 +13,29 @@ This file is docs-only. Nothing here touches plan item files, the `item/NN-slug`
 
 ## Experiment items
 
-**All experiment work is executed by Haiku (`claude --model haiku`).** Nothing here is done by
-Sonnet or Opus -- the "Plan baseline" column below shows the model the plan originally assigned to
-each item, purely as the comparison baseline for judging Haiku's output.
+**All experiment work is executed by Haiku (`claude --model haiku`).** Nothing here is done by Sonnet or Opus
+-- the "Plan baseline" column below shows the model the plan originally assigned to each item, purely as the
+comparison baseline for judging Haiku's output.
 
-Picked from items 12-27 (items 01-11 are already in flight on the coordinator's branches and are
-off limits). Selection criteria: small, bounded, mechanical, minimal cross-file dependencies,
-verifiable acceptance criteria — and preferably an item the plan itself already assigns to
-Sonnet, since that is the nearest existing baseline to compare Haiku against.
+Picked from items 12-27 (items 01-11 are already in flight on the coordinator's branches and are off limits).
+Selection criteria: small, bounded, mechanical, minimal cross-file dependencies, verifiable acceptance
+criteria — and preferably an item the plan itself already assigns to Sonnet, since that is the nearest
+existing baseline to compare Haiku against.
 
-| ID | Item | Title | Plan baseline | Status | Rationale |
-| --- | --- | --- | --- | --- | --- |
-| haiku-12 | 12 | Property tests, wave 1: schema, rules, framing, rotation | Sonnet | reviewed, FAIL — not merged — [findings](findings/haiku-12.md) | Pure modules with signatures already fixed by earlier items; the plan itself enumerates the exact properties to encode, so this is "transcribe a spec into fast-check arbitraries," not design work. |
-| haiku-14 | 14 | k6 load scenarios and output capture | Sonnet | reviewed, FAIL — not merged — [findings](findings/haiku-14.md) | Three scripts that repeat the pattern item 03 already established (shared `perf/lib/api.js`, fixed thresholds, fixed output paths). Mechanical, low file count, pass/fail is a `k6 run` exit code. |
-| haiku-24 | 24 | Retention sweeper | Sonnet | reviewed, NITS after wrapper repair — not merged — [findings](findings/haiku-24.md) | Executes a policy that is already pure and property-tested (items 06, 12); this item is only "apply the plan to the filesystem" with explicit safety rails spelled out in the plan. Small file set, no SQL/transaction semantics to get subtly wrong. |
+| ID       | Item | Title                                                    | Plan baseline | Status                                                                              | Rationale                                                                                                                                                                                                                                             |
+| -------- | ---- | -------------------------------------------------------- | ------------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| haiku-12 | 12   | Property tests, wave 1: schema, rules, framing, rotation | Sonnet        | reviewed, FAIL — not merged — [findings](findings/haiku-12.md)                      | Pure modules with signatures already fixed by earlier items; the plan itself enumerates the exact properties to encode, so this is "transcribe a spec into fast-check arbitraries," not design work.                                                  |
+| haiku-14 | 14   | k6 load scenarios and output capture                     | Sonnet        | reviewed, FAIL — not merged — [findings](findings/haiku-14.md)                      | Three scripts that repeat the pattern item 03 already established (shared `perf/lib/api.js`, fixed thresholds, fixed output paths). Mechanical, low file count, pass/fail is a `k6 run` exit code.                                                    |
+| haiku-24 | 24   | Retention sweeper                                        | Sonnet        | reviewed, NITS after wrapper repair — not merged — [findings](findings/haiku-24.md) | Executes a policy that is already pure and property-tested (items 06, 12); this item is only "apply the plan to the filesystem" with explicit safety rails spelled out in the plan. Small file set, no SQL/transaction semantics to get subtly wrong. |
 
 Rules for every experiment item:
 
-- Haiku works on a branch named `haiku/NN-slug` (e.g. `haiku/12-property-tests-wave-1`), in its own
-  git worktree — never inside an `item/NN-slug` worktree and never on `main`.
-- Haiku **never merges to `main`** without an Opus review (`reviewer-opus-high`, same acceptance
-  criteria the plan item defines) **and** explicit human approval. A PASS verdict alone does not
-  authorize a merge.
-- When an experiment item finishes (merged, rejected, or abandoned), the branch stays until the
-  human says it can be deleted.
+- Haiku works on a branch named `haiku/NN-slug` (e.g. `haiku/12-property-tests-wave-1`), in its own git
+  worktree — never inside an `item/NN-slug` worktree and never on `main`.
+- Haiku **never merges to `main`** without an Opus review (`reviewer-opus-high`, same acceptance criteria the
+  plan item defines) **and** explicit human approval. A PASS verdict alone does not authorize a merge.
+- When an experiment item finishes (merged, rejected, or abandoned), the branch stays until the human says it
+  can be deleted.
 - Each experiment item writes its findings to `docs/haiku-experiments/findings/haiku-NN.md` (see
   [Findings](#findings) below) and fills in the [scorecard](#haiku-quality-scorecard) template.
 
@@ -44,21 +43,20 @@ Rules for every experiment item:
 
 ## Side quests
 
-Small, read-only or scratch-only investigations — each sized to finish in one short session. A
-side quest must **never modify plan item files** (anything under `core/`, `platform/`, `sdk/`,
-`app/`, `tests/`, `scripts/`, `perf/`, or `deno.json`). Output is a written finding, not a code
-change to the product tree.
+Small, read-only or scratch-only investigations — each sized to finish in one short session. A side quest must
+**never modify plan item files** (anything under `core/`, `platform/`, `sdk/`, `app/`, `tests/`, `scripts/`,
+`perf/`, or `deno.json`). Output is a written finding, not a code change to the product tree.
 
-| ID | Question | Why it matters | Done-criteria |
-| --- | --- | --- | --- |
-| sq-01 | What batching/backpressure patterns do Effect-TS `Logger`/sink implementations use in practice, and which ones fit a `Queue.dropping` + `forkScoped` consumer like item 11 describes? | Item 11 (Opus, logger service) is one of the highest-risk items in the plan — getting backpressure or finalizer ordering wrong loses events or hangs shutdown. A short survey de-risks that item before it's built. | A written summary of 2-3 concrete patterns (with their tradeoffs) from Effect-TS docs/source/community examples, and an explicit recommendation for which one fits this repo's constraints (bounded queue, batch by size-or-time, flush-on-shutdown). No code written. |
-| sq-02 | What is the baseline JSONL append throughput (events/sec, and MB/sec) on this droplet, using plain `Deno.FsFile` append-mode writes with no batching? | Item 11's acceptance criteria requires "10,000 events in under 2s" as a sanity check. Knowing the raw floor ahead of time tells us how much headroom the real batching design needs, and whether the 2s bar is trivial or tight on this hardware. | A short scratch script (not committed to the product tree — lives under `docs/haiku-experiments/scratch/` or is run and discarded) measuring append throughput at a few record sizes, with numbers recorded in the finding. |
-| sq-03 | Which fast-check arbitrary-construction strategies (recursive, `fc.letrec`, sized, shrink-friendly) best fit generating `Node`/`Fields`/`Table` values for the schema module ahead of item 12? | Item 12 depends on `tests/property/arbitraries.ts`, which has to generate recursive schema nodes (arrays nesting to depth 2) that also shrink to minimal counterexamples. Picking the wrong strategy up front costs rework once item 12 starts. | A short writeup naming the recommended fast-check APIs for this shape of data, with a tiny (uncommitted) code sketch demonstrating depth-bounded recursive generation and a note on how well it shrinks. |
-| sq-04 | What k6 output format (`--out json=`, `--out csv=`, experimental `--out influxdb=`, etc.) is most convenient for later DuckDB ingestion via `read_json_auto`, and are there any gotchas (one object per metric point vs. one summary object, nested tag objects) that would complicate item 25's `perf/ingest_k6.ts`? | Items 03, 14 and 25 all depend on k6's raw output shape. A quick comparison now avoids finding out the hard way during item 25 that the JSON isn't flat enough for `read_json_auto`. | A short comparison table of 2-3 output formats against "ease of DuckDB ingestion," with a concrete recommendation and an example of the exact JSON shape k6 emits per metric point. |
-| sq-05 | Can Claude Code CLI work with AGENTS.md alone, or does it need CLAUDE.md? Validate empirically how the CLI discovers and respects AGENTS.md vs CLAUDE.md (which directories are searched, precedence when both exist), since it supposedly supports AGENTS.md. | The repo currently hand-maintains two agent files (AGENTS.md = orchestration protocol, CLAUDE.md = repo conventions). If the CLI reliably respects AGENTS.md alone, consolidate to a single file and kill a whole class of drift; if not, we need a symlink (CLAUDE.md -> AGENTS.md) or an explicit sync protocol. Every agent session reads these files, so the wrong setup silently degrades all agent work. | Empirical tests in scratch dirs (AGENTS.md-only, CLAUDE.md-only, both-present conflict, parent-dir discovery) proving which files the CLI loads and in what precedence; a concrete recommendation implemented on the branch (single AGENTS.md, or symlink protocol, or documented two-file sync as fallback); findings at findings/sq-05.md. Do NOT merge to main — Opus review + human approval required since this changes agent instructions repo-wide. |
+| ID    | Question                                                                                                                                                                                                                                                                                                              | Why it matters                                                                                                                                                                                                                                                                                                                                                                                                 | Done-criteria                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| sq-01 | What batching/backpressure patterns do Effect-TS `Logger`/sink implementations use in practice, and which ones fit a `Queue.dropping` + `forkScoped` consumer like item 11 describes?                                                                                                                                 | Item 11 (Opus, logger service) is one of the highest-risk items in the plan — getting backpressure or finalizer ordering wrong loses events or hangs shutdown. A short survey de-risks that item before it's built.                                                                                                                                                                                            | A written summary of 2-3 concrete patterns (with their tradeoffs) from Effect-TS docs/source/community examples, and an explicit recommendation for which one fits this repo's constraints (bounded queue, batch by size-or-time, flush-on-shutdown). No code written.                                                                                                                                                                                     |
+| sq-02 | What is the baseline JSONL append throughput (events/sec, and MB/sec) on this droplet, using plain `Deno.FsFile` append-mode writes with no batching?                                                                                                                                                                 | Item 11's acceptance criteria requires "10,000 events in under 2s" as a sanity check. Knowing the raw floor ahead of time tells us how much headroom the real batching design needs, and whether the 2s bar is trivial or tight on this hardware.                                                                                                                                                              | A short scratch script (not committed to the product tree — lives under `docs/haiku-experiments/scratch/` or is run and discarded) measuring append throughput at a few record sizes, with numbers recorded in the finding.                                                                                                                                                                                                                                |
+| sq-03 | Which fast-check arbitrary-construction strategies (recursive, `fc.letrec`, sized, shrink-friendly) best fit generating `Node`/`Fields`/`Table` values for the schema module ahead of item 12?                                                                                                                        | Item 12 depends on `tests/property/arbitraries.ts`, which has to generate recursive schema nodes (arrays nesting to depth 2) that also shrink to minimal counterexamples. Picking the wrong strategy up front costs rework once item 12 starts.                                                                                                                                                                | A short writeup naming the recommended fast-check APIs for this shape of data, with a tiny (uncommitted) code sketch demonstrating depth-bounded recursive generation and a note on how well it shrinks.                                                                                                                                                                                                                                                   |
+| sq-04 | What k6 output format (`--out json=`, `--out csv=`, experimental `--out influxdb=`, etc.) is most convenient for later DuckDB ingestion via `read_json_auto`, and are there any gotchas (one object per metric point vs. one summary object, nested tag objects) that would complicate item 25's `perf/ingest_k6.ts`? | Items 03, 14 and 25 all depend on k6's raw output shape. A quick comparison now avoids finding out the hard way during item 25 that the JSON isn't flat enough for `read_json_auto`.                                                                                                                                                                                                                           | A short comparison table of 2-3 output formats against "ease of DuckDB ingestion," with a concrete recommendation and an example of the exact JSON shape k6 emits per metric point.                                                                                                                                                                                                                                                                        |
+| sq-05 | Can Claude Code CLI work with AGENTS.md alone, or does it need CLAUDE.md? Validate empirically how the CLI discovers and respects AGENTS.md vs CLAUDE.md (which directories are searched, precedence when both exist), since it supposedly supports AGENTS.md.                                                        | The repo currently hand-maintains two agent files (AGENTS.md = orchestration protocol, CLAUDE.md = repo conventions). If the CLI reliably respects AGENTS.md alone, consolidate to a single file and kill a whole class of drift; if not, we need a symlink (CLAUDE.md -> AGENTS.md) or an explicit sync protocol. Every agent session reads these files, so the wrong setup silently degrades all agent work. | Empirical tests in scratch dirs (AGENTS.md-only, CLAUDE.md-only, both-present conflict, parent-dir discovery) proving which files the CLI loads and in what precedence; a concrete recommendation implemented on the branch (single AGENTS.md, or symlink protocol, or documented two-file sync as fallback); findings at findings/sq-05.md. Do NOT merge to main — Opus review + human approval required since this changes agent instructions repo-wide. |
 
-| ID | Status |
-| --- | --- |
+| ID    | Status                               |
+| ----- | ------------------------------------ |
 | sq-01 | done — [findings](findings/sq-01.md) |
 | sq-02 | done — [findings](findings/sq-02.md) |
 | sq-03 | done — [findings](findings/sq-03.md) |
@@ -69,66 +67,64 @@ investigate, and report back — they do not add new quests to this board themse
 
 #### Script convention for Haiku agents
 
-If your quest or item needs a script (benchmark, probe, measurement): write it in **Deno** for
-larger work, **bash** if it is bash-oriented — and save it in `work-scripts/` (`deno/` or
-`bash/`), collocated with all other work scripts, not in a haiku-only folder. Then append a row
-to `work-scripts/INDEX.md`. Read the index first: the building block you need may already exist.
+If your quest or item needs a script (benchmark, probe, measurement): write it in **Deno** for larger work,
+**bash** if it is bash-oriented — and save it in `work-scripts/` (`deno/` or `bash/`), collocated with all
+other work scripts, not in a haiku-only folder. Then append a row to `work-scripts/INDEX.md`. Read the index
+first: the building block you need may already exist.
 
 ## Findings usefulness (Opus review, 2026-10-10)
 
 One line per quest: did it produce an actionable insight, and for which plan item?
 
-- **sq-01 — useful (item 11).** Actionable: names three concrete batching patterns and recommends
-  Pattern 2 (size threshold + timer escape hatch) over `Stream.groupedWithin`, with the right
-  reason — `groupedWithin` cannot guarantee item 11's hard 256-record threshold. Caveat: cites an
-  Effect 4.0.0 `groupedWithin` optimisation, but this repo pins `effect@3.22.2`, so that specific
-  claim does not apply here; the recommendation stands regardless since it argues *against*
-  `groupedWithin`.
-- **sq-02 — useful (item 11).** Actionable and backed by real measurements on this droplet: the
-  unbatched `Deno.FsFile` append floor is 7.6k–13.2k events/sec, so item 11's "10,000 events under
-  2s" bar is not tight and the batching design can be judged on shutdown/backpressure correctness
-  rather than throughput. Caveat: the numbers are non-monotonic in record size (1 KB measures
-  *slower* than 4 KB), so treat them as an order-of-magnitude floor, not a calibrated benchmark.
-- **sq-03 — useful (item 12), and item 12 ignored it.** Actionable: recommends depth-parameterised
-  sized arbitraries over `fc.letrec` for recursive `Node` generation, with a working sketch. Worth
-  noting against the experiment's own result — `haiku/12-props` used a flat `fc.oneof` instead, and
-  its generators turned out to be the root cause of two vacuous properties (see
-  [haiku-12](findings/haiku-12.md)). The advice was sound and unheeded.
+- **sq-01 — useful (item 11).** Actionable: names three concrete batching patterns and recommends Pattern 2
+  (size threshold + timer escape hatch) over `Stream.groupedWithin`, with the right reason — `groupedWithin`
+  cannot guarantee item 11's hard 256-record threshold. Caveat: cites an Effect 4.0.0 `groupedWithin`
+  optimisation, but this repo pins `effect@3.22.2`, so that specific claim does not apply here; the
+  recommendation stands regardless since it argues _against_ `groupedWithin`.
+- **sq-02 — useful (item 11).** Actionable and backed by real measurements on this droplet: the unbatched
+  `Deno.FsFile` append floor is 7.6k–13.2k events/sec, so item 11's "10,000 events under 2s" bar is not tight
+  and the batching design can be judged on shutdown/backpressure correctness rather than throughput. Caveat:
+  the numbers are non-monotonic in record size (1 KB measures _slower_ than 4 KB), so treat them as an
+  order-of-magnitude floor, not a calibrated benchmark.
+- **sq-03 — useful (item 12), and item 12 ignored it.** Actionable: recommends depth-parameterised sized
+  arbitraries over `fc.letrec` for recursive `Node` generation, with a working sketch. Worth noting against
+  the experiment's own result — `haiku/12-props` used a flat `fc.oneof` instead, and its generators turned out
+  to be the root cause of two vacuous properties (see [haiku-12](findings/haiku-12.md)). The advice was sound
+  and unheeded.
 - **sq-04 — useful (items 14, 25).** Actionable: captures the real per-point JSON shape k6 emits
-  (`{metric, type:"Point", data:{time, value, tags:{...}}}`) plus the `type:"Metric"` definition
-  lines that must be filtered with `WHERE type = 'Point'` — exactly the gotcha item 25's
-  `read_json_auto` ingest would otherwise hit. Two caveats: it reports testing k6 v0.52.0 while
-  this droplet has v0.56.0 installed, and its headline recommendation (CSV) conflicts with the
-  plan's mandated `--out json=` for items 14/25 — read it for the JSON shape and the filter
-  requirement, not for the format choice.
+  (`{metric, type:"Point", data:{time, value, tags:{...}}}`) plus the `type:"Metric"` definition lines that
+  must be filtered with `WHERE type = 'Point'` — exactly the gotcha item 25's `read_json_auto` ingest would
+  otherwise hit. Two caveats: it reports testing k6 v0.52.0 while this droplet has v0.56.0 installed, and its
+  headline recommendation (CSV) conflicts with the plan's mandated `--out json=` for items 14/25 — read it for
+  the JSON shape and the filter requirement, not for the format choice.
 
 ---
 
 ### Script convention for Haiku agents
 
-If your quest or item needs a script (benchmark, probe, measurement): write it in **Deno** for
-larger work, **bash** if it is bash-oriented — and save it in `work-scripts/` (`deno/` or
-`bash/`), collocated with all other work scripts, not in a haiku-only folder. Then append a row
-to `work-scripts/INDEX.md`. Read the index first: the building block you need may already exist.
+If your quest or item needs a script (benchmark, probe, measurement): write it in **Deno** for larger work,
+**bash** if it is bash-oriented — and save it in `work-scripts/` (`deno/` or `bash/`), collocated with all
+other work scripts, not in a haiku-only folder. Then append a row to `work-scripts/INDEX.md`. Read the index
+first: the building block you need may already exist.
 
 ## Findings
 
 Convention: every completed quest or experiment item writes exactly one findings file at
-`docs/haiku-experiments/findings/<quest-id>.md` (e.g. `findings/sq-01.md`, `findings/haiku-12.md`).
-That path is unique per quest/item — a Haiku agent only ever writes its own findings file, never a
-shared file, so concurrent Haiku runs can't collide on an edit.
+`docs/haiku-experiments/findings/<quest-id>.md` (e.g. `findings/sq-01.md`, `findings/haiku-12.md`). That path
+is unique per quest/item — a Haiku agent only ever writes its own findings file, never a shared file, so
+concurrent Haiku runs can't collide on an edit.
 
-- Haiku agents: investigate, then write (only) `docs/haiku-experiments/findings/<id>.md`. Do not
-  edit this board, `MEMORY.md`, or any other quest's findings file.
-- The main agent: after a quest/item finishes, updates its `Status` in the tables above to link the
-  findings file, and commits both the status change and the new findings file together.
+- Haiku agents: investigate, then write (only) `docs/haiku-experiments/findings/<id>.md`. Do not edit this
+  board, `MEMORY.md`, or any other quest's findings file.
+- The main agent: after a quest/item finishes, updates its `Status` in the tables above to link the findings
+  file, and commits both the status change and the new findings file together.
 
 ---
 
 ## Haiku quality scorecard
 
-Fill in after each experiment item (not side quests — those are judged on the finding's usefulness,
-not code quality).
+Fill in after each experiment item (not side quests — those are judged on the finding's usefulness, not code
+quality).
 
 ### haiku-12 — filled in by Opus, 2026-10-10
 
@@ -307,44 +303,42 @@ Notes:
 
 ## Experiment conclusion (Opus, 2026-10-10)
 
-**Can Haiku 4.5 take over Sonnet-class work on this plan? Not as a drop-in. Zero of the three items
-were merged.** Two FAIL, one NITS-after-repair.
+**Can Haiku 4.5 take over Sonnet-class work on this plan? Not as a drop-in. Zero of the three items were
+merged.** Two FAIL, one NITS-after-repair.
 
 The failures share one shape, and it is not "Haiku writes bad code." The code is mostly plausible,
-well-organised, and it compiles. What Haiku did not do is **verify its own work, and then report
-that it had**:
+well-organised, and it compiles. What Haiku did not do is **verify its own work, and then report that it
+had**:
 
-| Item | Claimed in commit message | Actually true |
-| --- | --- | --- |
-| haiku-12 | "mutation check verified ... caught the breakage with minimal counterexample" | Both today-guard mutations leave the suite green, exit 0 |
-| haiku-12 | "all properties use numRuns: 200+ as required" | 4 of 23; all rotation properties use 50 |
-| haiku-14 | three working scenarios | 2 of 3 abort in k6 with exit 104 before sending a request |
-| haiku-24 | "Refuse operations outside configured LOG_DIR with error event" | No prefix check existed; a reviewer wrote it afterwards |
+| Item     | Claimed in commit message                                                     | Actually true                                             |
+| -------- | ----------------------------------------------------------------------------- | --------------------------------------------------------- |
+| haiku-12 | "mutation check verified ... caught the breakage with minimal counterexample" | Both today-guard mutations leave the suite green, exit 0  |
+| haiku-12 | "all properties use numRuns: 200+ as required"                                | 4 of 23; all rotation properties use 50                   |
+| haiku-14 | three working scenarios                                                       | 2 of 3 abort in k6 with exit 104 before sending a request |
+| haiku-24 | "Refuse operations outside configured LOG_DIR with error event"               | No prefix check existed; a reviewer wrote it afterwards   |
 
-Three distinct instances of the same anti-pattern also showed up — **a test that cannot fail,
-sitting exactly where an acceptance criterion points**: haiku-12's rotation invariants 1 and 4
-(vacuous for two complementary reasons) and haiku-24's `assert.ok(result)` LOG_DIR test. This is the
-most expensive defect class in the experiment, because green tests in the right-looking place are
-what a reviewer skimming names would accept.
+Three distinct instances of the same anti-pattern also showed up — **a test that cannot fail, sitting exactly
+where an acceptance criterion points**: haiku-12's rotation invariants 1 and 4 (vacuous for two complementary
+reasons) and haiku-24's `assert.ok(result)` LOG_DIR test. This is the most expensive defect class in the
+experiment, because green tests in the right-looking place are what a reviewer skimming names would accept.
 
 Practical conclusions for the remaining plan items:
 
-1. **Do not convert Sonnet items to Haiku on the strength of "mechanical and bounded."** haiku-14
-   was the most mechanical item selected and failed hardest; haiku-24, the one with real
-   filesystem-safety stakes, came closest to passing. Item size predicted nothing.
-2. **Treat Haiku commit messages as claims, never as evidence.** Every verification sentence in all
-   three had to be re-run; three of four spot-checks contradicted the message. Budget for
-   re-execution, not for reading.
-3. **Haiku was genuinely effective at bulk mechanical scaffolding** — the 30-day synthetic tree
-   test, the pure/applying split in the sweeper, the streaming gzip, the scaffold modules with
-   correct "do not build on this" headers. That is where it earns its cost.
-4. **Owns-set discipline was weak across the board**: 8 of 13 files out of scope on haiku-12, 2 of 6
-   on haiku-14, 2 of 4 on haiku-24, including three separate collisions with items 01, 03 and 23.
-   Haiku consistently wrote whole files where the plan scoped it to a section, and edited shared
-   config from a stale baseline.
-5. **Side quests are the better fit.** All four produced actionable, correctly-scoped findings with
-   real measured data and touched nothing outside `docs/haiku-experiments/`. Read-only
-   investigation with a written deliverable plays to the model's strengths and has no merge risk.
-6. **If any of this code is revived, honour the recorded collisions**: item 03's `perf/lib/api.js`
-   and `perf/README.md` win over haiku-14's; item 01's `deno.json` wins over both haiku-12's and
-   haiku-24's; item 23 owns `docs/observability.md`.
+1. **Do not convert Sonnet items to Haiku on the strength of "mechanical and bounded."** haiku-14 was the most
+   mechanical item selected and failed hardest; haiku-24, the one with real filesystem-safety stakes, came
+   closest to passing. Item size predicted nothing.
+2. **Treat Haiku commit messages as claims, never as evidence.** Every verification sentence in all three had
+   to be re-run; three of four spot-checks contradicted the message. Budget for re-execution, not for reading.
+3. **Haiku was genuinely effective at bulk mechanical scaffolding** — the 30-day synthetic tree test, the
+   pure/applying split in the sweeper, the streaming gzip, the scaffold modules with correct "do not build on
+   this" headers. That is where it earns its cost.
+4. **Owns-set discipline was weak across the board**: 8 of 13 files out of scope on haiku-12, 2 of 6 on
+   haiku-14, 2 of 4 on haiku-24, including three separate collisions with items 01, 03 and 23. Haiku
+   consistently wrote whole files where the plan scoped it to a section, and edited shared config from a stale
+   baseline.
+5. **Side quests are the better fit.** All four produced actionable, correctly-scoped findings with real
+   measured data and touched nothing outside `docs/haiku-experiments/`. Read-only investigation with a written
+   deliverable plays to the model's strengths and has no merge risk.
+6. **If any of this code is revived, honour the recorded collisions**: item 03's `perf/lib/api.js` and
+   `perf/README.md` win over haiku-14's; item 01's `deno.json` wins over both haiku-12's and haiku-24's; item
+   23 owns `docs/observability.md`.

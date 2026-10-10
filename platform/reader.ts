@@ -24,7 +24,9 @@ try {
         }
         reply = { id: request.id, result: await reader.query(definition, request.args) };
       }
-    } catch (e) { reply = { id: request.id, error: e instanceof Error ? e.message : String(e) }; }
+    } catch (e) {
+      reply = { id: request.id, error: e instanceof Error ? e.message : String(e) };
+    }
     await output.write(new TextEncoder().encode(JSON.stringify(reply) + "\n"));
   }
 } finally {

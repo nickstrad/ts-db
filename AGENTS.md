@@ -1,118 +1,109 @@
 # Agent orchestration protocol for ts-db
 
 This file is the coordination contract for agents working on this repo. It covers the plan in
-[`docs/plans/effect-port-and-observability.md`](docs/plans/effect-port-and-observability.md) and
-the Haiku experiment track in [`docs/haiku-experiments.md`](docs/haiku-experiments.md). For repo
-conventions (how to run things, style), see `CLAUDE.md`.
+[`docs/plans/effect-port-and-observability.md`](docs/plans/effect-port-and-observability.md) and the Haiku
+experiment track in [`docs/haiku-experiments.md`](docs/haiku-experiments.md). For repo conventions (how to run
+things, style), see `CLAUDE.md`.
 
 ## Build protocol (plan items)
 
-1. **Brief**: the coordinator takes one item from the plan (its Owns/Reads sets, model assignment,
-   work steps, acceptance criteria) and hands it to a builder subagent.
-2. **Build**: the builder works on branch `item/NN-slug`, in its own git worktree (coordinator
-   worktrees live under `/root/Software/tsdb-work/` — other agents must not touch those paths or
-   branches while work is in flight). The builder edits only files in its item's `Owns` set and may
-   read, but not edit, files in its `Reads` set.
+1. **Brief**: the coordinator takes one item from the plan (its Owns/Reads sets, model assignment, work steps,
+   acceptance criteria) and hands it to a builder subagent.
+2. **Build**: the builder works on branch `item/NN-slug`, in its own git worktree (coordinator worktrees live
+   under `/root/Software/tsdb-work/` — other agents must not touch those paths or branches while work is in
+   flight). The builder edits only files in its item's `Owns` set and may read, but not edit, files in its
+   `Reads` set.
 3. **Commit**: one item = one commit on that branch. Subject line: `<area>: <imperative summary>`.
-4. **Review**: an Opus reviewer (`reviewer-opus-high`) reviews the diff against `main` against the
-   plan item's acceptance criteria and returns a verdict: **PASS**, **NITS**, or **FAIL**. Review is
-   not a separate plan item — every item gets one regardless of which model built it.
-5. **Land**: on PASS, the coordinator merges the branch to `main` and pushes. NITS gets a fixup
-   commit and a re-review of the delta; FAIL goes back to the builder with the defect list.
+4. **Review**: an Opus reviewer (`reviewer-opus-high`) reviews the diff against `main` against the plan item's
+   acceptance criteria and returns a verdict: **PASS**, **NITS**, or **FAIL**. Review is not a separate plan
+   item — every item gets one regardless of which model built it.
+5. **Land**: on PASS, the coordinator merges the branch to `main` and pushes. NITS gets a fixup commit and a
+   re-review of the delta; FAIL goes back to the builder with the defect list.
 
 ## Batch and concurrency rules
 
-- A **batch** is a set of plan items that may run concurrently: no shared files, no ordering
-  dependency between them. Items in the same batch must have disjoint `Owns` sets — a reviewer
-  rejects a diff that edits a file outside its item's `Owns` set.
-- An item marked **SYNC** must land before the next batch starts. See the plan's §3 batch table for
-  which items gate which batches.
+- A **batch** is a set of plan items that may run concurrently: no shared files, no ordering dependency
+  between them. Items in the same batch must have disjoint `Owns` sets — a reviewer rejects a diff that edits
+  a file outside its item's `Owns` set.
+- An item marked **SYNC** must land before the next batch starts. See the plan's §3 batch table for which
+  items gate which batches.
 - `deno.json` is written once, completely, in item 01. No later item edits it.
 - Every commit must leave `deno task ci` green.
 
 ## Model assignment policy
 
-- **Opus** (`implementer-opus-high`) — items that decide semantics expensive to get wrong later:
-  SQL generation, transaction/concurrency boundaries, resource lifetimes (scopes, child processes,
-  DB handles), public type-level API, the error taxonomy.
-- **Sonnet** (`implementer-sonnet-high`) — bounded, mechanical items: the interface is already
-  fixed by an earlier item, the file list is short, acceptance criteria are checkable by running a
-  command.
-- **Haiku** — experiments and side quests **only**, tracked in `docs/haiku-experiments.md`.
-  Haiku never lands work to `main` without both an Opus review (PASS) and explicit human approval —
-  a PASS alone is not sufficient authorization to merge. Haiku work happens on `haiku/NN-slug`
-  branches, never on an `item/NN-slug` branch or worktree.
+- **Opus** (`implementer-opus-high`) — items that decide semantics expensive to get wrong later: SQL
+  generation, transaction/concurrency boundaries, resource lifetimes (scopes, child processes, DB handles),
+  public type-level API, the error taxonomy.
+- **Sonnet** (`implementer-sonnet-high`) — bounded, mechanical items: the interface is already fixed by an
+  earlier item, the file list is short, acceptance criteria are checkable by running a command.
+- **Haiku** — experiments and side quests **only**, tracked in `docs/haiku-experiments.md`. Haiku never lands
+  work to `main` without both an Opus review (PASS) and explicit human approval — a PASS alone is not
+  sufficient authorization to merge. Haiku work happens on `haiku/NN-slug` branches, never on an
+  `item/NN-slug` branch or worktree.
 
 Every item, regardless of model, gets the same Opus review pass described above.
 
 ## Side-quest protocol
 
-Side quests are small, bounded investigations (survey a library's patterns, measure a baseline,
-compare output formats) that are read-only or scratch-only against the product tree — they must
-never modify plan item files (`core/`, `platform/`, `sdk/`, `app/`, `tests/`, `scripts/`, `perf/`,
-`deno.json`).
+Side quests are small, bounded investigations (survey a library's patterns, measure a baseline, compare output
+formats) that are read-only or scratch-only against the product tree — they must never modify plan item files
+(`core/`, `platform/`, `sdk/`, `app/`, `tests/`, `scripts/`, `perf/`, `deno.json`).
 
-1. The main agent appends new quests to the "Side quests" table in `docs/haiku-experiments.md`
-   (id, question, why it matters, done-criteria).
+1. The main agent appends new quests to the "Side quests" table in `docs/haiku-experiments.md` (id, question,
+   why it matters, done-criteria).
 2. A Haiku subagent claims one quest, investigates, and writes its findings to exactly
-   `docs/haiku-experiments/findings/<quest-id>.md` — a unique path per quest, so concurrent Haiku
-   runs never collide on a shared-file edit. A Haiku agent does not edit the board itself, any other
-   quest's findings file, or `MEMORY.md`.
-3. The main agent updates the quest's status in the board and commits the status change together
-   with the new findings file.
+   `docs/haiku-experiments/findings/<quest-id>.md` — a unique path per quest, so concurrent Haiku runs never
+   collide on a shared-file edit. A Haiku agent does not edit the board itself, any other quest's findings
+   file, or `MEMORY.md`.
+3. The main agent updates the quest's status in the board and commits the status change together with the new
+   findings file.
 
 ## Work scripts
 
-Reusable scripts from agent work live in `work-scripts/` — Deno for larger work
-(`work-scripts/deno/`), bash for bash-oriented things (`work-scripts/bash/`). Haiku scripts are
-collocated here too, not in a separate folder. Full placement rules in
-`work-scripts/README.md`. The rule that matters most: **read `work-scripts/INDEX.md` before
-writing a new script, and append a row to it when you add one** — over time this becomes the
-shared set of building blocks agents start from instead of re-creating.
+Reusable scripts from agent work live in `work-scripts/` — Deno for larger work (`work-scripts/deno/`), bash
+for bash-oriented things (`work-scripts/bash/`). Haiku scripts are collocated here too, not in a separate
+folder. Full placement rules in `work-scripts/README.md`. The rule that matters most: **read
+`work-scripts/INDEX.md` before writing a new script, and append a row to it when you add one** — over time
+this becomes the shared set of building blocks agents start from instead of re-creating.
 
 ## Diagram maintenance (C4 architecture docs)
 
-`docs/architecture/` holds Simon Brown C4 diagrams for this project (see
-`docs/architecture/AGENTS.md` for the diagram conventions). After every plan item lands on
-`main`, the coordinator spawns a **follow-up docs agent** (Sonnet-class, docs-only) that:
+`docs/architecture/` holds Simon Brown C4 diagrams for this project (see `docs/architecture/AGENTS.md` for the
+diagram conventions). After every plan item lands on `main`, the coordinator spawns a **follow-up docs agent**
+(Sonnet-class, docs-only) that:
 
-1. Reads the landed item's diff and decides which C4 diagrams it affects (new service, new
-   container/process, changed component boundaries, new external dependency).
-2. Updates the affected diagrams **in both formats** (GitHub/Mermaid version and the
-   terminal/glow version) to match the new code.
+1. Reads the landed item's diff and decides which C4 diagrams it affects (new service, new container/process,
+   changed component boundaries, new external dependency).
+2. Updates the affected diagrams **in both formats** (GitHub/Mermaid version and the terminal/glow version) to
+   match the new code.
 3. Commits as `docs: update C4 diagrams for item NN` on `main` (pull --rebase first) and pushes.
 
-Diagrams must never drift from the code: a reviewer rejects a "diagrams current" claim that was
-not re-verified against the landed diff. If an item touches no diagram-relevant surface, the
-follow-up agent says so in one line in its commit message (`docs: item NN touches no C4 surface`)
-and moves on.
+Diagrams must never drift from the code: a reviewer rejects a "diagrams current" claim that was not
+re-verified against the landed diff. If an item touches no diagram-relevant surface, the follow-up agent says
+so in one line in its commit message (`docs: item NN touches no C4 surface`) and moves on.
 
 ## File sync protocol
 
-This repo maintains two instruction files: **AGENTS.md** (agent orchestration and repo structure)
-and **CLAUDE.md** (repo conventions for the Claude Code CLI). The CLI auto-discovers only
-CLAUDE.md, never AGENTS.md — empirically validated in sq-05.
+This repo maintains two instruction files: **AGENTS.md** (agent orchestration and repo structure) and
+**CLAUDE.md** (repo conventions for the Claude Code CLI). The CLI auto-discovers only CLAUDE.md, never
+AGENTS.md — empirically validated in sq-05.
 
-- **AGENTS.md** is the single source of truth for agent orchestration, work protocols, model
-  assignments, and repo structure. It is read by human coordinators and agent prompts, never
-  auto-discovered by the CLI.
-- **CLAUDE.md** is auto-discovered by the `claude` CLI and defines CLI-facing repo conventions
-  (environment setup, branch/worktree etiquette, docs-only session boundaries, commit style).
-  The two files are deliberately disjoint — CLAUDE.md is not a summary of AGENTS.md and neither
-  is derivable from the other.
-- **Keep the overlap in sync, in both directions.** The files share exactly two topics:
-  branch/worktree etiquette and commit style. When either file changes one of those, update the
-  other to match. Everything else lives in exactly one file: orchestration protocol, model
-  assignments, and batch rules live only in AGENTS.md; environment setup and docs-only session
-  boundaries live only in CLAUDE.md.
-- **Do not replace CLAUDE.md with a symlink to AGENTS.md.** A symlink technically works (the CLI
-  opens the `CLAUDE.md` path and the filesystem resolves the link — verified 3/3 in review),
-  but it would collapse two intentionally different documents, written for different audiences,
-  into one.
+- **AGENTS.md** is the single source of truth for agent orchestration, work protocols, model assignments, and
+  repo structure. It is read by human coordinators and agent prompts, never auto-discovered by the CLI.
+- **CLAUDE.md** is auto-discovered by the `claude` CLI and defines CLI-facing repo conventions (environment
+  setup, branch/worktree etiquette, docs-only session boundaries, commit style). The two files are
+  deliberately disjoint — CLAUDE.md is not a summary of AGENTS.md and neither is derivable from the other.
+- **Keep the overlap in sync, in both directions.** The files share exactly two topics: branch/worktree
+  etiquette and commit style. When either file changes one of those, update the other to match. Everything
+  else lives in exactly one file: orchestration protocol, model assignments, and batch rules live only in
+  AGENTS.md; environment setup and docs-only session boundaries live only in CLAUDE.md.
+- **Do not replace CLAUDE.md with a symlink to AGENTS.md.** A symlink technically works (the CLI opens the
+  `CLAUDE.md` path and the filesystem resolves the link — verified 3/3 in review), but it would collapse two
+  intentionally different documents, written for different audiences, into one.
 
 ## Stopping-point convention
 
-Work proceeds item by item (or quest by quest) and stops at the item the human and coordinator
-agreed on for that session. The coordinator reports status on completion: which items landed, which
-are in review, and what the next item would be. Do not continue past the agreed stopping point
-without checking in.
+Work proceeds item by item (or quest by quest) and stops at the item the human and coordinator agreed on for
+that session. The coordinator reports status on completion: which items landed, which are in review, and what
+the next item would be. Do not continue past the agreed stopping point without checking in.

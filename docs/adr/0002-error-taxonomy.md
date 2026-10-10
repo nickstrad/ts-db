@@ -301,17 +301,17 @@ as raw `node:sqlite` errors via the bare `throw e` at `:35` and `:96`.
 
 ### `platform/duckdb.ts`, `platform/reader.ts` — the reader (item 16)
 
-| Site           | Today's message               | Tagged error                                                                 |
-| -------------- | ----------------------------- | ---------------------------------------------------------------------------- |
-| `duckdb.ts:29` | `Expected a query`            | `HandlerKindMismatch({ expected: "query", actual: "mutation" })`             |
-| `duckdb.ts:33` | `Query context has expired`   | `ContextExpiredError({ context: "query" })`                                  |
-| `duckdb.ts:34` | `Queries cannot write`        | `QueryWriteAttemptError({ operation, table })`                               |
-| `reader.ts:17` | `Unknown app or handler`      | split: `UnknownAppError({ appId })` / `UnknownHandlerError({ appId, name })` |
+| Site           | Today's message             | Tagged error                                                                 |
+| -------------- | --------------------------- | ---------------------------------------------------------------------------- |
+| `duckdb.ts:29` | `Expected a query`          | `HandlerKindMismatch({ expected: "query", actual: "mutation" })`             |
+| `duckdb.ts:33` | `Query context has expired` | `ContextExpiredError({ context: "query" })`                                  |
+| `duckdb.ts:34` | `Queries cannot write`      | `QueryWriteAttemptError({ operation, table })`                               |
+| `reader.ts:17` | `Unknown app or handler`    | split: `UnknownAppError({ appId })` / `UnknownHandlerError({ appId, name })` |
 
 > Note: `HandlerKindMismatch` is raised by the router (item 22), not inside `Storage.mutation` /
-> `Reader.query` — those services' frozen error channels (`MutationError`, `QueryError`) do not
-> include it. The mappings above describe the semantic site, not the raising layer.
-| `reader.ts:19` | `Reader accepts queries only` | `HandlerKindMismatch({ appId, name, expected: "query", actual })`            |
+> `Reader.query` — those services' frozen error channels (`MutationError`, `QueryError`) do not include it.
+> The mappings above describe the semantic site, not the raising layer. | `reader.ts:19` |
+> `Reader accepts queries only` | `HandlerKindMismatch({ appId, name, expected: "query", actual })` |
 
 `reader.ts:27` currently flattens whatever was thrown to `e.message` on the reply. It becomes a
 `ReaderErrorFrame`, so the parent can rebuild the tag and keep the status. `DuckReader.open`'s

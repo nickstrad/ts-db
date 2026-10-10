@@ -10,7 +10,9 @@ export async function objectStore(): Promise<ObjectStore> {
     // This is NOT off-host redundancy.
     const root = resolve(Deno.env.get("LOCAL_OBJECT_DIR") ?? "./object-store");
     const path = (key: string) => {
-      if (!/^[A-Za-z0-9_./-]+$/.test(key) || key.split("/").includes("..") || key.startsWith("/")) throw new Error("Invalid key");
+      if (!/^[A-Za-z0-9_./-]+$/.test(key) || key.split("/").includes("..") || key.startsWith("/")) {
+        throw new Error("Invalid key");
+      }
       return resolve(root, key);
     };
     return {
@@ -29,15 +31,21 @@ export async function objectStore(): Promise<ObjectStore> {
   const secretAccessKey = Deno.env.get("AWS_SECRET_ACCESS_KEY");
   if (!accessKeyId || !secretAccessKey) throw new Error("S3 credentials are required");
   const signer = new AwsClient({
-    accessKeyId, secretAccessKey, sessionToken: Deno.env.get("AWS_SESSION_TOKEN"),
-    service: "s3", region: Deno.env.get("AWS_REGION") ?? "us-east-1", retries: 3,
+    accessKeyId,
+    secretAccessKey,
+    sessionToken: Deno.env.get("AWS_SESSION_TOKEN"),
+    service: "s3",
+    region: Deno.env.get("AWS_REGION") ?? "us-east-1",
+    retries: 3,
   });
   // Base includes the bucket: virtual-hosted S3 or a path-style S3-compatible URL.
-  const url = (key: string) => `${base.replace(/\/$/, "")}/${key.split("/").map(encodeURIComponent).join("/")}`;
+  const url = (key: string) =>
+    `${base.replace(/\/$/, "")}/${key.split("/").map(encodeURIComponent).join("/")}`;
   return {
     async put(key, bytes) {
       const response = await signer.fetch(url(key), {
-        method: "PUT", body: bytes.slice().buffer,
+        method: "PUT",
+        body: bytes.slice().buffer,
         headers: { "content-type": "application/octet-stream" },
         signal: AbortSignal.timeout(60_000),
       });

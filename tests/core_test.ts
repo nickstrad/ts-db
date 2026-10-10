@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -9,7 +9,7 @@ import { SQLiteWriter } from "../platform/sqlite.ts";
 import { compileDDL, compileSelect, decode } from "../platform/compiler.ts";
 import { defineFunctions } from "../sdk/functions.ts";
 import { Documents } from "../sdk/db.ts";
-import { v, withStorage, type Storage } from "../sdk/schema.ts";
+import { type Storage, v, withStorage } from "../sdk/schema.ts";
 import { schema } from "../app/schema.ts";
 import { functions } from "../app/functions.ts";
 import type { ArgsOf, Names, ResultOf } from "../sdk/functions.ts";
@@ -44,24 +44,41 @@ const inspector = defineFunctions(schema).mutation({
       };
     }),
 });
-async function fixture(storage: Storage, run: (ctx: {
-  writer: SQLiteWriter<typeof schema>;
-  dir: string;
-  file: string;
-  call: <N extends Names<typeof functions, "mutation">>(name: N, args: ArgsOf<typeof functions[N]>) => Promise<ResultOf<typeof functions[N]>>;
-  inspect: () => Promise<ResultOf<typeof inspector>>;
-}) => Promise<void>) {
+async function fixture(
+  storage: Storage,
+  run: (ctx: {
+    writer: SQLiteWriter<typeof schema>;
+    dir: string;
+    file: string;
+    call: <N extends Names<typeof functions, "mutation">>(
+      name: N,
+      args: ArgsOf<typeof functions[N]>,
+    ) => Promise<ResultOf<typeof functions[N]>>;
+    inspect: () => Promise<ResultOf<typeof inspector>>;
+  }) => void | Promise<void>,
+) {
   const dir = mkdtempSync(join(tmpdir(), "document-db-test-"));
   const file = join(dir, "app.sqlite");
   let id = 0;
-  const writer = new SQLiteWriter(file, withStorage(schema, storage), undefined, () => 1_700_000_000_000, () => `id-${++id}`);
+  const writer = new SQLiteWriter(
+    file,
+    withStorage(schema, storage),
+    undefined,
+    () => 1_700_000_000_000,
+    () => `id-${++id}`,
+  );
   try {
     await run({
-      writer, dir, file,
+      writer,
+      dir,
+      file,
       call: async (name, args) => await writer.mutation(functions[name], args) as never,
       inspect: async () => await writer.mutation(inspector, {}) as ResultOf<typeof inspector>,
     });
-  } finally { await writer.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally {
+    await writer.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 for (const storage of ["columns", "json"] as const) {
@@ -69,7 +86,9 @@ for (const storage of ["columns", "json"] as const) {
     await fixture(storage, async ({ call, inspect }) => {
       const { gameId } = await call("createGame", { xPlayer: "alice", oPlayer: "bob" });
       let version = 1;
-      for (const [playerId, cell] of [["alice", 0], ["bob", 3], ["alice", 1], ["bob", 4], ["alice", 2]] as const) {
+      for (
+        const [playerId, cell] of [["alice", 0], ["bob", 3], ["alice", 1], ["bob", 4], ["alice", 2]] as const
+      ) {
         const game = await call("makeMove", { gameId, playerId, cell, expectedVersion: version++ });
         assert.equal(game!._version, version);
       }
@@ -79,7 +98,10 @@ for (const storage of ["columns", "json"] as const) {
       assert.deepEqual(state.wins, [{ value: "X", count: 1 }]);
       assert.equal(state.moves.length, 5);
       assert.equal(state.count, 1);
-      await assert.rejects(call("makeMove", { gameId, playerId: "bob", cell: 5, expectedVersion: 6 }), ruleRejection("game-over", "Game is over"));
+      await assert.rejects(
+        call("makeMove", { gameId, playerId: "bob", cell: 5, expectedVersion: 6 }),
+        ruleRejection("game-over", "Game is over"),
+      );
       await call("deleteGame", { gameId });
       assert.equal((await inspect()).count, 0);
       assert.equal((await inspect()).moves.length, 0);
@@ -89,9 +111,14 @@ for (const storage of ["columns", "json"] as const) {
   test(`${storage}: two competing moves cannot both commit`, async () => {
     await fixture(storage, async ({ call, inspect }) => {
       const { gameId } = await call("createGame", { xPlayer: "alice", oPlayer: "bob" });
-      const results = await Promise.allSettled([0, 1].map((cell) => call("makeMove", {
-        gameId, playerId: "alice", cell, expectedVersion: 1,
-      })));
+      const results = await Promise.allSettled([0, 1].map((cell) =>
+        call("makeMove", {
+          gameId,
+          playerId: "alice",
+          cell,
+          expectedVersion: 1,
+        })
+      ));
       assert.equal(results.filter((x) => x.status === "fulfilled").length, 1);
       const state = await inspect();
       assert.equal(state.games[0].board.filter((x) => x !== null).length, 1);
@@ -107,7 +134,9 @@ for (const storage of ["columns", "json"] as const) {
         args: { gameId: v.string() },
         handler: ({ db }, { gameId }) =>
           Effect.gen(function* () {
-            yield* db.patch("games", gameId, { board: ["X", null, null, null, null, null, null, null, null] });
+            yield* db.patch("games", gameId, {
+              board: ["X", null, null, null, null, null, null, null, null],
+            });
             yield* db.insert("moves", { gameId, playerId: "alice", mark: "X", cell: 0, moveNumber: 1 });
             return yield* Effect.fail(new Error("Injected failure after both writes"));
           }),
@@ -122,11 +151,23 @@ for (const storage of ["columns", "json"] as const) {
 
   test(`${storage}: invalid arguments and illegal moves are rejected`, async () => {
     await fixture(storage, async ({ writer, call, inspect }) => {
-      await assert.rejects(writer.mutation(functions.createGame, { xPlayer: "a", oPlayer: "b", extra: true }), /Unknown field/);
+      await assert.rejects(
+        writer.mutation(functions.createGame, { xPlayer: "a", oPlayer: "b", extra: true }),
+        /Unknown field/,
+      );
       const { gameId } = await call("createGame", { xPlayer: "a", oPlayer: "b" });
-      await assert.rejects(call("makeMove", { gameId, playerId: "b", cell: 0, expectedVersion: 1 }), ruleRejection("not-your-turn", "Not your turn"));
-      await assert.rejects(call("makeMove", { gameId, playerId: "a", cell: 10, expectedVersion: 1 }), ruleRejection("invalid-move", "Invalid move"));
-      await assert.rejects(call("makeMove", { gameId, playerId: "a", cell: 0.5, expectedVersion: 1 }), /expected integer/);
+      await assert.rejects(
+        call("makeMove", { gameId, playerId: "b", cell: 0, expectedVersion: 1 }),
+        ruleRejection("not-your-turn", "Not your turn"),
+      );
+      await assert.rejects(
+        call("makeMove", { gameId, playerId: "a", cell: 10, expectedVersion: 1 }),
+        ruleRejection("invalid-move", "Invalid move"),
+      );
+      await assert.rejects(
+        call("makeMove", { gameId, playerId: "a", cell: 0.5, expectedVersion: 1 }),
+        /expected integer/,
+      );
       assert.equal((await inspect()).games[0]._version, 1);
     });
   });
@@ -155,12 +196,14 @@ for (const storage of ["columns", "json"] as const) {
       try {
         assert.equal(db.prepare("SELECT COUNT(*) AS n FROM games").get()!.n, 1);
         assert.equal(db.prepare("PRAGMA quick_check").get()!.quick_check, "ok");
-      } finally { db.close(); }
+      } finally {
+        db.close();
+      }
     });
   });
 
   test(`${storage}: schema drift fails rather than silently migrating`, async () => {
-    await fixture(storage, async ({ file }) => {
+    await fixture(storage, ({ file }) => {
       const changed = withStorage(schema, storage === "json" ? "columns" : "json");
       assert.throws(() => new SQLiteWriter(file, changed), /refuses automatic migration/);
     });
@@ -203,18 +246,31 @@ test("same logical plan generates both dialects and both storage layouts", async
 
 test("array predicates and unknown fields fail instead of falling back to JS scans", () => {
   const base = { kind: "select" as const, table: "games", limit: 20 };
-  assert.throws(() => compileSelect(schema, { ...base, filters: [{ field: "board", op: "eq", value: [] }] }, "duckdb"), /Array predicates/);
-  assert.throws(() => compileSelect(schema, { ...base, filters: [{ field: "notAField", op: "eq", value: "x" }] }, "sqlite"), /Unknown field/);
+  assert.throws(
+    () => compileSelect(schema, { ...base, filters: [{ field: "board", op: "eq", value: [] }] }, "duckdb"),
+    /Array predicates/,
+  );
+  assert.throws(
+    () =>
+      compileSelect(schema, { ...base, filters: [{ field: "notAField", op: "eq", value: "x" }] }, "sqlite"),
+    /Unknown field/,
+  );
 });
 
 test("JSON numeric queries cast extracted values; null uses IS NULL", () => {
   const json = withStorage(schema, "json");
   const numeric = compileSelect(json, {
-    kind: "select", table: "moves", limit: 9, filters: [{ field: "moveNumber", op: "gt", value: 3 }],
+    kind: "select",
+    table: "moves",
+    limit: 9,
+    filters: [{ field: "moveNumber", op: "gt", value: 3 }],
   }, "duckdb");
   assert.match(numeric.text, /CAST\(json_extract_string\("doc", '\$\.moveNumber'\) AS BIGINT\) > \$p1/);
   const nullable = compileSelect(json, {
-    kind: "select", table: "games", limit: 20, filters: [{ field: "winner", op: "eq", value: null }],
+    kind: "select",
+    table: "games",
+    limit: 20,
+    filters: [{ field: "winner", op: "eq", value: null }],
   }, "duckdb");
   assert.match(nullable.text, /IS NULL/);
   assert.deepEqual(nullable.values, [20]);
@@ -223,9 +279,15 @@ test("JSON numeric queries cast extracted values; null uses IS NULL", () => {
 test("decoder normalizes DuckDB BIGINT results to safe JS numbers", () => {
   const plan = { kind: "select" as const, table: "games", filters: [], limit: 20 };
   const rows = decode(schema, plan, [{
-    _id: "g", _creationTime: 1700000000000n, _version: 1n,
-    xPlayer: "alice", oPlayer: "bob", board: JSON.stringify(Array(9).fill(null)),
-    turn: "X", status: "playing", winner: null,
+    _id: "g",
+    _creationTime: 1700000000000n,
+    _version: 1n,
+    xPlayer: "alice",
+    oPlayer: "bob",
+    board: JSON.stringify(Array(9).fill(null)),
+    turn: "X",
+    status: "playing",
+    winner: null,
   }]) as { _creationTime: number; board: unknown[] }[];
   assert.equal(typeof rows[0]._creationTime, "number");
   assert.equal(rows[0].board.length, 9);

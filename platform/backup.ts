@@ -2,15 +2,26 @@ import { resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { SQLiteWriter } from "./sqlite.ts";
 import type { Schema } from "../sdk/schema.ts";
-import { sha256, type ObjectStore } from "./object_store.ts";
-export type Manifest = { format: 1; appId: string; capturedAt: string; key: string; bytes: number; sha256: string };
+import { type ObjectStore, sha256 } from "./object_store.ts";
+export type Manifest = {
+  format: 1;
+  appId: string;
+  capturedAt: string;
+  key: string;
+  bytes: number;
+  sha256: string;
+};
 
 export function integrityCheck(file: string): void {
   const db = new DatabaseSync(file, { readOnly: true });
   try {
     const results = db.prepare("PRAGMA quick_check").all();
-    if (results.length !== 1 || results[0].quick_check !== "ok") throw new Error("Snapshot failed integrity check");
-  } finally { db.close(); }
+    if (results.length !== 1 || results[0].quick_check !== "ok") {
+      throw new Error("Snapshot failed integrity check");
+    }
+  } finally {
+    db.close();
+  }
 }
 export class Backups {
   private active = new Set<string>();
@@ -27,7 +38,14 @@ export class Backups {
       integrityCheck(snapshot);
       const bytes = await Deno.readFile(snapshot);
       const key = `apps/${appId}/${capturedAt.replaceAll(":", "-")}-${crypto.randomUUID()}.sqlite`;
-      const manifest: Manifest = { format: 1, appId, capturedAt, key, bytes: bytes.length, sha256: await sha256(bytes) };
+      const manifest: Manifest = {
+        format: 1,
+        appId,
+        capturedAt,
+        key,
+        bytes: bytes.length,
+        sha256: await sha256(bytes),
+      };
       const json = new TextEncoder().encode(JSON.stringify(manifest, null, 2));
       // Upload immutable data first; publish latest only after successful uploads.
       await this.store.put(key, bytes);

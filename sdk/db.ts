@@ -67,7 +67,9 @@ export class Find<T> {
    * `normalise`, which is where this guard goes once that lands.
    */
   limit(limit: number): Find<T> {
-    if (!Number.isInteger(limit) || limit < MIN_LIMIT || limit > MAX_LIMIT) throw new Error(`Limit must be ${MIN_LIMIT}..${MAX_LIMIT}`);
+    if (!Number.isInteger(limit) || limit < MIN_LIMIT || limit > MAX_LIMIT) {
+      throw new Error(`Limit must be ${MIN_LIMIT}..${MAX_LIMIT}`);
+    }
     return new Find(this.execute, { ...this.plan, limit });
   }
   collect(): Effect.Effect<T[], DbError> {

@@ -10,7 +10,7 @@
  * Output: one line per project with input / cache-write / cache-read / output tokens,
  * plus a TOTAL line. Numbers are raw tokens as reported by the API.
  */
-import { expandGlob } from "jsr:@std/fs/expand-glob";
+import { expandGlob } from "jsr:@std/fs@1.0.24/expand-glob";
 
 interface Usage {
   input_tokens?: number;

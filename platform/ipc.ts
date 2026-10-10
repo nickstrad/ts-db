@@ -27,7 +27,10 @@ export class ReaderRPC {
   private writes: Promise<void> = Promise.resolve();
   constructor(module: string) {
     this.child = new Deno.Command(Deno.execPath(), {
-      args: ["run", "-A", module], stdin: "piped", stdout: "piped", stderr: "inherit",
+      args: ["run", "-A", module],
+      stdin: "piped",
+      stdout: "piped",
+      stderr: "inherit",
     }).spawn();
     this.input = this.child.stdin.getWriter();
     void this.receive();
@@ -44,22 +47,30 @@ export class ReaderRPC {
         const entry = this.pending.get(reply.id);
         if (!entry) continue;
         this.pending.delete(reply.id);
-        if (reply.error) entry.reject(new Error(reply.error)); else entry.resolve(reply.result);
+        if (reply.error) entry.reject(new Error(reply.error));
+        else entry.resolve(reply.result);
       }
       this.fail(new Error(`Reader exited: ${(await this.child.status).code}`));
-    } catch (e) { this.fail(e instanceof Error ? e : new Error(String(e))); }
+    } catch (e) {
+      this.fail(e instanceof Error ? e : new Error(String(e)));
+    }
   }
   call(request: ReaderRequest): Promise<unknown> {
     if (this.stopped) return Promise.reject(this.stopped);
     if (this.pending.size >= 1000) return Promise.reject(new Error("Reader queue full"));
     const id = this.nextId++;
-    const result = new Promise((resolve, reject) => { this.pending.set(id, { resolve, reject }); });
+    const result = new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+    });
     const bytes = new TextEncoder().encode(JSON.stringify({ id, ...request }) + "\n");
     this.writes = this.writes.then(() => this.input.write(bytes)).catch((e) => this.fail(e));
     return result;
   }
   async close() {
-    try { await this.writes; await this.input.close(); } catch { /* child already exited */ }
+    try {
+      await this.writes;
+      await this.input.close();
+    } catch { /* child already exited */ }
     await this.child.status;
   }
 }

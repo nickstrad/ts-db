@@ -29,57 +29,81 @@ async function parseArgs(req: Request): Promise<unknown> {
   }
   const bytes = new Uint8Array(size);
   let offset = 0;
-  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.length;
+  }
   return JSON.parse(new TextDecoder().decode(bytes) || "{}");
 }
-const server = Deno.serve({ hostname: "127.0.0.1", port: Number(Deno.env.get("PORT") ?? 8000) }, async (req) => {
-  const path = new URL(req.url).pathname;
-  try {
-    if (req.method === "GET" && path === "/health") {
-      await reader.call({ kind: "ping" });
-      return reply({ ok: true, apps: [...apps.keys()] });
-    }
-    if (req.method !== "POST") return reply({ error: "Not found" }, 404);
-    const backupMatch = path.match(/^\/admin\/backup\/([^/]+)$/);
-    if (backupMatch) {
-      if (req.headers.get("authorization") !== `Bearer ${adminToken}`) return reply({ error: "Unauthorized" }, 401);
-      const app = apps.get(backupMatch[1]);
+const server = Deno.serve(
+  { hostname: "127.0.0.1", port: Number(Deno.env.get("PORT") ?? 8000) },
+  async (req) => {
+    const path = new URL(req.url).pathname;
+    try {
+      if (req.method === "GET" && path === "/health") {
+        await reader.call({ kind: "ping" });
+        return reply({ ok: true, apps: [...apps.keys()] });
+      }
+      if (req.method !== "POST") return reply({ error: "Not found" }, 404);
+      const backupMatch = path.match(/^\/admin\/backup\/([^/]+)$/);
+      if (backupMatch) {
+        if (req.headers.get("authorization") !== `Bearer ${adminToken}`) {
+          return reply({
+            error: "Unauthorized",
+          }, 401);
+        }
+        const app = apps.get(backupMatch[1]);
+        if (!app) return reply({ error: "Unknown app" }, 404);
+        return reply({ result: await backups.take(app.id, writers.get(app.id)!) });
+      }
+      const match = path.match(/^\/apps\/([^/]+)\/(query|mutation)\/([A-Za-z][A-Za-z0-9_]*)$/);
+      if (!match) return reply({ error: "Not found" }, 404);
+      const [, appId, kind, name] = match;
+      const app = apps.get(appId);
       if (!app) return reply({ error: "Unknown app" }, 404);
-      return reply({ result: await backups.take(app.id, writers.get(app.id)!) });
+      if (req.headers.get("authorization") !== `Bearer ${app.token}`) {
+        return reply(
+          { error: "Unauthorized" },
+          401,
+        );
+      }
+      if (!Object.hasOwn(app.functions, name)) return reply({ error: "Unknown handler" }, 404);
+      const definition = app.functions[name as keyof typeof app.functions];
+      if (definition.kind !== kind) return reply({ error: "Handler kind mismatch" }, 400);
+      const args = await parseArgs(req);
+      const result = kind === "mutation"
+        ? await writers.get(appId)!.mutation(definition, args)
+        : await reader.call({ kind: "query", appId, name, args });
+      return reply({ result });
+    } catch (e) {
+      // Detailed errors are useful locally, but need classification/redaction for production.
+      return reply({ error: e instanceof Error ? e.message : String(e) }, 400);
     }
-    const match = path.match(/^\/apps\/([^/]+)\/(query|mutation)\/([A-Za-z][A-Za-z0-9_]*)$/);
-    if (!match) return reply({ error: "Not found" }, 404);
-    const [, appId, kind, name] = match;
-    const app = apps.get(appId);
-    if (!app) return reply({ error: "Unknown app" }, 404);
-    if (req.headers.get("authorization") !== `Bearer ${app.token}`) return reply({ error: "Unauthorized" }, 401);
-    if (!Object.hasOwn(app.functions, name)) return reply({ error: "Unknown handler" }, 404);
-    const definition = app.functions[name as keyof typeof app.functions];
-    if (definition.kind !== kind) return reply({ error: "Handler kind mismatch" }, 400);
-    const args = await parseArgs(req);
-    const result = kind === "mutation"
-      ? await writers.get(appId)!.mutation(definition, args)
-      : await reader.call({ kind: "query", appId, name, args });
-    return reply({ result });
-  } catch (e) {
-    // Detailed errors are useful locally, but need classification/redaction for production.
-    return reply({ error: e instanceof Error ? e.message : String(e) }, 400);
-  }
-});
+  },
+);
 
 // Opt in. A completed mutation acknowledges LOCAL commit, not object-storage upload.
 const interval = Number(Deno.env.get("BACKUP_INTERVAL_MS") ?? 0);
-if (!Number.isFinite(interval) || (interval !== 0 && interval < 1000)) throw new Error("Invalid backup interval");
+if (!Number.isFinite(interval) || (interval !== 0 && interval < 1000)) {
+  throw new Error("Invalid backup interval");
+}
 let backupTick: Promise<void> | undefined;
-const timer = interval ? setInterval(() => {
-  if (backupTick) return;
-  backupTick = (async () => {
-    for (const [id, writer] of writers) {
-      try { console.error(JSON.stringify({ backup: await backups.take(id, writer) })); }
-      catch (e) { console.error("Backup failed:", id, e); }
-    }
-  })().finally(() => { backupTick = undefined; });
-}, interval) : undefined;
+const timer = interval
+  ? setInterval(() => {
+    if (backupTick) return;
+    backupTick = (async () => {
+      for (const [id, writer] of writers) {
+        try {
+          console.error(JSON.stringify({ backup: await backups.take(id, writer) }));
+        } catch (e) {
+          console.error("Backup failed:", id, e);
+        }
+      }
+    })().finally(() => {
+      backupTick = undefined;
+    });
+  }, interval)
+  : undefined;
 
 console.error("Local/trusted-app MVP. Default token: dev-only. Reader + writer share local files.");
 let stopping = false;
@@ -94,7 +118,9 @@ async function shutdown() {
   Deno.removeSignalListener("SIGINT", onSignal);
   Deno.removeSignalListener("SIGTERM", onSignal);
 }
-const onSignal = () => { void shutdown(); };
+const onSignal = () => {
+  void shutdown();
+};
 Deno.addSignalListener("SIGINT", onSignal);
 Deno.addSignalListener("SIGTERM", onSignal);
 await server.finished;

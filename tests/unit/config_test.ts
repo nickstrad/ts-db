@@ -257,11 +257,18 @@ test("README 'Configuration' section matches the options table exactly", () => {
   const readme = readFileSync(readmePath, "utf-8");
   // Anchor to the section: a row appended to (or left behind in) the table must fail too,
   // not just edits and deletions. Normalize whitespace so `deno fmt` on README.md stays green.
+  // `deno fmt` also pads markdown table separator cells with dashes to the column width
+  // (`| ------ |` instead of `| --- |`); canonicalize separator rows so the padded and
+  // unpadded forms compare equal while content rows still compare exactly.
   const sectionStart = readme.indexOf("## Configuration");
   assert.ok(sectionStart !== -1, "README.md must contain a ## Configuration section");
   const nextSection = readme.indexOf("\n## ", sectionStart + 1);
   const section = readme.slice(sectionStart, nextSection === -1 ? undefined : nextSection);
-  const norm = (s: string) => s.split("\n").map((line) => line.trim().replace(/\s+/g, " "));
+  const norm = (s: string) =>
+    s.split("\n").map((line) => {
+      const collapsed = line.trim().replace(/\s+/g, " ");
+      return /^\|(?:\s*:?-+:?\s*\|)+$/.test(collapsed) ? collapsed.replace(/-+/g, "-") : collapsed;
+    });
   const readmeTable = section.split("\n").filter((line) => line.startsWith("|")).join("\n");
   assert.deepEqual(
     norm(readmeTable),

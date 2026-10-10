@@ -1,5 +1,5 @@
 // Reader process ONLY. It deliberately never imports node:sqlite.
-import { DuckDBInstance, type DuckDBConnection } from "@duckdb/node-api";
+import { type DuckDBConnection, DuckDBInstance } from "@duckdb/node-api";
 import { Effect } from "effect";
 import { Documents } from "../sdk/db.ts";
 import type { Schema } from "../sdk/schema.ts";
@@ -15,7 +15,11 @@ export class DuckReader<S extends Schema> {
     private schema: S,
     private trace: Trace,
   ) {}
-  static async open<S extends Schema>(file: string, schema: S, trace: Trace = () => {}): Promise<DuckReader<S>> {
+  static async open<S extends Schema>(
+    file: string,
+    schema: S,
+    trace: Trace = () => {},
+  ): Promise<DuckReader<S>> {
     const instance = await DuckDBInstance.create(":memory:", { threads: "2", memory_limit: "256MB" });
     const connection = await instance.connect();
     try {
@@ -23,7 +27,11 @@ export class DuckReader<S extends Schema> {
       await connection.run("LOAD sqlite");
       await connection.run(`ATTACH ${literal(file)} AS "app" (TYPE SQLITE, READ_ONLY)`);
       return new DuckReader(instance, connection, schema, trace);
-    } catch (e) { connection.closeSync(); instance.closeSync(); throw e; }
+    } catch (e) {
+      connection.closeSync();
+      instance.closeSync();
+      throw e;
+    }
   }
   // The worker serializes whole query handlers: never share an active transaction.
   async query(definition: AnyDefinition, args: unknown): Promise<unknown> {
@@ -52,7 +60,12 @@ export class DuckReader<S extends Schema> {
     } catch (e) {
       await this.connection.run("ROLLBACK");
       throw e;
-    } finally { active = false; }
+    } finally {
+      active = false;
+    }
   }
-  close(): void { this.connection.closeSync(); this.instance.closeSync(); }
+  close(): void {
+    this.connection.closeSync();
+    this.instance.closeSync();
+  }
 }

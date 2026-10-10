@@ -10,12 +10,17 @@ export function loadApps() {
   const data = resolve(Deno.env.get("DATA_DIR") ?? "./data");
   return new Map([
     ["tic-tac-toe", {
-      id: "tic-tac-toe", file: resolve(data, "tic-tac-toe.sqlite"), schema,
-      functions, token: Deno.env.get("COLUMN_APP_TOKEN") ?? "dev-only",
+      id: "tic-tac-toe",
+      file: resolve(data, "tic-tac-toe.sqlite"),
+      schema,
+      functions,
+      token: Deno.env.get("COLUMN_APP_TOKEN") ?? "dev-only",
     }],
     ["tic-tac-toe-json", {
-      id: "tic-tac-toe-json", file: resolve(data, "tic-tac-toe-json.sqlite"),
-      schema: withStorage(schema, "json"), functions,
+      id: "tic-tac-toe-json",
+      file: resolve(data, "tic-tac-toe-json.sqlite"),
+      schema: withStorage(schema, "json"),
+      functions,
       token: Deno.env.get("JSON_APP_TOKEN") ?? "dev-only",
     }],
   ]);
