@@ -47,7 +47,8 @@ export type CompileFailure =
   | "unsupported-operator"
   | "gt-requires-numeric"
   | "invalid-limit"
-  | "invalid-ordering";
+  | "invalid-ordering"
+  | "empty-enum";
 
 /** Why a stored value could not be decoded back into a document. */
 export type DecodeFailure = "unsafe-integer" | "malformed-json" | "missing-column";
