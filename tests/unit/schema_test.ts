@@ -1,0 +1,397 @@
+/**
+ * Unit tests for `core/schema.ts` (plan item 04).
+ *
+ * The point of these is that validation is now *total*: every rejection is a `SchemaError` value
+ * with a structured `reason`/`path`, and nothing in `core/` throws. So the assertions below check
+ * the tag and the path, not a message. The legacy message rendering lives in `sdk/schema.ts` and is
+ * covered in the last section — those strings are what `tests/core_test.ts` matches on.
+ */
+import assert from "node:assert/strict";
+import { Either } from "effect";
+import type { SchemaError } from "../../core/errors.ts";
+import {
+  defineSchema,
+  defineTable,
+  identifier,
+  type Node,
+  parseObject,
+  Table,
+  v,
+  validate,
+  withStorage,
+} from "../../core/schema.ts";
+import * as Sdk from "../../sdk/schema.ts";
+
+function expectLeft<A>(either: Either.Either<A, SchemaError>): SchemaError {
+  if (Either.isLeft(either)) return either.left;
+  return assert.fail(`expected a left, got right ${JSON.stringify(either.right)}`);
+}
+function expectRight<A>(either: Either.Either<A, SchemaError>): A {
+  if (Either.isRight(either)) return either.right;
+  return assert.fail(`expected a right, got left ${JSON.stringify(either.left)}`);
+}
+/** Asserts a `type-mismatch` at `path` demanding `expected`, which is the whole failure contract. */
+function assertMismatch(error: SchemaError, path: string, expected: string) {
+  assert.equal(error._tag, "SchemaError");
+  assert.equal(error.reason, "type-mismatch");
+  assert.equal(error.path, path);
+  assert.equal(error.expected, expected);
+}
+
+const nullableOf = (field: { node: Node }): Node => v.nullable(field as never).node;
+
+// ---------------------------------------------------------------------------
+// validate: one test per node kind, both nullable combinations, every failure mode
+// ---------------------------------------------------------------------------
+
+Deno.test("validate: string accepts strings, including empty, and rejects everything else", () => {
+  const node = v.string().node;
+  assert.equal(expectRight(validate(node, "x", "f")), "x");
+  assert.equal(expectRight(validate(node, "", "f")), "");
+  assertMismatch(expectLeft(validate(node, 1, "f")), "f", "string");
+  assertMismatch(expectLeft(validate(node, undefined, "f")), "f", "string");
+  assertMismatch(expectLeft(validate(node, null, "f")), "f", "string");
+});
+
+Deno.test("validate: nullable string accepts null and still rejects non-strings", () => {
+  const node = nullableOf(v.string());
+  assert.equal(expectRight(validate(node, null, "f")), null);
+  assert.equal(expectRight(validate(node, "x", "f")), "x");
+  assertMismatch(expectLeft(validate(node, 1, "f")), "f", "string or null");
+  assertMismatch(expectLeft(validate(node, undefined, "f")), "f", "string or null");
+});
+
+Deno.test("validate: number requires a finite number", () => {
+  const node = v.number().node;
+  assert.equal(expectRight(validate(node, 1.5, "f")), 1.5);
+  assert.equal(expectRight(validate(node, -0, "f")), -0);
+  assertMismatch(expectLeft(validate(node, Number.NaN, "f")), "f", "number");
+  assertMismatch(expectLeft(validate(node, Infinity, "f")), "f", "number");
+  assertMismatch(expectLeft(validate(node, "1.5", "f")), "f", "number");
+  assertMismatch(expectLeft(validate(node, null, "f")), "f", "number");
+});
+
+Deno.test("validate: nullable number accepts null, rejects NaN", () => {
+  const node = nullableOf(v.number());
+  assert.equal(expectRight(validate(node, null, "f")), null);
+  assert.equal(expectRight(validate(node, 0, "f")), 0);
+  assertMismatch(expectLeft(validate(node, Number.NaN, "f")), "f", "number or null");
+});
+
+Deno.test("validate: integer requires Number.isSafeInteger, not merely an integral value", () => {
+  const node = v.integer().node;
+  assert.equal(expectRight(validate(node, 0, "f")), 0);
+  assert.equal(expectRight(validate(node, Number.MAX_SAFE_INTEGER, "f")), Number.MAX_SAFE_INTEGER);
+  assertMismatch(expectLeft(validate(node, 0.5, "f")), "f", "integer");
+  assertMismatch(expectLeft(validate(node, Number.MAX_SAFE_INTEGER + 1, "f")), "f", "integer");
+  assertMismatch(expectLeft(validate(node, 1e21, "f")), "f", "integer");
+  assertMismatch(expectLeft(validate(node, Number.NaN, "f")), "f", "integer");
+  assertMismatch(expectLeft(validate(node, Infinity, "f")), "f", "integer");
+  // A bigint is integral but is not a JS number, and never round-trips through JSON.
+  assertMismatch(expectLeft(validate(node, 1n, "f")), "f", "integer");
+});
+
+Deno.test("validate: nullable integer accepts null, rejects unsafe integers", () => {
+  const node = nullableOf(v.integer());
+  assert.equal(expectRight(validate(node, null, "f")), null);
+  assert.equal(expectRight(validate(node, 7, "f")), 7);
+  assertMismatch(expectLeft(validate(node, 2 ** 53, "f")), "f", "integer or null");
+});
+
+Deno.test("validate: boolean accepts only true and false", () => {
+  const node = v.boolean().node;
+  assert.equal(expectRight(validate(node, true, "f")), true);
+  assert.equal(expectRight(validate(node, false, "f")), false);
+  assertMismatch(expectLeft(validate(node, 1, "f")), "f", "boolean");
+  assertMismatch(expectLeft(validate(node, "true", "f")), "f", "boolean");
+  assertMismatch(expectLeft(validate(node, null, "f")), "f", "boolean");
+});
+
+Deno.test("validate: nullable boolean accepts null", () => {
+  const node = nullableOf(v.boolean());
+  assert.equal(expectRight(validate(node, null, "f")), null);
+  assert.equal(expectRight(validate(node, false, "f")), false);
+  assertMismatch(expectLeft(validate(node, 0, "f")), "f", "boolean or null");
+});
+
+Deno.test("validate: enum accepts only declared members", () => {
+  const node = v.enum("X", "O").node;
+  assert.equal(expectRight(validate(node, "X", "turn")), "X");
+  assert.equal(expectRight(validate(node, "O", "turn")), "O");
+  assertMismatch(expectLeft(validate(node, "x", "turn")), "turn", "enum");
+  assertMismatch(expectLeft(validate(node, "", "turn")), "turn", "enum");
+  assertMismatch(expectLeft(validate(node, 0, "turn")), "turn", "enum");
+  assertMismatch(expectLeft(validate(node, null, "turn")), "turn", "enum");
+});
+
+Deno.test("validate: nullable enum accepts null and rejects undeclared members", () => {
+  const node = nullableOf(v.enum("X", "O"));
+  assert.equal(expectRight(validate(node, null, "winner")), null);
+  assert.equal(expectRight(validate(node, "O", "winner")), "O");
+  assertMismatch(expectLeft(validate(node, "D", "winner")), "winner", "enum or null");
+});
+
+Deno.test("validate: array validates element-wise and accepts any length when unconstrained", () => {
+  const node = v.array(v.string()).node;
+  assert.deepEqual(expectRight(validate(node, [], "tags")), []);
+  assert.deepEqual(expectRight(validate(node, ["a", "b"], "tags")), ["a", "b"]);
+  assertMismatch(expectLeft(validate(node, "a", "tags")), "tags", "array");
+  assertMismatch(expectLeft(validate(node, { 0: "a", length: 1 }, "tags")), "tags", "array");
+  assertMismatch(expectLeft(validate(node, null, "tags")), "tags", "array");
+});
+
+Deno.test("validate: a fixed-length array rejects any other length", () => {
+  const node = v.array(v.integer(), 2).node;
+  assert.deepEqual(expectRight(validate(node, [1, 2], "pair")), [1, 2]);
+  assertMismatch(expectLeft(validate(node, [1], "pair")), "pair", "array");
+  assertMismatch(expectLeft(validate(node, [1, 2, 3], "pair")), "pair", "array");
+  assertMismatch(expectLeft(validate(node, [], "pair")), "pair", "array");
+});
+
+Deno.test("validate: a failing array element reports its own indexed path", () => {
+  const board = v.array(v.nullable(v.enum("X", "O")), 9).node;
+  const nulls = Array(9).fill(null);
+  assert.deepEqual(expectRight(validate(board, nulls, "board")), nulls);
+  const mixed = ["X", null, "O", null, null, null, null, null, null];
+  assert.deepEqual(expectRight(validate(board, mixed, "board")), mixed);
+  const bad = [null, null, null, "D", null, null, null, null, null];
+  assertMismatch(expectLeft(validate(board, bad, "board")), "board[3]", "enum or null");
+  // The first failure decides; index 1 is reported, not index 4.
+  const twoBad = [null, 1, null, null, 2, null, null, null, null];
+  assertMismatch(expectLeft(validate(board, twoBad, "board")), "board[1]", "enum or null");
+});
+
+Deno.test("validate: nested arrays accumulate both indices in the path", () => {
+  const node = v.array(v.array(v.integer(), 2)).node;
+  assert.deepEqual(expectRight(validate(node, [[1, 2], [3, 4]], "grid")), [[1, 2], [3, 4]]);
+  assertMismatch(expectLeft(validate(node, [[1, 2], [3, "4"]], "grid")), "grid[1][1]", "integer");
+  assertMismatch(expectLeft(validate(node, [[1, 2], [3]], "grid")), "grid[1]", "array");
+});
+
+Deno.test("validate: a nullable array accepts null but a non-nullable element does not", () => {
+  const node = nullableOf(v.array(v.string(), 2));
+  assert.equal(expectRight(validate(node, null, "tags")), null);
+  assert.deepEqual(expectRight(validate(node, ["a", "b"], "tags")), ["a", "b"]);
+  assertMismatch(expectLeft(validate(node, ["a", null], "tags")), "tags[1]", "string");
+});
+
+// ---------------------------------------------------------------------------
+// parseObject
+// ---------------------------------------------------------------------------
+
+const fields = { name: v.string(), age: v.integer(), nickname: v.nullable(v.string()) };
+
+Deno.test("parseObject: accepts a complete object and keys the result in field order", () => {
+  const parsed = expectRight(parseObject(fields, { age: 3, nickname: null, name: "a" }));
+  assert.deepEqual(parsed, { name: "a", age: 3, nickname: null });
+  // JSON storage stringifies this object, so the key order is part of the stored bytes.
+  assert.deepEqual(Object.keys(parsed), ["name", "age", "nickname"]);
+});
+
+Deno.test("parseObject: rejects anything that is not a plain object", () => {
+  for (const input of [null, undefined, 0, "", "x", true, [], [{ name: "a" }]]) {
+    const error = expectLeft(parseObject(fields, input));
+    assert.equal(error.reason, "not-an-object");
+    assert.equal(error.expected, "object");
+  }
+});
+
+Deno.test("parseObject: rejects an unknown field before validating any declared one", () => {
+  // `name` is also wrong here; the unknown key is what comes back.
+  const error = expectLeft(parseObject(fields, { name: 1, age: 3, nickname: null, extra: true }));
+  assert.equal(error.reason, "unknown-field");
+  assert.equal(error.path, "extra");
+  assert.equal(error.actual, true);
+});
+
+Deno.test("parseObject: a missing field fails its own node, since undefined is not null", () => {
+  assertMismatch(expectLeft(parseObject(fields, { name: "a", age: 3 })), "nickname", "string or null");
+  assertMismatch(expectLeft(parseObject(fields, { name: "a" })), "age", "integer");
+});
+
+Deno.test("parseObject: a bad field value reports that field's path", () => {
+  assertMismatch(expectLeft(parseObject(fields, { name: "a", age: 0.5, nickname: null })), "age", "integer");
+});
+
+Deno.test("parseObject: partial mode skips absent fields and keeps every other rule", () => {
+  assert.deepEqual(expectRight(parseObject(fields, {}, true)), {});
+  assert.deepEqual(expectRight(parseObject(fields, { age: 3 }, true)), { age: 3 });
+  assert.deepEqual(expectRight(parseObject(fields, { nickname: null }, true)), { nickname: null });
+  assertMismatch(expectLeft(parseObject(fields, { age: 0.5 }, true)), "age", "integer");
+  assert.equal(expectLeft(parseObject(fields, { extra: 1 }, true)).reason, "unknown-field");
+  assert.equal(expectLeft(parseObject(fields, null, true)).reason, "not-an-object");
+});
+
+Deno.test("parseObject: an explicit undefined is a present key and still fails validation", () => {
+  assertMismatch(expectLeft(parseObject(fields, { age: undefined }, true)), "age", "integer");
+});
+
+Deno.test("parseObject: an empty field map accepts only an empty object", () => {
+  assert.deepEqual(expectRight(parseObject({}, {})), {});
+  assert.equal(expectLeft(parseObject({}, { a: 1 })).reason, "unknown-field");
+});
+
+// ---------------------------------------------------------------------------
+// identifier, defineTable, defineSchema, Table.addIndex, withStorage
+// ---------------------------------------------------------------------------
+
+Deno.test("identifier: accepts SQL-safe names and rejects everything else", () => {
+  for (const name of ["a", "_a", "A1", "by_status", "_id"]) {
+    assert.equal(expectRight(identifier(name)), name);
+  }
+  for (const name of ["", "1a", "a-b", "a b", "a.b", 'a"b', "a;b", "drop table", "é"]) {
+    const error = expectLeft(identifier(name));
+    assert.equal(error.reason, "invalid-identifier");
+    assert.equal(error.path, name);
+  }
+});
+
+Deno.test("defineTable: accepts identifier field names and rejects reserved _-prefixed ones", () => {
+  const table = expectRight(defineTable({ name: v.string() }));
+  assert.deepEqual(Object.keys(table.fields), ["name"]);
+  assert.equal(table.storage, "columns");
+  assert.deepEqual(table.indexes, []);
+
+  for (const name of ["_id", "_version", "_"]) {
+    const error = expectLeft(defineTable({ [name]: v.string() }));
+    assert.equal(error.reason, "reserved-field");
+    assert.equal(error.path, name);
+  }
+  const invalid = expectLeft(defineTable({ "not an identifier": v.string() }));
+  assert.equal(invalid.reason, "invalid-identifier");
+  assert.equal(invalid.path, "not an identifier");
+});
+
+Deno.test("defineSchema: rejects _-prefixed and sqlite_-prefixed table names in any case", () => {
+  const games = expectRight(defineTable({ status: v.string() }));
+  assert.deepEqual(Object.keys(expectRight(defineSchema({ games }))), ["games"]);
+
+  for (const name of ["_meta", "sqlite_master", "SQLite_Master", "SQLITE_SEQUENCE"]) {
+    const error = expectLeft(defineSchema({ [name]: games }));
+    assert.equal(error.reason, "reserved-table");
+    assert.equal(error.path, name);
+  }
+  // `sqlite_` is reserved only as a prefix.
+  assert.equal(Object.keys(expectRight(defineSchema({ not_sqlite_master: games }))).length, 1);
+  assert.equal(expectLeft(defineSchema({ "bad name": games })).reason, "invalid-identifier");
+});
+
+Deno.test("Table.addIndex: accepts scalar fields and leaves the receiver unchanged", () => {
+  const table = new Table({ status: v.string(), turn: v.enum("X", "O") });
+  const indexed = expectRight(table.addIndex("by_status", ["status"]));
+  assert.deepEqual(indexed.indexes, [{ name: "by_status", fields: ["status"] }]);
+  assert.deepEqual(table.indexes, []);
+  const both = expectRight(indexed.addIndex("by_turn_status", ["turn", "status"]));
+  assert.deepEqual(both.indexes.map((i) => i.name), ["by_status", "by_turn_status"]);
+});
+
+Deno.test("Table.addIndex: rejects a bad name, no fields, array or unknown fields, and duplicates", () => {
+  const table = new Table({ status: v.string(), board: v.array(v.string(), 9) });
+
+  assert.equal(expectLeft(table.addIndex("by status", ["status"])).reason, "invalid-identifier");
+
+  const empty = expectLeft(table.addIndex("by_nothing", []));
+  assert.equal(empty.reason, "empty-index");
+  assert.equal(empty.path, "by_nothing");
+
+  const array = expectLeft(table.addIndex("by_board", ["board"]));
+  assert.equal(array.reason, "unindexable-field");
+  assert.equal(array.path, "board");
+
+  const unknown = expectLeft(table.addIndex("by_missing", ["nope" as "status"]));
+  assert.equal(unknown.reason, "unindexable-field");
+  assert.equal(unknown.path, "nope");
+
+  const indexed = expectRight(table.addIndex("by_status", ["status"]));
+  const duplicate = expectLeft(indexed.addIndex("by_status", ["status"]));
+  assert.equal(duplicate.reason, "duplicate-index");
+  assert.equal(duplicate.path, "by_status");
+});
+
+Deno.test("withStorage: reprojects every table onto one layout, preserving fields and indexes", () => {
+  const games = expectRight(
+    expectRight(defineTable({ status: v.string() })).addIndex("by_status", ["status"]),
+  );
+  const schema = expectRight(defineSchema({ games }));
+  const json = withStorage(schema, "json");
+  assert.equal(json.games.storage, "json");
+  assert.deepEqual(json.games.indexes, games.indexes);
+  assert.deepEqual(Object.keys(json.games.fields), ["status"]);
+  // The input is untouched: descriptors are immutable values.
+  assert.equal(schema.games.storage, "columns");
+  assert.equal(withStorage(json, "columns").games.storage, "columns");
+});
+
+// ---------------------------------------------------------------------------
+// sdk/schema.ts: the throwing compatibility layer and its messages
+//
+// These strings are the pre-port `Error` messages. `tests/core_test.ts` matches `/Unknown field/`
+// and `/expected integer/` against them through `platform/compiler.ts` and `sdk/functions.ts`.
+// ---------------------------------------------------------------------------
+
+Deno.test("sdk: the *OrThrow wrappers pass values through unchanged", () => {
+  assert.equal(Sdk.identifierOrThrow("by_status"), "by_status");
+  assert.equal(Sdk.validateOrThrow(v.integer().node, 3, "cell"), 3);
+  assert.deepEqual(Sdk.parseObjectOrThrow(fields, { name: "a", age: 1, nickname: null }), {
+    name: "a",
+    age: 1,
+    nickname: null,
+  });
+  assert.deepEqual(Sdk.parseObjectOrThrow(fields, { age: 1 }, true), { age: 1 });
+  // The legacy aliases are the same functions under the names `platform/` imports.
+  assert.equal(Sdk.validate, Sdk.validateOrThrow);
+  assert.equal(Sdk.parseObject, Sdk.parseObjectOrThrow);
+  assert.equal(Sdk.identifier, Sdk.identifierOrThrow);
+});
+
+Deno.test("sdk: every failure renders the pre-port message", () => {
+  assert.throws(() => Sdk.validateOrThrow(v.integer().node, 0.5, "cell"), /^Error: cell: expected integer$/);
+  assert.throws(
+    () => Sdk.validateOrThrow(nullableOf(v.enum("X", "O")), "D", "board[3]"),
+    /^Error: board\[3\]: expected enum or null$/,
+  );
+  assert.throws(() => Sdk.parseObjectOrThrow(fields, { extra: 1 }), /^Error: Unknown field: extra$/);
+  assert.throws(() => Sdk.parseObjectOrThrow(fields, []), /^Error: Expected an object$/);
+  assert.throws(() => Sdk.identifierOrThrow("bad name"), /^Error: Invalid identifier: bad name$/);
+  assert.throws(() => Sdk.defineTable({ _id: v.string() }), /^Error: Reserved field: _id$/);
+  assert.throws(
+    () => Sdk.defineSchema({ sqlite_master: Sdk.defineTable({ a: v.string() }) }),
+    /^Error: Reserved table: sqlite_master$/,
+  );
+  const table = Sdk.defineTable({ status: v.string(), board: v.array(v.string(), 9) });
+  assert.throws(() => table.index("by_nothing", []), /^Error: An index needs at least one field$/);
+  assert.throws(() => table.index("by_board", ["board"]), /^Error: Cannot index board$/);
+  assert.throws(
+    () => table.index("by_status", ["status"]).index("by_status", ["status"]),
+    /^Error: Duplicate index by_status$/,
+  );
+});
+
+Deno.test("sdk: a thrown wrapper error carries the structured SchemaError as its cause", () => {
+  try {
+    Sdk.parseObjectOrThrow(fields, { name: "a", age: "x", nickname: null });
+    assert.fail("expected a throw");
+  } catch (error) {
+    assert.ok(error instanceof Error);
+    const cause = error.cause as SchemaError;
+    assert.equal(cause._tag, "SchemaError");
+    assert.equal(cause.reason, "type-mismatch");
+    assert.equal(cause.path, "age");
+    assert.equal(cause.actual, "x");
+  }
+});
+
+Deno.test("sdk: AppTable keeps index chaining and storage reprojection app-shaped", () => {
+  const table = Sdk.defineTable({ status: v.string(), turn: v.enum("X", "O") })
+    .index("by_status", ["status"])
+    .index("by_turn", ["turn"]);
+  assert.deepEqual(table.indexes.map((i) => i.name), ["by_status", "by_turn"]);
+  assert.ok(table instanceof Sdk.AppTable);
+  assert.ok(table instanceof Table);
+  const json = table.storeAs("json");
+  assert.ok(json instanceof Sdk.AppTable);
+  assert.equal(json.storage, "json");
+  assert.deepEqual(json.indexes, table.indexes);
+  // withStorage goes through storeAs, so an app schema stays app-shaped.
+  assert.ok(withStorage({ games: table }, "json").games instanceof Sdk.AppTable);
+});
