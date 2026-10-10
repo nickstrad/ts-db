@@ -38,7 +38,7 @@ conventions (how to run things, style), see `CLAUDE.md`.
 - **Sonnet** (`implementer-sonnet-high`) — bounded, mechanical items: the interface is already
   fixed by an earlier item, the file list is short, acceptance criteria are checkable by running a
   command.
-- **Haiku (5.5)** — experiments and side quests **only**, tracked in `docs/haiku-experiments.md`.
+- **Haiku** — experiments and side quests **only**, tracked in `docs/haiku-experiments.md`.
   Haiku never lands work to `main` without both an Opus review (PASS) and explicit human approval —
   a PASS alone is not sufficient authorization to merge. Haiku work happens on `haiku/NN-slug`
   branches, never on an `item/NN-slug` branch or worktree.
@@ -60,6 +60,15 @@ never modify plan item files (`core/`, `platform/`, `sdk/`, `app/`, `tests/`, `s
    quest's findings file, or `MEMORY.md`.
 3. The main agent updates the quest's status in the board and commits the status change together
    with the new findings file.
+
+## Work scripts
+
+Reusable scripts from agent work live in `work-scripts/` — Deno for larger work
+(`work-scripts/deno/`), bash for bash-oriented things (`work-scripts/bash/`). Haiku scripts are
+collocated here too, not in a separate folder. Full placement rules in
+`work-scripts/README.md`. The rule that matters most: **read `work-scripts/INDEX.md` before
+writing a new script, and append a row to it when you add one** — over time this becomes the
+shared set of building blocks agents start from instead of re-creating.
 
 ## Stopping-point convention
 
