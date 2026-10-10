@@ -30,7 +30,12 @@ const policyArb: fc.Arbitrary<RotationPolicy> = fc.record({
 /** An entry plus the age (in days) of its directory, known by construction. */
 type Aged = { entry: FileEntry; age: number; open: boolean };
 
-function entryArb(now: Date, policy: RotationPolicy, age: fc.Arbitrary<number>): fc.Arbitrary<Aged> {
+function entryArb(
+  now: Date,
+  policy: RotationPolicy,
+  age: fc.Arbitrary<number>,
+  maxBytes: number,
+): fc.Arbitrary<Aged> {
   return fc.record({
     age,
     hour: fc.integer({ min: 0, max: 23 }),
@@ -38,7 +43,7 @@ function entryArb(now: Date, policy: RotationPolicy, age: fc.Arbitrary<number>):
     pid: fc.integer({ min: 1, max: 99999 }),
     seq: fc.integer({ min: 0, max: 9 }),
     gz: fc.boolean(),
-    bytes: fc.integer({ min: 0, max: 600 }),
+    bytes: fc.integer({ min: 0, max: maxBytes }),
     mtime: fc.date({ noInvalidDate: true }),
   }).map(({ age, hour, role, pid, seq, gz, bytes, mtime }) => {
     const when = new Date(now.getFullYear(), now.getMonth(), now.getDate() - age, hour);
@@ -56,11 +61,25 @@ const ageArb = fc.oneof(
   { weight: 1, arbitrary: fc.integer({ min: -2, max: -1 }) },
 );
 
+/**
+ * Byte/cap profiles, so the cap boundary (`total == maxTotalBytes`) is generated, not just hoped for:
+ * - wide: bytes 0..600 against caps 0..1500, the cap bites in roughly half the runs;
+ * - tight: bytes 0..4 against caps 0..20, so totals land exactly on the cap after some pruning;
+ * - exact: the cap is set to the total the plan starts with (today plus every directory age alone keeps).
+ */
+const profileArb = fc.oneof(
+  { weight: 2, arbitrary: fc.constant("wide" as const) },
+  { weight: 2, arbitrary: fc.constant("tight" as const) },
+  { weight: 1, arbitrary: fc.constant("exact" as const) },
+);
+
 /** `now`, a policy, the open file (in today's directory), and other files with unique paths. */
-const scenarioArb = fc.tuple(nowArb, policyArb).chain(([now, policy]) =>
-  fc.tuple(
-    entryArb(now, policy, fc.constant(0)),
-    fc.array(entryArb(now, policy, ageArb), { maxLength: 14 }),
+const scenarioArb = fc.tuple(nowArb, policyArb, profileArb).chain(([now, base, profile]) => {
+  const maxBytes = profile === "tight" ? 4 : 600;
+  const policy = profile === "tight" ? { ...base, maxTotalBytes: base.maxTotalBytes % 21 } : base;
+  return fc.tuple(
+    entryArb(now, policy, fc.constant(0), maxBytes),
+    fc.array(entryArb(now, policy, ageArb, maxBytes), { maxLength: 14 }),
   ).map(([open, rest]) => {
     const seen = new Set<string>([open.entry.path]);
     const files: Aged[] = [{ ...open, open: true }];
@@ -70,9 +89,14 @@ const scenarioArb = fc.tuple(nowArb, policyArb).chain(([now, policy]) =>
         files.push(f);
       }
     }
-    return { now, policy, files, entries: files.map((f) => f.entry) };
-  })
-);
+    // Today's directory plus every non-today directory younger than keepDays (the ones that stay on disk).
+    const onDisk = files.filter((f) => f.age === 0 || f.age < policy.keepDays);
+    const final: RotationPolicy = profile === "exact"
+      ? { ...policy, maxTotalBytes: onDisk.reduce((n, f) => n + f.entry.bytes, 0) }
+      : policy;
+    return { now, policy: final, files, entries: files.map((f) => f.entry) };
+  });
+});
 
 const union = (...lists: readonly (readonly string[])[]): string[] => lists.flat();
 
@@ -92,6 +116,25 @@ test(
         s.files.some((f) => f.age > 0 && f.age < s.policy.keepDays && p.delete.includes(f.entry.path))
       ),
       "cap pruning never triggered",
+    );
+    // The cap boundary: bytes left after pruning equal the cap exactly, with something pruned by the cap...
+    const capPruned = ({ s, p }: typeof outcomes[number]) =>
+      s.files.some((f) => f.age > 0 && f.age < s.policy.keepDays && p.delete.includes(f.entry.path));
+    assert.ok(
+      outcomes.some((o) => {
+        const left = o.s.entries.filter((e) => !o.p.delete.includes(e.path)).reduce((n, e) => n + e.bytes, 0);
+        return capPruned(o) && left === o.s.policy.maxTotalBytes;
+      }),
+      "cap equality after pruning never generated",
+    );
+    // ...and the plan's starting total equals the cap with a directory available to (wrongly) prune.
+    assert.ok(
+      outcomes.some(({ s }) => {
+        const onDisk = s.files.filter((f) => f.age === 0 || f.age < s.policy.keepDays);
+        const total = onDisk.reduce((n, f) => n + f.entry.bytes, 0);
+        return total === s.policy.maxTotalBytes && onDisk.some((f) => f.age !== 0);
+      }),
+      "initial total == cap never generated",
     );
   },
 );

@@ -43,7 +43,10 @@ test(titled("generators: splits include empty chunks, mid-message cuts and blank
   );
   assert.ok(samples.some((s) => s.chunks.some((c) => c === "")), "no empty chunk");
   assert.ok(samples.some((s) => s.msgs.some((m) => m === "")), "no blank message");
-  assert.ok(samples.some((s) => s.chunks.length > s.msgs.length + 1), "no mid-message cut");
+  assert.ok(
+    samples.some((s) => s.chunks.some((c) => c !== "" && !c.endsWith("\n"))),
+    "no mid-message cut",
+  );
 });
 
 test(
