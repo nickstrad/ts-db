@@ -1,6 +1,8 @@
 {
   "nodeModulesDir": "auto",
-  "compilerOptions": { "strict": true },
+  "compilerOptions": {
+    "strict": true
+  },
   "imports": {
     "effect": "npm:effect@3.22.2",
     "fast-check": "npm:fast-check@4.10.2",
@@ -11,6 +13,8 @@
     "fmt:check": "deno fmt --check",
     "lint": "deno lint",
     "check": "deno check platform/server.ts platform/reader.ts scripts/demo.ts scripts/restore.ts tests/core_test.ts tests/types.ts tests/integration.ts",
+    "demo": "deno run --allow-net --allow-env scripts/demo.ts",
+    "restore": "deno run -A scripts/restore.ts",
     "test": "deno test -A tests/unit/**/*.ts tests/core_test.ts",
     "test:prop": "deno test -A tests/property/**/*.ts",
     "ci": "deno task fmt:check && deno task lint && deno task check && deno task test && deno task test:prop",
@@ -26,6 +30,14 @@
     "perf:mixed": "k6 run perf/mixed.js",
     "perf:ingest": "deno run -A perf/ingest_k6.ts"
   },
-  "fmt": { "lineWidth": 110 },
-  "lint": { "rules": { "tags": ["recommended"] } }
+  "fmt": {
+    "lineWidth": 110
+  },
+  "lint": {
+    "rules": {
+      "tags": [
+        "recommended"
+      ]
+    }
+  }
 }

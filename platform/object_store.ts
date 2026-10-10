@@ -24,7 +24,7 @@ export async function objectStore(): Promise<ObjectStore> {
       get: (key) => Deno.readFile(path(key)),
     };
   }
-  const { AwsClient } = await import("npm:aws4fetch@1.0.20");
+  const { AwsClient } = await import("aws4fetch");
   const accessKeyId = Deno.env.get("AWS_ACCESS_KEY_ID");
   const secretAccessKey = Deno.env.get("AWS_SECRET_ACCESS_KEY");
   if (!accessKeyId || !secretAccessKey) throw new Error("S3 credentials are required");

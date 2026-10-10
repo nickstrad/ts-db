@@ -63,7 +63,7 @@ Environment facts that constrain the plan:
   dependency age, so the first dependency resolution must run
   `deno install --minimum-dependency-age=0` once and commit `deno.lock`.
 - **k6 is not installed** (`/usr/local/bin` has no `k6`). Workstream 6 starts with an install slice.
-- There is no `duckdb` CLI; all DuckDB access goes through `npm:@duckdb/node-api@1.5.6`, which is
+- There is no `duckdb` CLI; all DuckDB access goes through `npm:@duckdb/node-api@1.5.6-r.1`, which is
   already pinned in `platform/duckdb.ts`.
 - `data/`, `object-store/` and `node_modules/` are gitignored; `deno.lock` is deliberately tracked.
   A new `logs/` entry must be added to `.gitignore` (item 01).
@@ -218,7 +218,7 @@ Note the second testability win: the tic-tac-toe rules move into a pure `applyMo
 {
   "effect": "npm:effect@3.22.2",
   "fast-check": "npm:fast-check@4.10.2",
-  "@duckdb/node-api": "npm:@duckdb/node-api@1.5.6",   // already used, now mapped
+  "@duckdb/node-api": "npm:@duckdb/node-api@1.5.6-r.1",   // already used, now mapped
   "aws4fetch": "npm:aws4fetch@1.0.20"                 // already used, now mapped
 }
 ```
