@@ -42,7 +42,7 @@ try {
     assert.equal(game!._version, 1);
     assert.equal(typeof game!._creationTime, "number");
     for (const [playerId, cell] of [["alice", 0], ["bob", 3], ["alice", 1], ["bob", 4], ["alice", 2]] as const) {
-      const written = await client.mutation("makeMove", { gameId, playerId, cell, expectedVersion: game!._version });
+      const written: unknown = await client.mutation("makeMove", { gameId, playerId, cell, expectedVersion: game!._version });
       game = await client.query("getGame", { gameId });
       assert.deepEqual(game, written, "DuckDB must see the acknowledged SQLite commit");
     }
