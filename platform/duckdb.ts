@@ -151,9 +151,13 @@ function elapsedMs(startNanos: bigint, endNanos: bigint): number {
  * That is safe only because DuckDB serializes statements per connection: the `ROLLBACK` queues
  * behind a statement that is already running and can never interleave with it. A statement the
  * driver has not yet started may be overtaken by the `ROLLBACK` and then run outside the
- * transaction (or inside the next query's); it is a read-only `SELECT` whose result is discarded,
- * so either order is harmless. A driver that ran statements concurrently on one connection, or
- * allowed writes here, would break this.
+ * transaction (or inside the next query's). That is still safe because the statement is a
+ * read-only `SELECT` whose result is discarded: the only observable effect is that, if the
+ * overtaken statement runs inside the next query's transaction and hits a runtime error,
+ * DuckDB marks that transaction aborted and the next query fails once with "Current
+ * transaction is aborted". That query's own release rolls back, so there is no wedge.
+ * A driver that ran statements concurrently on one connection, or allowed writes here,
+ * would break this.
  */
 function native<A>(
   operation: ReaderError["operation"],
