@@ -1,0 +1,484 @@
+/**
+ * The single env boundary (plan item 08). `ConfigLive` reads `Deno.env.toObject()` once at layer
+ * construction — not at first use — decodes it against `OPTIONS` below, and fails with a typed
+ * `ConfigError` rather than letting a bad value surface later as a confusing runtime failure.
+ * `ConfigTest` ignores the environment entirely and merges caller overrides over the same table's
+ * documented defaults.
+ *
+ * `OPTIONS` is the one place every option is declared: name, env var, type, default, description.
+ * Adding an option is adding one row here plus wiring its decoded value into `assemble`'s return
+ * object — no other plumbing changes. `tests/unit/config_test.ts` checks the README "Configuration"
+ * section against this table mechanically (`renderOptionsTable`), so the two cannot drift silently.
+ *
+ * Effect Schema (`effect/Schema`) enforces every per-option rule used here (number/boolean/enum
+ * parsing); no rule in this module needed the Zod fallback the plan allows.
+ */
+import { resolve } from "node:path";
+import { Effect, Layer } from "effect";
+import * as Schema from "effect/Schema";
+import { ConfigError } from "../core/errors.ts";
+import {
+  type AppConfig,
+  type BackupConfig,
+  Config,
+  type ConfigService,
+  type EventLevel,
+  type EventLogConfig,
+  type LoggingConfig,
+  type ObjectStoreConfig,
+  type ServerConfig,
+} from "./services.ts";
+
+const EVENT_LEVELS = ["debug", "info", "warn", "error"] as const;
+const DEV_TOKEN_DEFAULT = "dev-only";
+
+type OptionType = "string" | "optional-string" | "number" | "boolean" | "enum";
+
+export interface OptionSpec {
+  /** The key `assemble` reads this option's decoded value under. */
+  readonly name: string;
+  readonly envVar: string;
+  readonly type: OptionType;
+  /** Only present for `type: "enum"`. */
+  readonly enumValues?: readonly string[];
+  /**
+   * Decode-time fallback used when the env var is unset or empty (empty string is treated as
+   * unset throughout this module). `""` is a sentinel only for `eventlogDuckdbPath`: its real
+   * default is computed from the resolved `dataDir` in `assemble`, documented via `defaultLabel`.
+   */
+  readonly default: string | number | boolean | undefined;
+  /** Human-readable default, exactly as documented in the README "Configuration" table. */
+  readonly defaultLabel: string;
+  readonly description: string;
+}
+
+/**
+ * The options table. Order groups options by the `ConfigService` section they feed, matching
+ * `platform/services.ts`'s field order within each section.
+ */
+export const OPTIONS: readonly OptionSpec[] = [
+  // --- server ---
+  {
+    name: "port",
+    envVar: "PORT",
+    type: "number",
+    default: 8000,
+    defaultLabel: "8000",
+    description: "HTTP server port.",
+  },
+  {
+    name: "hostname",
+    envVar: "HOSTNAME",
+    type: "string",
+    default: "127.0.0.1",
+    defaultLabel: "127.0.0.1",
+    description: "HTTP server bind address.",
+  },
+  {
+    name: "maxRequestBytes",
+    envVar: "MAX_REQUEST_BYTES",
+    type: "number",
+    default: 65_536,
+    defaultLabel: "65536",
+    description: "Request body cap in bytes; larger bodies are rejected before parsing.",
+  },
+  {
+    name: "dataDir",
+    envVar: "DATA_DIR",
+    type: "string",
+    default: "./data",
+    defaultLabel: "./data",
+    description: "Root directory for per-app SQLite files, resolved to an absolute path.",
+  },
+  {
+    name: "adminToken",
+    envVar: "ADMIN_TOKEN",
+    type: "string",
+    default: DEV_TOKEN_DEFAULT,
+    defaultLabel: DEV_TOKEN_DEFAULT,
+    description: "Bearer token for the /admin/* routes.",
+  },
+
+  // --- apps ---
+  {
+    name: "columnAppToken",
+    envVar: "COLUMN_APP_TOKEN",
+    type: "string",
+    default: DEV_TOKEN_DEFAULT,
+    defaultLabel: DEV_TOKEN_DEFAULT,
+    description: "Bearer token for the tic-tac-toe app (columns storage).",
+  },
+  {
+    name: "jsonAppToken",
+    envVar: "JSON_APP_TOKEN",
+    type: "string",
+    default: DEV_TOKEN_DEFAULT,
+    defaultLabel: DEV_TOKEN_DEFAULT,
+    description: "Bearer token for the tic-tac-toe-json app (json storage).",
+  },
+
+  // --- backup ---
+  {
+    name: "backupIntervalMs",
+    envVar: "BACKUP_INTERVAL_MS",
+    type: "number",
+    default: 0,
+    defaultLabel: "0",
+    description:
+      "Backup timer period in milliseconds. 0 disables the timer; otherwise must be finite and >= 1000.",
+  },
+
+  // --- logging ---
+  {
+    name: "logDir",
+    envVar: "LOG_DIR",
+    type: "string",
+    default: "./logs",
+    defaultLabel: "./logs",
+    description: "Root of the logs/<role>/<date>/ tree.",
+  },
+  {
+    name: "logLevel",
+    envVar: "LOG_LEVEL",
+    type: "enum",
+    enumValues: EVENT_LEVELS,
+    default: "info",
+    defaultLabel: "info",
+    description: "Minimum event level written to the log.",
+  },
+  {
+    name: "logRetentionDays",
+    envVar: "LOG_RETENTION_DAYS",
+    type: "number",
+    default: 30,
+    defaultLabel: "30",
+    description: "Days a log file is kept before deletion.",
+  },
+  {
+    name: "logGzipAfterDays",
+    envVar: "LOG_GZIP_AFTER_DAYS",
+    type: "number",
+    default: 7,
+    defaultLabel: "7",
+    description: "Days a log file is kept uncompressed before gzip.",
+  },
+  {
+    name: "logMaxTotalBytes",
+    envVar: "LOG_MAX_TOTAL_BYTES",
+    type: "number",
+    default: 1_073_741_824,
+    defaultLabel: "1073741824",
+    description: "Total bytes the log tree may occupy before the oldest files are swept.",
+  },
+  {
+    name: "logMaxFileBytes",
+    envVar: "LOG_MAX_FILE_BYTES",
+    type: "number",
+    default: 67_108_864,
+    defaultLabel: "67108864",
+    description: "Bytes a single log file may reach before it rolls over.",
+  },
+  {
+    name: "logIncludeBindValues",
+    envVar: "LOG_INCLUDE_BIND_VALUES",
+    type: "boolean",
+    default: false,
+    defaultLabel: "false",
+    description: "Include SQL bind values in sql events. Off by default: bind values are application data.",
+  },
+  {
+    name: "traceSql",
+    envVar: "TRACE_SQL",
+    type: "boolean",
+    default: false,
+    defaultLabel: "false",
+    description: "Emit a trace-level event for every compiled SQL statement.",
+  },
+  {
+    name: "eventQueueCapacity",
+    envVar: "EVENT_QUEUE_CAPACITY",
+    type: "number",
+    default: 10_000,
+    defaultLabel: "10000",
+    description:
+      "Depth of the in-process dropping queue that buffers events before they are flushed to disk.",
+  },
+  {
+    name: "eventFlushMs",
+    envVar: "EVENT_FLUSH_MS",
+    type: "number",
+    default: 250,
+    defaultLabel: "250",
+    description: "Interval in milliseconds between batched event-queue flushes.",
+  },
+
+  // --- object store ---
+  {
+    name: "s3BaseUrl",
+    envVar: "S3_BASE_URL",
+    type: "optional-string",
+    default: undefined,
+    defaultLabel: "(unset)",
+    description:
+      "Base URL of the S3 (or S3-compatible) bucket for backups. Absent selects the local object-store stand-in.",
+  },
+  {
+    name: "awsRegion",
+    envVar: "AWS_REGION",
+    type: "string",
+    default: "us-east-1",
+    defaultLabel: "us-east-1",
+    description: "AWS region used to sign S3 requests.",
+  },
+  {
+    name: "awsAccessKeyId",
+    envVar: "AWS_ACCESS_KEY_ID",
+    type: "optional-string",
+    default: undefined,
+    defaultLabel: "(unset)",
+    description: "AWS access key id. Required when S3_BASE_URL is set.",
+  },
+  {
+    name: "awsSecretAccessKey",
+    envVar: "AWS_SECRET_ACCESS_KEY",
+    type: "optional-string",
+    default: undefined,
+    defaultLabel: "(unset)",
+    description: "AWS secret access key. Required when S3_BASE_URL is set.",
+  },
+  {
+    name: "awsSessionToken",
+    envVar: "AWS_SESSION_TOKEN",
+    type: "optional-string",
+    default: undefined,
+    defaultLabel: "(unset)",
+    description: "AWS session token, for temporary credentials.",
+  },
+  {
+    name: "localObjectDir",
+    envVar: "LOCAL_OBJECT_DIR",
+    type: "string",
+    default: "./object-store",
+    defaultLabel: "./object-store",
+    description: "Local object-store directory used when S3_BASE_URL is unset, resolved to an absolute path.",
+  },
+
+  // --- event log ---
+  {
+    name: "eventlogDuckdbPath",
+    envVar: "EVENTLOG_DUCKDB",
+    type: "string",
+    default: "",
+    defaultLabel: "<DATA_DIR>/eventlog.duckdb",
+    description:
+      "Persistent DuckDB file backing the ingested event log, resolved to an absolute path. Defaults to eventlog.duckdb inside DATA_DIR.",
+  },
+];
+
+/** Renders `OPTIONS` as the exact markdown table the README "Configuration" section must contain. */
+export function renderOptionsTable(): string {
+  const header = "| Option | Env var | Type | Default | Description |\n| --- | --- | --- | --- | --- |";
+  const rows = OPTIONS.map((spec) => {
+    const type = spec.type === "enum" ? `enum(${spec.enumValues!.join("|")})` : spec.type;
+    return `| \`${spec.name}\` | \`${spec.envVar}\` | ${type} | \`${spec.defaultLabel}\` | ${spec.description} |`;
+  });
+  return [header, ...rows].join("\n");
+}
+
+type EnvRecord = Readonly<Record<string, string | undefined>>;
+type Decoded = Readonly<Record<string, string | number | boolean | undefined>>;
+
+function configError(envVar: string, reason: ConfigError["reason"], detail: string): ConfigError {
+  return new ConfigError({ key: envVar, reason, detail });
+}
+
+function decodeScalar(
+  spec: OptionSpec,
+  raw: string,
+): Effect.Effect<string | number | boolean, ConfigError> {
+  switch (spec.type) {
+    case "string":
+    case "optional-string":
+      return Effect.succeed(raw);
+    case "number":
+      return Effect.mapError(
+        Schema.decodeUnknown(Schema.NumberFromString)(raw),
+        () =>
+          configError(
+            spec.envVar,
+            "malformed",
+            `${spec.envVar} must be a number, got ${JSON.stringify(raw)}`,
+          ),
+      );
+    case "boolean":
+      return Effect.mapError(
+        Schema.decodeUnknown(Schema.BooleanFromString)(raw),
+        () =>
+          configError(
+            spec.envVar,
+            "malformed",
+            `${spec.envVar} must be "true" or "false", got ${JSON.stringify(raw)}`,
+          ),
+      );
+    case "enum":
+      return Effect.mapError(
+        Schema.decodeUnknown(Schema.Literal(...spec.enumValues!))(raw),
+        () =>
+          configError(
+            spec.envVar,
+            "malformed",
+            `${spec.envVar} must be one of ${spec.enumValues!.join(", ")}, got ${JSON.stringify(raw)}`,
+          ),
+      );
+  }
+}
+
+/** Empty string is treated as unset, same as an absent env var, throughout this module. */
+function readOption(
+  env: EnvRecord,
+  spec: OptionSpec,
+): Effect.Effect<string | number | boolean | undefined, ConfigError> {
+  const raw = env[spec.envVar];
+  if (raw === undefined || raw === "") return Effect.succeed(spec.default);
+  return decodeScalar(spec, raw);
+}
+
+function decodeAll(env: EnvRecord): Effect.Effect<Decoded, ConfigError> {
+  const effects: Record<string, Effect.Effect<string | number | boolean | undefined, ConfigError>> = {};
+  for (const spec of OPTIONS) effects[spec.name] = readOption(env, spec);
+  return Effect.all(effects);
+}
+
+function str(values: Decoded, name: string): string {
+  return values[name] as string;
+}
+function optStr(values: Decoded, name: string): string | undefined {
+  return values[name] as string | undefined;
+}
+function num(values: Decoded, name: string): number {
+  return values[name] as number;
+}
+function bool(values: Decoded, name: string): boolean {
+  return values[name] as boolean;
+}
+
+/** Per-option decode has already run; this applies the cross-field rules and assembles `ConfigService`. */
+function assemble(values: Decoded): Effect.Effect<ConfigService, ConfigError> {
+  const backupIntervalMs = num(values, "backupIntervalMs");
+  if (backupIntervalMs !== 0 && (!Number.isFinite(backupIntervalMs) || backupIntervalMs < 1000)) {
+    return Effect.fail(
+      configError(
+        "BACKUP_INTERVAL_MS",
+        "out-of-range",
+        `BACKUP_INTERVAL_MS must be 0 or >= 1000 and finite, got ${backupIntervalMs}`,
+      ),
+    );
+  }
+
+  const s3BaseUrl = optStr(values, "s3BaseUrl");
+  const awsAccessKeyId = optStr(values, "awsAccessKeyId");
+  const awsSecretAccessKey = optStr(values, "awsSecretAccessKey");
+  if (s3BaseUrl !== undefined && (awsAccessKeyId === undefined || awsSecretAccessKey === undefined)) {
+    return Effect.fail(
+      configError(
+        "S3_BASE_URL",
+        "inconsistent",
+        "S3_BASE_URL is set but AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY is missing",
+      ),
+    );
+  }
+
+  const dataDir = resolve(str(values, "dataDir"));
+  const eventlogDuckdbRaw = str(values, "eventlogDuckdbPath");
+  const eventlogDuckdbPath = eventlogDuckdbRaw === ""
+    ? resolve(dataDir, "eventlog.duckdb")
+    : resolve(eventlogDuckdbRaw);
+
+  const adminToken = str(values, "adminToken");
+  const columnAppToken = str(values, "columnAppToken");
+  const jsonAppToken = str(values, "jsonAppToken");
+  if (
+    adminToken === DEV_TOKEN_DEFAULT || columnAppToken === DEV_TOKEN_DEFAULT ||
+    jsonAppToken === DEV_TOKEN_DEFAULT
+  ) {
+    // HOOK(item-07): emit a lifecycle warn-level event
+    // { kind: "lifecycle", level: "warn", attrs: { message: "default dev-only token in use" } }
+    // via core/events.ts's EventSink once item 07 lands. This replaces today's unconditional
+    // console.error banner (platform/server.ts:84), removed when item 22 ports server.ts onto
+    // this Config; the dev-token defaults themselves keep working either way.
+  }
+
+  const server: ServerConfig = {
+    hostname: str(values, "hostname"),
+    port: num(values, "port"),
+    maxRequestBytes: num(values, "maxRequestBytes"),
+    adminToken,
+    dataDir,
+  };
+  const apps: readonly AppConfig[] = [
+    { id: "tic-tac-toe", token: columnAppToken, storage: "columns" },
+    { id: "tic-tac-toe-json", token: jsonAppToken, storage: "json" },
+  ];
+  const backup: BackupConfig = { intervalMs: backupIntervalMs };
+  const logging: LoggingConfig = {
+    dir: resolve(str(values, "logDir")),
+    level: str(values, "logLevel") as EventLevel,
+    retentionDays: num(values, "logRetentionDays"),
+    gzipAfterDays: num(values, "logGzipAfterDays"),
+    maxTotalBytes: num(values, "logMaxTotalBytes"),
+    maxFileBytes: num(values, "logMaxFileBytes"),
+    includeBindValues: bool(values, "logIncludeBindValues"),
+    traceSql: bool(values, "traceSql"),
+    eventQueueCapacity: num(values, "eventQueueCapacity"),
+    eventFlushMs: num(values, "eventFlushMs"),
+  };
+  const objectStore: ObjectStoreConfig = {
+    s3BaseUrl,
+    region: str(values, "awsRegion"),
+    accessKeyId: awsAccessKeyId,
+    secretAccessKey: awsSecretAccessKey,
+    sessionToken: optStr(values, "awsSessionToken"),
+    localDir: resolve(str(values, "localObjectDir")),
+  };
+  const eventLog: EventLogConfig = { duckdbPath: eventlogDuckdbPath };
+
+  return Effect.succeed({ server, apps, backup, logging, objectStore, eventLog });
+}
+
+function buildConfig(env: EnvRecord): Effect.Effect<ConfigService, ConfigError> {
+  return Effect.flatMap(decodeAll(env), assemble);
+}
+
+/**
+ * Live: reads `Deno.env.toObject()` once when this layer is constructed. No other `Deno.env` read
+ * exists in this module.
+ */
+export const ConfigLive: Layer.Layer<Config, ConfigError> = Layer.effect(
+  Config,
+  Effect.flatMap(Effect.sync(() => Deno.env.toObject() as EnvRecord), buildConfig),
+);
+
+/** Every option's documented default, as a full `ConfigService` — computed once, ignoring the environment. */
+const DEFAULT_CONFIG: ConfigService = Effect.runSync(buildConfig({}));
+
+export interface ConfigOverrides {
+  readonly server?: Partial<ServerConfig>;
+  readonly apps?: readonly AppConfig[];
+  readonly backup?: Partial<BackupConfig>;
+  readonly logging?: Partial<LoggingConfig>;
+  readonly objectStore?: Partial<ObjectStoreConfig>;
+  readonly eventLog?: Partial<EventLogConfig>;
+}
+
+/** Test: ignores the environment; merges `overrides` over the documented defaults. */
+export function ConfigTest(overrides: ConfigOverrides = {}): Layer.Layer<Config> {
+  const value: ConfigService = {
+    server: { ...DEFAULT_CONFIG.server, ...overrides.server },
+    apps: overrides.apps ?? DEFAULT_CONFIG.apps,
+    backup: { ...DEFAULT_CONFIG.backup, ...overrides.backup },
+    logging: { ...DEFAULT_CONFIG.logging, ...overrides.logging },
+    objectStore: { ...DEFAULT_CONFIG.objectStore, ...overrides.objectStore },
+    eventLog: { ...DEFAULT_CONFIG.eventLog, ...overrides.eventLog },
+  };
+  return Layer.succeed(Config, value);
+}

@@ -180,6 +180,43 @@ The restore publishes a complete temporary file with a same-filesystem hard link
 
 **This is asynchronous backup, not high availability.** A successful mutation acknowledges local SQLite commit, not S3 durability. A host loss can lose commits newer than the last completed snapshot. Backup intervals do not guarantee a fixed RPO during upload delays or failures. There is no leader election, replicated WAL, failover, incremental upload, retention policy, or live restore. Full snapshots read the entire database into memory before upload; replace that path before using large databases. Local `object-store/` is not off-host redundancy.
 
+## Configuration
+
+`platform/config.ts` is the single env boundary: `ConfigLive` reads every option below once, at
+layer construction, and fails with a typed `ConfigError` rather than at first use. Every option is
+declared exactly once, in `platform/config.ts`'s options table — this section is checked against
+that table mechanically (`tests/unit/config_test.ts`), so it always lists the current platform
+version's options. Empty-string env values are treated the same as unset. `ConfigTest(overrides)`
+ignores the environment entirely and is for tests.
+
+| Option | Env var | Type | Default | Description |
+| --- | --- | --- | --- | --- |
+| `port` | `PORT` | number | `8000` | HTTP server port. |
+| `hostname` | `HOSTNAME` | string | `127.0.0.1` | HTTP server bind address. |
+| `maxRequestBytes` | `MAX_REQUEST_BYTES` | number | `65536` | Request body cap in bytes; larger bodies are rejected before parsing. |
+| `dataDir` | `DATA_DIR` | string | `./data` | Root directory for per-app SQLite files, resolved to an absolute path. |
+| `adminToken` | `ADMIN_TOKEN` | string | `dev-only` | Bearer token for the /admin/* routes. |
+| `columnAppToken` | `COLUMN_APP_TOKEN` | string | `dev-only` | Bearer token for the tic-tac-toe app (columns storage). |
+| `jsonAppToken` | `JSON_APP_TOKEN` | string | `dev-only` | Bearer token for the tic-tac-toe-json app (json storage). |
+| `backupIntervalMs` | `BACKUP_INTERVAL_MS` | number | `0` | Backup timer period in milliseconds. 0 disables the timer; otherwise must be finite and >= 1000. |
+| `logDir` | `LOG_DIR` | string | `./logs` | Root of the logs/<role>/<date>/ tree. |
+| `logLevel` | `LOG_LEVEL` | enum(debug|info|warn|error) | `info` | Minimum event level written to the log. |
+| `logRetentionDays` | `LOG_RETENTION_DAYS` | number | `30` | Days a log file is kept before deletion. |
+| `logGzipAfterDays` | `LOG_GZIP_AFTER_DAYS` | number | `7` | Days a log file is kept uncompressed before gzip. |
+| `logMaxTotalBytes` | `LOG_MAX_TOTAL_BYTES` | number | `1073741824` | Total bytes the log tree may occupy before the oldest files are swept. |
+| `logMaxFileBytes` | `LOG_MAX_FILE_BYTES` | number | `67108864` | Bytes a single log file may reach before it rolls over. |
+| `logIncludeBindValues` | `LOG_INCLUDE_BIND_VALUES` | boolean | `false` | Include SQL bind values in sql events. Off by default: bind values are application data. |
+| `traceSql` | `TRACE_SQL` | boolean | `false` | Emit a trace-level event for every compiled SQL statement. |
+| `eventQueueCapacity` | `EVENT_QUEUE_CAPACITY` | number | `10000` | Depth of the in-process dropping queue that buffers events before they are flushed to disk. |
+| `eventFlushMs` | `EVENT_FLUSH_MS` | number | `250` | Interval in milliseconds between batched event-queue flushes. |
+| `s3BaseUrl` | `S3_BASE_URL` | optional-string | `(unset)` | Base URL of the S3 (or S3-compatible) bucket for backups. Absent selects the local object-store stand-in. |
+| `awsRegion` | `AWS_REGION` | string | `us-east-1` | AWS region used to sign S3 requests. |
+| `awsAccessKeyId` | `AWS_ACCESS_KEY_ID` | optional-string | `(unset)` | AWS access key id. Required when S3_BASE_URL is set. |
+| `awsSecretAccessKey` | `AWS_SECRET_ACCESS_KEY` | optional-string | `(unset)` | AWS secret access key. Required when S3_BASE_URL is set. |
+| `awsSessionToken` | `AWS_SESSION_TOKEN` | optional-string | `(unset)` | AWS session token, for temporary credentials. |
+| `localObjectDir` | `LOCAL_OBJECT_DIR` | string | `./object-store` | Local object-store directory used when S3_BASE_URL is unset, resolved to an absolute path. |
+| `eventlogDuckdbPath` | `EVENTLOG_DUCKDB` | string | `<DATA_DIR>/eventlog.duckdb` | Persistent DuckDB file backing the ingested event log, resolved to an absolute path. Defaults to eventlog.duckdb inside DATA_DIR. |
+
 ## Deliberate limits
 
 This is a local, trusted-application prototype. Two database files are not a hostile-tenant security sandbox. Handlers are statically registered modules; uploaded code execution, per-tenant process isolation, deployment tooling, authenticated end-user identity, row-level authorization, and secret isolation are not implemented. `playerId` is supplied by the demo caller, not verified identity. App-level shared bearer tokens are only a basic routing/access check. Client mutations have no automatic retry or idempotency key, so a network timeout can leave an unknown commit outcome.
