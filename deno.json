@@ -12,7 +12,7 @@
   "tasks": {
     "fmt:check": "deno fmt --check",
     "lint": "deno lint",
-    "check": "deno check core/errors.ts platform/services.ts platform/server.ts platform/reader.ts scripts/demo.ts scripts/restore.ts tests/core_test.ts tests/types.ts tests/errors_exhaustiveness.ts tests/integration.ts",
+    "check": "deno check core/errors.ts platform/services.ts platform/server.ts platform/reader.ts scripts/demo.ts scripts/explain.ts scripts/restore.ts tests/core_test.ts tests/types.ts tests/errors_exhaustiveness.ts tests/integration.ts",
     "demo": "deno run --allow-net --allow-env scripts/demo.ts",
     "restore": "deno run -A scripts/restore.ts",
     "test": "deno test -A tests/unit/**/*.ts tests/core_test.ts",

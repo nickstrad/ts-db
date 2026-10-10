@@ -13,6 +13,21 @@ import { v, withStorage, type Storage } from "../sdk/schema.ts";
 import { schema } from "../app/schema.ts";
 import { functions } from "../app/functions.ts";
 import type { ArgsOf, Names, ResultOf } from "../sdk/functions.ts";
+import { RuleError } from "../core/errors.ts";
+
+// A `RuleError` carries its human-readable text in `detail`, not `message` (ADR 0002), and the
+// item-10 bridge (`runHandlerAsPromise`) rethrows a message-less tagged error as
+// `Error(name, { cause })` — so the RuleError is the rejection's cause, not the rejection.
+function ruleRejection(rule: string, detail: string): (err: unknown) => boolean {
+  return (err: unknown) => {
+    assert.ok(err instanceof Error, `expected an Error, got ${String(err)}`);
+    const cause = (err as { cause?: unknown }).cause;
+    assert.ok(cause instanceof RuleError, `expected a RuleError cause, got ${String(cause)}`);
+    assert.equal(cause.rule, rule);
+    assert.equal(cause.detail, detail);
+    return true;
+  };
+}
 
 // Handlers are Effects since item 10, so the three ad-hoc definitions in this file are
 // `Effect.gen` bodies. Every assertion below is untouched; item 20 ports the file to the Effect
@@ -64,7 +79,7 @@ for (const storage of ["columns", "json"] as const) {
       assert.deepEqual(state.wins, [{ value: "X", count: 1 }]);
       assert.equal(state.moves.length, 5);
       assert.equal(state.count, 1);
-      await assert.rejects(call("makeMove", { gameId, playerId: "bob", cell: 5, expectedVersion: 6 }), /Game is over/);
+      await assert.rejects(call("makeMove", { gameId, playerId: "bob", cell: 5, expectedVersion: 6 }), ruleRejection("game-over", "Game is over"));
       await call("deleteGame", { gameId });
       assert.equal((await inspect()).count, 0);
       assert.equal((await inspect()).moves.length, 0);
@@ -109,8 +124,8 @@ for (const storage of ["columns", "json"] as const) {
     await fixture(storage, async ({ writer, call, inspect }) => {
       await assert.rejects(writer.mutation(functions.createGame, { xPlayer: "a", oPlayer: "b", extra: true }), /Unknown field/);
       const { gameId } = await call("createGame", { xPlayer: "a", oPlayer: "b" });
-      await assert.rejects(call("makeMove", { gameId, playerId: "b", cell: 0, expectedVersion: 1 }), /Not your turn/);
-      await assert.rejects(call("makeMove", { gameId, playerId: "a", cell: 10, expectedVersion: 1 }), /Invalid move/);
+      await assert.rejects(call("makeMove", { gameId, playerId: "b", cell: 0, expectedVersion: 1 }), ruleRejection("not-your-turn", "Not your turn"));
+      await assert.rejects(call("makeMove", { gameId, playerId: "a", cell: 10, expectedVersion: 1 }), ruleRejection("invalid-move", "Invalid move"));
       await assert.rejects(call("makeMove", { gameId, playerId: "a", cell: 0.5, expectedVersion: 1 }), /expected integer/);
       assert.equal((await inspect()).games[0]._version, 1);
     });

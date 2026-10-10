@@ -4,7 +4,7 @@ import { Effect } from "effect";
 import { ConflictError, NotFoundError } from "../core/errors.ts";
 import { defineFunctions } from "../sdk/functions.ts";
 import { v } from "../sdk/schema.ts";
-import { applyMove, MoveError } from "./rules.ts";
+import { applyMove, validatePlayers } from "./rules.ts";
 import { schema } from "./schema.ts";
 const { query, mutation } = defineFunctions(schema);
 
@@ -13,9 +13,7 @@ export const functions = {
     args: { xPlayer: v.string(), oPlayer: v.string() },
     handler: ({ db }, { xPlayer, oPlayer }) =>
       Effect.gen(function* () {
-        if (!xPlayer.trim() || !oPlayer.trim() || xPlayer === oPlayer) {
-          return yield* new MoveError({ rule: "distinct-players", message: "Provide two distinct players" });
-        }
+        yield* validatePlayers(xPlayer, oPlayer);
         const gameId = yield* db.insert("games", {
           xPlayer,
           oPlayer,

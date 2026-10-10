@@ -3,12 +3,13 @@
  *
  * The point of these is that the game is now testable without a database: no `SQLiteWriter`, no
  * temp directory, no transaction. Every case the pre-port handler covered by raising is asserted
- * here on the returned `MoveError` instead, plus the win/draw detection that `tests/core_test.ts`
+ * here on the returned `RuleError` instead, plus the win/draw detection that `tests/core_test.ts`
  * could only observe through a committed game. The property-based version lands in item 12.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Either } from "effect";
+import { RuleError } from "../../core/errors.ts";
 import {
   applyMove,
   type Game,
@@ -16,7 +17,7 @@ import {
   LINES,
   type Mark,
   type MoveBody,
-  type MoveError,
+  validatePlayers,
   winner,
 } from "../../app/rules.ts";
 
@@ -37,16 +38,16 @@ function game(overrides: Partial<Game> = {}): Game {
 }
 const playerOf = (state: Game): string => (state.turn === "X" ? state.xPlayer : state.oPlayer);
 
-function expectRight<A>(either: Either.Either<A, MoveError>): A {
+function expectRight<A>(either: Either.Either<A, RuleError>): A {
   if (Either.isRight(either)) return either.right;
-  return assert.fail(`expected a right, got ${either.left.rule}: ${either.left.message}`);
+  return assert.fail(`expected a right, got ${either.left.rule}: ${either.left.detail}`);
 }
-/** Asserts a rejection by rule, and that its message is the one the HTTP body still reports. */
-function expectRejection(either: Either.Either<unknown, MoveError>, rule: string, message: string): void {
+/** Asserts a rejection by rule, and that its detail is the text the HTTP body still reports. */
+function expectRejection(either: Either.Either<unknown, RuleError>, rule: string, detail: string): void {
   if (Either.isRight(either)) return assert.fail(`expected a rejection, got ${JSON.stringify(either.right)}`);
-  assert.equal(either.left._tag, "MoveError");
+  assert.equal(either.left._tag, "RuleError");
   assert.equal(either.left.rule, rule);
-  assert.equal(either.left.message, message);
+  assert.equal(either.left.detail, detail);
 }
 
 /**
@@ -180,4 +181,17 @@ test("winner: an empty, partial or line-free board has no winner", () => {
   assert.equal(winner(Array(9).fill(null) as Game["board"]), null);
   assert.equal(winner(["X", "X", null, null, "O", null, null, null, null]), null);
   assert.equal(winner(["X", "O", "X", "X", "O", "O", "O", "X", "X"]), null);
+});
+
+test("validatePlayers: blank or identical players are rejected, distinct players pass", () => {
+  assert.ok(Either.isRight(validatePlayers("alice", "bob")));
+  for (const [xPlayer, oPlayer] of [["", "bob"], ["alice", ""], ["  ", "bob"], ["alice", "alice"]] as const) {
+    const result = validatePlayers(xPlayer, oPlayer);
+    assert.ok(Either.isLeft(result));
+    if (Either.isLeft(result)) {
+      assert.equal(result.left._tag, "RuleError");
+      assert.equal(result.left.rule, "distinct-players");
+      assert.equal(result.left.detail, "Provide two distinct players");
+    }
+  }
 });

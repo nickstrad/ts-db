@@ -1,7 +1,8 @@
 /** Real Deno + DuckDB integration checks. Run separately from core tests. */
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
-// TEMPORARY BRIDGE (item 10): the Effect client's promise wrapper, until this file is ported.
+// TEMPORARY BRIDGE (item 10): the Effect client's promise wrapper, until this file is ported
+// (owned by item 25).
 import { createPromiseClient } from "../sdk/client.ts";
 import type { functions } from "../app/functions.ts";
 import type { ResultOf } from "../sdk/functions.ts";

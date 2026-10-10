@@ -73,8 +73,9 @@ export function createClient<F extends Functions>(
 
 /**
  * TEMPORARY BRIDGE (item 10): the promise-shaped client its not-yet-ported callers still use —
- * `scripts/demo.ts` and `tests/integration.ts`, ported in items 27 and 24. It runs the effect and
- * rejects with the `RemoteError` itself, which carries the same message the pre-port client threw.
+ * `scripts/demo.ts` (unowned by any plan item) and `tests/integration.ts` (owned by item 25). It
+ * runs the effect and rejects with the `RemoteError` itself, which carries the same message the
+ * pre-port client threw.
  */
 export function createPromiseClient<F extends Functions>(
   baseURL: string,
