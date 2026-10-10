@@ -24,7 +24,7 @@
     "logs:ingest": "deno run -A scripts/logs.ts ingest",
     "logs:query": "deno run -A scripts/logs.ts query",
     "logs:sweep": "deno run -A scripts/logs.ts sweep",
-    "perf:smoke": "k6 run perf/smoke.js",
+    "perf:smoke": "sh -c 'RUN_ID=\"${K6_RUN_ID:-k6-smoke}\"; mkdir -p \"logs/k6/$RUN_ID\" && K6_RUN_ID=\"$RUN_ID\" k6 run --out \"json=logs/k6/$RUN_ID/raw.json\" perf/smoke.js'",
     "perf:load": "k6 run perf/mutation_load.js",
     "perf:query": "k6 run perf/query_load.js",
     "perf:mixed": "k6 run perf/mixed.js",

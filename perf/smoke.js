@@ -3,10 +3,8 @@
 // connection-refused requests, which k6 always counts in http_req_failed regardless of status
 // expectations, so the threshold fails and the run exits non-zero.
 import { check, fail, sleep } from "k6";
-import http from "k6/http";
+import exec from "k6/execution";
 import { mutation, query, RUN_ID } from "./lib/api.js";
-
-http.setResponseCallback(http.expectedStatuses(200));
 
 export const options = {
   vus: 1,
@@ -27,7 +25,10 @@ export default function () {
     "createGame: status 200": (r) => r.res.status === 200,
     "createGame: has gameId": (r) => Boolean(r.body?.result?.gameId),
   });
-  if (!createOk) fail(`createGame failed: status=${created.res.status} body=${created.res.body}`);
+  if (!createOk) {
+    // Fail fast: a down server must abort the run, not spin hot hammering it for 30s.
+    exec.test.abort(`createGame failed: status=${created.res.status} body=${created.res.body}`);
+  }
   const gameId = created.body.result.gameId;
 
   const fetched = query("getGame", { gameId });
@@ -56,21 +57,36 @@ export default function () {
   }
 
   const wins = query("winsByMark", {});
-  check(wins, {
+  const winsOk = check(wins, {
     "winsByMark: status 200": (r) => r.res.status === 200,
     "winsByMark: has result": (r) => r.body?.result !== undefined,
   });
+  if (!winsOk) fail(`winsByMark failed: status=${wins.res.status} body=${wins.res.body}`);
 
   sleep(1);
 }
 
 export function handleSummary(data) {
+  // Hand-rolled verdicts: per-threshold ok booleans plus check pass/fail counts.
+  const thresholds = {};
+  for (const [name, metric] of Object.entries(data.metrics)) {
+    if (metric.thresholds) {
+      thresholds[name] = {};
+      for (const [expr, t] of Object.entries(metric.thresholds)) {
+        thresholds[name][expr] = t.ok;
+      }
+    }
+  }
   return {
     [`logs/k6/${RUN_ID}/summary.json`]: JSON.stringify(data, null, 2),
     stdout: JSON.stringify(
       {
         run_id: RUN_ID,
-        checks_rate: data.metrics.checks?.values.rate,
+        thresholds,
+        checks: {
+          passes: data.metrics.checks?.values.passes,
+          fails: data.metrics.checks?.values.fails,
+        },
         http_req_failed_rate: data.metrics.http_req_failed?.values.rate,
         http_req_duration_p95: data.metrics.http_req_duration?.values["p(95)"],
       },

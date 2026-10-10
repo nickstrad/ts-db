@@ -2,10 +2,15 @@
 // Route: POST /apps/:app/:kind/:name, kind in {query, mutation}. See platform/server.ts.
 import http from "k6/http";
 
+// Treat any non-200 API response as a failure (k6 counts it in http_req_failed).
+// Set here so every script importing these helpers inherits the 200-only callback.
+http.setResponseCallback(http.expectedStatuses(200));
+
 export const BASE_URL = __ENV.BASE_URL ?? "http://127.0.0.1:8000";
 export const APP_ID = __ENV.APP_ID ?? "tic-tac-toe";
 export const TOKEN = __ENV.TOKEN ?? "dev-only";
-export const RUN_ID = __ENV.K6_RUN_ID ?? String(Date.now());
+// Predictable default so the caller always knows the artifact dir: logs/k6/<RUN_ID>/.
+export const RUN_ID = __ENV.K6_RUN_ID ?? "k6-smoke";
 
 function traceId() {
   return `${__VU}-${__ITER}-${RUN_ID}`;
@@ -16,7 +21,7 @@ function call(kind, name, args) {
   const res = http.post(url, JSON.stringify(args), {
     headers: {
       "content-type": "application/json",
-      authorization: `Bearer ${TOKEN}`,
+      "authorization": `Bearer ${TOKEN}`,
       "x-trace-id": traceId(),
     },
   });

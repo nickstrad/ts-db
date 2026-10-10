@@ -23,7 +23,8 @@ iterations never collide. Thresholds: `http_req_failed` rate < 1%, `http_req_dur
 250ms, `checks` rate == 100%. Each request carries `X-Trace-Id: <vu>-<iter>-<run-id>`.
 
 A down or unreachable server makes every request fail (`http_req_failed` always counts
-connection-level failures, and `http.setResponseCallback` also counts non-200 responses), which
+connection-level failures, and `perf/lib/api.js`'s `http.setResponseCallback` also counts
+non-200 responses), which
 fails the thresholds and makes k6 exit non-zero — the script never reports a vacuous pass when it
 can't actually reach the API.
 
@@ -35,23 +36,24 @@ Start the server with a scratch data directory so test data doesn't collide with
 DATA_DIR=$(mktemp -d) deno task serve
 ```
 
-In another terminal, from the repo root, set a run id and create its output directory first — k6
-does not create missing directories for its own output files, and `handleSummary` in
-`perf/smoke.js` writes `logs/k6/<run-id>/summary.json` on every run (falling back to a timestamp
-if `K6_RUN_ID` is unset, in which case that write silently fails unless the directory already
-exists):
+In another terminal, from the repo root:
 
 ```sh
-export K6_RUN_ID=$(date +%s)
-mkdir -p "logs/k6/$K6_RUN_ID"
 deno task perf:smoke
-# equivalent to: k6 run perf/smoke.js
 ```
 
-To also capture raw per-request output alongside the summary, pass `--out` directly instead of
-going through the task (same pre-created directory):
+The task creates `logs/k6/<run-id>/` itself (k6 does not create missing directories for its own
+output files, and `handleSummary` in `perf/smoke.js` writes `summary.json` into that directory),
+then runs k6 with `--out json=logs/k6/<run-id>/raw.json` — so both artifacts land under
+`logs/k6/<run-id>/` on every run. Set `K6_RUN_ID` to choose the run id (e.g.
+`K6_RUN_ID=2026-10-10-smoke deno task perf:smoke`); it defaults to `k6-smoke`. `perf/lib/api.js`
+reads the same variable, so the run id in the console summary and the directory always agree.
+
+To run k6 directly without the task wrapper, create the directory first (same pre-created
+directory for both outputs):
 
 ```sh
+export K6_RUN_ID=my-run; mkdir -p "logs/k6/$K6_RUN_ID"
 k6 run --out json="logs/k6/$K6_RUN_ID/raw.json" perf/smoke.js
 ```
 
