@@ -12,12 +12,16 @@ This file is docs-only. Nothing here touches plan item files, the `item/NN-slug`
 
 ## Experiment items
 
+**All experiment work is executed by Haiku (`claude --model haiku`).** Nothing here is done by
+Sonnet or Opus -- the "Plan baseline" column below shows the model the plan originally assigned to
+each item, purely as the comparison baseline for judging Haiku's output.
+
 Picked from items 12-27 (items 01-11 are already in flight on the coordinator's branches and are
 off limits). Selection criteria: small, bounded, mechanical, minimal cross-file dependencies,
 verifiable acceptance criteria — and preferably an item the plan itself already assigns to
 Sonnet, since that is the nearest existing baseline to compare Haiku against.
 
-| ID | Item | Title | Model (plan) | Status | Rationale |
+| ID | Item | Title | Plan baseline | Status | Rationale |
 | --- | --- | --- | --- | --- | --- |
 | haiku-12 | 12 | Property tests, wave 1: schema, rules, framing, rotation | Sonnet | proposed | Pure modules with signatures already fixed by earlier items; the plan itself enumerates the exact properties to encode, so this is "transcribe a spec into fast-check arbitraries," not design work. |
 | haiku-14 | 14 | k6 load scenarios and output capture | Sonnet | proposed | Three scripts that repeat the pattern item 03 already established (shared `perf/lib/api.js`, fixed thresholds, fixed output paths). Mechanical, low file count, pass/fail is a `k6 run` exit code. |
