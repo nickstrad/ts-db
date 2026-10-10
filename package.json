@@ -1,1 +1,8 @@
-{ "name": "document-db-mvp", "private": true, "type": "module" }
+{
+  "name": "document-db-mvp",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "fast-check": "4.10.2"
+  }
+}

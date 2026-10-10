@@ -5,6 +5,7 @@
     "serve": "deno run -A platform/server.ts",
     "demo": "deno run --allow-net --allow-env scripts/demo.ts",
     "test": "deno test -A tests/core_test.ts",
+    "test:prop": "deno test -A tests/property/",
     "integration": "deno run -A tests/integration.ts",
     "check": "deno check platform/server.ts platform/reader.ts scripts/demo.ts scripts/restore.ts tests/core_test.ts tests/types.ts tests/integration.ts",
     "restore": "deno run -A scripts/restore.ts",
