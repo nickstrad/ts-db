@@ -65,7 +65,7 @@ cv.box(row, R, RW, [
     "ObjectStoreS3, chosen",
     "by Config; retrying",
     "put / get",
-], planned=True)
+], planned=False)
 cv.right(row + 4, L + LW, R - 1, "(5)")
 backups_tap = row + 4
 

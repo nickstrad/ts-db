@@ -11,13 +11,16 @@ The Effect services and layers that make up the server process after the port, a
 other. Read it bottom-up: `core/` is pure, `Config` is the only thing that touches the environment, and each
 tier above is provided by the tiers below it. `platform/layers.ts` composes the whole stack as `PlatformLive`.
 
-**The bottom three tiers are built; the top two are planned.** Items 02 and 04–09 landed the pure kernel
+**The bottom three tiers are built, plus ObjectStore (item 18); the remaining top services are planned.** Items 02 and 04–09 landed the pure kernel
 (`core/errors.ts`, `schema.ts`, `plan.ts`, `events.ts`, `compile/*`, `logging/rotation.ts`, `ipc/framing.ts`)
 and the `platform/services.ts` `Context.Tag` declarations; item 08 landed `ConfigLive`/`ConfigTest`; item 11
 landed the `EventSink` service and the JSONL `Logger` layer, which is the first live layer to consume
-`Config`. Nothing above that tier is a service yet: `platform/server.ts` is still the pre-port code (classes,
-top-level `await`, its own `Deno.env` reads) and does **not** mount `ConfigLive` or `LoggingLive` until item
-22, so at runtime the landed layers are exercised only by their unit tests. The pre-port code does already
+`Config`; item 18 landed the `ObjectStore` scoped service – the `ObjectStoreLocal` and `ObjectStoreS3`
+live layers in `platform/object_store.ts`, with an aws4fetch-signed S3 client, exponential retry with
+jitter, and one `backup/put-object` event per put. Nothing else above the kernel tier is a service yet:
+`platform/server.ts` is still the pre-port code (classes, top-level `await`, its own `Deno.env` reads)
+and does **not** mount `ConfigLive` or `LoggingLive` until item 22, so at runtime the landed layers are
+exercised only by their unit tests. The pre-port code does already
 call into `core/` — `platform/compiler.ts` wraps `core/compile/*`, `platform/ipc.ts` uses
 `core/ipc/framing.ts`, `sdk/` uses `core/schema.ts` and `core/plan.ts`. The plan item number in each box says
 which item turns it into a service. Plan: `docs/plans/effect-port-and-observability.md`, §1.2 for the service
@@ -50,15 +53,15 @@ table and §1.3 for the error channel.
 ╎     │   └┄┄┄┄┄┄┄┄┄┄┄┬┄┄┄┄┄┄┄┄┄┄┄┄┘      └┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┘  ╎
 ╎     │               ▲ (6)                                            ╎
 ╎     │               │                                                ╎
-╎     │   ┌┄┄┄┄┄┄┄┄┄┄┄┬┄┄┄┄┄┄┄┄┄┄┄┄┐      ┌┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┐  ╎
-╎     │   ┆ Backups   (item 19)    ┆      ┆ ObjectStore   (item 18) ┆  ╎
-╎     │   ┆ platform/backup.ts     ┆      ┆ platform/object_store   ┆  ╎
-╎     │(3)┆                        ┆      ┆                         ┆  ╎
-╎     ├──►┆ snapshot -> verify ->  ├─(5)─►┆ ObjectStoreLocal or     ┆  ╎
-╎     │   ┆ hash -> PUT object ->  ┆      ┆ ObjectStoreS3, chosen   ┆  ╎
-╎     │   ┆ PUT manifest -> only   ┆      ┆ by Config; retrying     ┆  ╎
-╎     │   ┆ then latest.json       ┆      ┆ put / get               ┆  ╎
-╎     │   └┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┘      └┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┘  ╎
+╎     │   ┌┄┄┄┄┄┄┄┄┄┄┄┬┄┄┄┄┄┄┄┄┄┄┄┄┐      ┌─────────────────────────┐  ╎
+╎     │   ┆ Backups   (item 19)    ┆      │ ObjectStore   (item 18) │  ╎
+╎     │   ┆ platform/backup.ts     ┆      │ platform/object_store   │  ╎
+╎     │(3)┆                        ┆      │                         │  ╎
+╎     ├──►┆ snapshot -> verify ->  ├─(5)─►│ ObjectStoreLocal or     │  ╎
+╎     │   ┆ hash -> PUT object ->  ┆      │ ObjectStoreS3, chosen   │  ╎
+╎     │   ┆ PUT manifest -> only   ┆      │ by Config; retrying     │  ╎
+╎     │   ┆ then latest.json       ┆      │ put / get               │  ╎
+╎     │   └┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┘      └─────────────────────────┘  ╎
 ╎     │                                                                ╎
 ╎     │   ┌┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┐      ┌─────────────────────────┐  ╎
 ╎     │   ┆ AppRegistry (item 22)  ┆      │ Logger + EventSink (11) │  ╎

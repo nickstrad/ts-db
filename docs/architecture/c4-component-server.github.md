@@ -12,13 +12,16 @@ The Effect services and layers that make up the server process after the port, a
 other. Read it bottom-up: `core/` is pure, `Config` is the only thing that touches the environment, and each
 tier above is provided by the tiers below it. `platform/layers.ts` composes the whole stack as `PlatformLive`.
 
-**The bottom three tiers are built; the top two are planned.** Items 02 and 04–09 landed the pure kernel
+**The bottom three tiers are built, plus ObjectStore (item 18); the remaining top services are planned.** Items 02 and 04–09 landed the pure kernel
 (`core/errors.ts`, `schema.ts`, `plan.ts`, `events.ts`, `compile/*`, `logging/rotation.ts`, `ipc/framing.ts`)
 and the `platform/services.ts` `Context.Tag` declarations; item 08 landed `ConfigLive`/`ConfigTest`; item 11
 landed the `EventSink` service and the JSONL `Logger` layer, which is the first live layer to consume
-`Config`. Nothing above that tier is a service yet: `platform/server.ts` is still the pre-port code (classes,
-top-level `await`, its own `Deno.env` reads) and does **not** mount `ConfigLive` or `LoggingLive` until item
-22, so at runtime the landed layers are exercised only by their unit tests. The pre-port code does already
+`Config`; item 18 landed the `ObjectStore` scoped service – the `ObjectStoreLocal` and `ObjectStoreS3`
+live layers in `platform/object_store.ts`, with an aws4fetch-signed S3 client, exponential retry with
+jitter, and one `backup/put-object` event per put. Nothing else above the kernel tier is a service yet:
+`platform/server.ts` is still the pre-port code (classes, top-level `await`, its own `Deno.env` reads)
+and does **not** mount `ConfigLive` or `LoggingLive` until item 22, so at runtime the landed layers are
+exercised only by their unit tests. The pre-port code does already
 call into `core/` — `platform/compiler.ts` wraps `core/compile/*`, `platform/ipc.ts` uses
 `core/ipc/framing.ts`, `sdk/` uses `core/schema.ts` and `core/plan.ts`. The plan item number in each box says
 which item turns it into a service. Plan:
@@ -32,7 +35,7 @@ flowchart TB
         storage["<b>Storage</b> (planned, item 15)<br/><code>platform/sqlite.ts</code><br/>scoped node:sqlite handle, Semaphore(1)<br/>write queue, BEGIN IMMEDIATE per mutation"]
         rclient["<b>ReaderClient</b> (planned, item 17)<br/><code>platform/ipc.ts</code><br/>scoped child process, Deferred correlation<br/>map, per-call timeout, QueueFullError cap"]
         backups["<b>Backups</b> (planned, item 19)<br/><code>platform/backup.ts</code><br/>snapshot → verify → hash → PUT object →<br/>PUT manifest → only then latest.json"]
-        objstore["<b>ObjectStore</b> (planned, item 18)<br/><code>platform/object_store.ts</code><br/>ObjectStoreLocal or ObjectStoreS3, chosen<br/>by Config; retrying put/get"]
+        objstore["<b>ObjectStore</b> (item 18)<br/><code>platform/object_store.ts</code><br/>ObjectStoreLocal or ObjectStoreS3, chosen<br/>by Config; retrying put/get"]
         registry["<b>AppRegistry</b> (planned, item 22)<br/><code>platform/registry.ts</code><br/>appId → schema, functions, token and<br/>file path; no Deno.env of its own"]
         logger["<b>Logger + EventSink</b> (item 11)<br/><code>platform/logging/{logger,file_sink}.ts</code><br/>Effect Logger replaced by a JSONL sink;<br/>dropping queue, never fails a mutation.<br/>Retention sweeper fiber: <code>retention.ts</code> (item 24, planned)"]
         config["<b>Config</b> (item 08)<br/><code>platform/config.ts</code><br/>The only module that reads Deno.env. One options table<br/>(name, env var, type, default) validated with Effect Schema;<br/>fails at layer construction, not at first use.<br/>Used by the logging layer today; server.ts ports in item 22"]
@@ -71,7 +74,7 @@ flowchart TB
 
     classDef planned stroke-dasharray: 5 3
     classDef external fill:#f4f4f4
-    class http,storage,rclient,backups,objstore,registry planned
+    class http,storage,rclient,backups,registry planned
     class files,reader,store,jsonl external
 ```
 
