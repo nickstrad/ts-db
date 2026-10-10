@@ -19,6 +19,16 @@
  *
  * An injected failure or an interceptor runs after key validation and before the store changes, so
  * a failed `put` never leaves a partial object behind.
+ *
+ * **No events, no ids.** The live layers (`platform/object_store.ts`'s `instrument`) emit one event
+ * per operation, whatever its outcome and even for a rejected key — a `backup` event (phase
+ * `put-object`) for `put`, a `lifecycle` event (phase `object-get`) for `get` — and draw that
+ * event's `eventId` from `IdGen`. This double does neither: it requires neither `EventSink` nor
+ * `IdGen`, so it emits nothing and spends no id. Two consequences for tests built on it (item 19's
+ * among them): per-phase event assertions must not expect `put-object`/`object-get` events, and in
+ * a test that mixes object-store calls with other `IdGen` consumers, the `id-N` sequence is the one
+ * live would produce minus one id per object-store operation. Use `calls` to assert on the
+ * operations themselves; assert on the events against a live layer.
  */
 import { Context, Effect, HashMap, Layer, Option, Ref } from "effect";
 import { InvalidKeyError, ObjectStoreError } from "../../core/errors.ts";

@@ -43,6 +43,7 @@ import {
 import { sqlEvent, txEvent } from "../core/events.ts";
 import { compileDDL } from "../core/compile/ddl.ts";
 import { compileSelect } from "../core/compile/select.ts";
+import { MAX_LIMIT } from "../core/plan.ts";
 import { decode } from "../core/compile/decode.ts";
 import { makeStorage } from "../platform/sqlite.ts";
 import { EventSink, IdGen, ObjectStore, Reader, Storage, type StorageService } from "../platform/services.ts";
@@ -62,6 +63,7 @@ import type { ArgsOf, Names, ResultOf } from "../sdk/functions.ts";
 import { runTest } from "./helpers/run.ts";
 import {
   DocumentStoreTest,
+  evaluateSelect,
   eventsOfKind,
   eventsWhere,
   IdGenTest,
@@ -71,6 +73,7 @@ import {
   MemoryStore,
   ObjectStoreTestControl,
   StorageTest,
+  type StorageTestOptions,
 } from "./layers/index.ts";
 
 // ===========================================================================
@@ -107,11 +110,11 @@ function openLive(layout: Layout, appSchema: Schema = schema) {
 }
 
 /** `StorageTest` over its own store and id counter, with the clock at `T0`. */
-function openTest(layout: Layout, appSchema: Schema = schema) {
+function openTest(layout: Layout, appSchema: Schema = schema, options: StorageTestOptions = {}) {
   return Effect.gen(function* () {
     yield* TestClock.setTime(T0);
     const store = yield* makeMemoryStore(withStorage(appSchema, layout));
-    const storage = yield* makeStorageTest().pipe(
+    const storage = yield* makeStorageTest(options).pipe(
       Effect.provideService(MemoryStore, store),
       Effect.provideServiceEffect(IdGen, makeIdGenTest()),
     );
@@ -470,13 +473,19 @@ const loose = (db: WriteDB<CS>) => db as unknown as WriteDB<Schema>;
 type Outcome =
   | { readonly ok: unknown }
   | { readonly fail: Readonly<Record<string, unknown>> }
-  | { readonly die: string }
+  | { readonly die: readonly unknown[] }
   | { readonly interrupted: true };
 
 /**
- * A typed error, as its tag plus its structured fields. `cause` is dropped (it holds the driver's
- * exception), and a `StorageError` keeps only `operation` and `table`: its `detail` is the
- * driver's text, which the double can only approximate.
+ * A typed error, as its tag plus its structured fields. `cause` is dropped: on the live side it
+ * holds the `node:sqlite` exception object, which the double has no equivalent of.
+ *
+ * A `StorageError` also drops `detail`, keeping only `operation` and `table`. Its live `detail` is
+ * the driver's message text (SQLite's wording, e.g. `UNIQUE constraint failed: items._id`), which
+ * the double writes by hand and can only approximate. No step in the script currently produces a
+ * `StorageError` from either implementation (the double's duplicate-id path is unreachable with
+ * `IdGenTest`), so today the drop costs nothing; it is here so that a future step that does reach
+ * one compares what both sides can actually agree on.
  */
 function normalizeError(error: unknown): Readonly<Record<string, unknown>> {
   if (error instanceof StorageError) {
@@ -489,14 +498,32 @@ function normalizeError(error: unknown): Readonly<Record<string, unknown>> {
   return { untagged: String(error) };
 }
 
+/**
+ * A defect, with the same rigor as a typed error: an `Error`'s class, `name`, `message` and every
+ * own enumerable field (a tagged defect's structured fields included), with `cause` normalized the
+ * same way. Only `stack` is dropped — it names this file's and the implementation's source lines.
+ */
+function normalizeDefect(defect: unknown): unknown {
+  if (!(defect instanceof Error)) return { value: defect };
+  const fields = Object.fromEntries(
+    Object.entries(defect).filter(([key]) => key !== "stack" && key !== "cause"),
+  );
+  return {
+    class: defect.constructor.name,
+    name: defect.name,
+    message: defect.message,
+    ...fields,
+    ...(defect.cause === undefined ? {} : { cause: normalizeDefect(defect.cause) }),
+  };
+}
+
 function outcome(effect: Effect.Effect<unknown, unknown>): Effect.Effect<Outcome> {
   return Effect.map(Effect.exit(effect), (exit): Outcome => {
     if (Exit.isSuccess(exit)) return { ok: exit.value };
     if (Cause.isInterruptedOnly(exit.cause)) return { interrupted: true };
     const failure = Cause.failureOption(exit.cause);
     if (Option.isSome(failure)) return { fail: normalizeError(failure.value) };
-    const defect = Cause.squash(exit.cause);
-    return { die: defect instanceof Error ? defect.message : String(defect) };
+    return { die: [...Cause.defects(exit.cause)].map(normalizeDefect) };
   });
 }
 
@@ -599,11 +626,14 @@ function conformanceScript(): readonly Step[] {
       mutate((db) => db.find("items", { active: true }).gt("rank", 1).sort("rank").collect()),
     ),
     step("eq null", mutate((db) => db.find("items", { parent: null }).collect())),
+    // A negative threshold, so a NULL read as 0 (`Number(null) > -3`) would match: pins "gt never
+    // matches NULL", which a threshold of 0 cannot.
     step(
       "gt on a nullable number",
-      mutate((db) => loose(db).find("items").gt("score" as never, 0).collect()),
+      mutate((db) => loose(db).find("items").gt("score" as never, -3).collect()),
     ),
     step("count with filter", mutate((db) => db.find("items", { active: false }).count())),
+    step("count ignores limit", mutate((db) => db.find("items").limit(1).count())),
     step("countBy enum", mutate((db) => db.find("items").countBy("kind"))),
     step("countBy nullable number", mutate((db) => db.find("items").countBy("score"))),
     step("countBy boolean, limit 1", mutate((db) => db.find("items").limit(1).countBy("active"))),
@@ -794,29 +824,94 @@ for (const layout of ["columns", "json"] as const) {
   );
 }
 
-/** A `Storage` whose results all claim `_version: 1` — a double that forgot to bump versions. */
-function forgetsVersions(storage: StorageService): StorageService {
-  const flatten = (value: unknown): unknown =>
-    Array.isArray(value) ? value.map(flatten) : value && typeof value === "object"
-      ? Object.fromEntries(
-        Object.entries(value).map(([k, v]) => [k, k === "_version" ? 1 : flatten(v)]),
-      )
-      : value;
-  return {
-    ...storage,
-    mutation: (definition, args) => Effect.map(storage.mutation(definition, args), flatten),
-  };
-}
+runTest(
+  "conformance: a second snapshot onto the same path fails alike (VACUUM INTO refuses it)",
+  Effect.gen(function* () {
+    const { storage: live, dir } = yield* openLive("columns", conformanceSchema);
+    const { storage: double } = yield* openTest("columns", conformanceSchema);
+    const path = join(dir, "snap.sqlite");
+    const twice = (storage: StorageService) =>
+      Effect.all([outcome(storage.snapshot(path)), outcome(storage.snapshot(path))]);
+    const expected = yield* twice(live);
+    assert.deepStrictEqual(expected, [{ ok: undefined }, {
+      fail: { _tag: "StorageError", operation: "snapshot", table: undefined },
+    }]);
+    // The double never touches the file live wrote: it refuses the path only because it snapshotted it.
+    assert.deepStrictEqual(yield* twice(double), expected);
+  }),
+  { skip: needsSqlite },
+);
 
 runTest(
-  "conformance: the script is deterministic and a divergent double is caught",
+  "conformance: the script is deterministic",
   Effect.gen(function* () {
     const first = yield* runScript((yield* openTest("columns", conformanceSchema)).storage);
     const second = yield* runScript((yield* openTest("columns", conformanceSchema)).storage);
     assertConforms(second, first, "StorageTest vs itself");
-    const broken = yield* runScript(forgetsVersions((yield* openTest("columns", conformanceSchema)).storage));
-    assert.throws(() => assertConforms(broken, first, "mutant"), /diverged/);
   }),
+);
+
+type Evaluate = typeof evaluateSelect;
+
+/** M13: `gt` reads a NULL as 0, as an unguarded `Number(stored) > Number(wanted)` would. */
+const gtReadsNullAsZero: Evaluate = (schema, contents, plan, dialect) => {
+  const gt = plan.filters.find((filter) => filter.op === "gt");
+  if (!gt || plan.aggregate) return evaluateSelect(schema, contents, plan, dialect);
+  const rest = { ...plan, filters: plan.filters.filter((filter) => filter !== gt), limit: MAX_LIMIT };
+  // The real evaluator first, so the plan's validation errors are unchanged.
+  return Either.flatMap(evaluateSelect(schema, contents, plan, dialect), () =>
+    Either.map(
+      evaluateSelect(schema, contents, rest, dialect),
+      (rows) =>
+        (rows as Record<string, unknown>[])
+          .filter((row) => Number(row[gt.field]) > Number(gt.value))
+          .slice(0, plan.limit),
+    ));
+};
+
+/** M15: `count` counts at most `limit` matches. */
+const countHonoursLimit: Evaluate = (schema, contents, plan, dialect) =>
+  plan.aggregate?.kind !== "count"
+    ? evaluateSelect(schema, contents, plan, dialect)
+    : Either.flatMap(evaluateSelect(schema, contents, plan, dialect), () =>
+      Either.map(
+        evaluateSelect(schema, contents, { ...plan, aggregate: undefined }, dialect),
+        (rows) => (rows as unknown[]).length,
+      ));
+
+/** Every document read back claims `_version: 1`: a double that forgot to bump versions. */
+const forgetsVersions: Evaluate = (schema, contents, plan, dialect) =>
+  Either.map(
+    evaluateSelect(schema, contents, plan, dialect),
+    (result) =>
+      Array.isArray(result) && plan.aggregate === undefined
+        ? result.map((doc) => ({ ...doc, _version: 1 }))
+        : result,
+  );
+
+/** Each mutant, and the step that must be the first to expose it. */
+const MUTANTS: readonly { readonly name: string; readonly evaluate: Evaluate; readonly exposedBy: string }[] =
+  [
+    { name: "gt reads NULL as 0 (M13)", evaluate: gtReadsNullAsZero, exposedBy: "gt on a nullable number" },
+    { name: "count honours limit (M15)", evaluate: countHonoursLimit, exposedBy: "count ignores limit" },
+    { name: "versions never bump", evaluate: forgetsVersions, exposedBy: "patch one field" },
+  ];
+
+runTest(
+  "conformance: a double with a planted divergence fails against StorageLive",
+  Effect.gen(function* () {
+    const live = yield* runScript((yield* openLive("columns", conformanceSchema)).storage);
+    for (const { name, evaluate, exposedBy } of MUTANTS) {
+      const { storage } = yield* openTest("columns", conformanceSchema, { evaluate });
+      const mutant = yield* runScript(storage);
+      assert.throws(
+        () => assertConforms(mutant, live, `StorageTest[${name}] vs StorageLive`),
+        (error: Error) => error.message.includes(`"${exposedBy}" diverged`),
+        `${name} should first diverge at "${exposedBy}"`,
+      );
+    }
+  }),
+  { skip: needsSqlite },
 );
 
 // ===========================================================================

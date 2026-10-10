@@ -44,14 +44,28 @@
  * thing restore cannot give: `ReaderTest` reading the same store never sees an uncommitted write,
  * exactly as DuckDB never sees an uncommitted SQLite transaction.
  *
- * ## Known divergences (both are live-side bugs found by item 13's oracle, not semantics to copy)
+ * ## Known divergences (live-side bugs, not semantics to copy)
+ *
+ * The first two were found by item 13's oracle (`tests/property/sqlite_oracle_test.ts`, known
+ * issues 1 and 2); the third is the same class of finding, filed here alongside them because the
+ * oracle's generators never produce a lone surrogate.
  *
  * 1. `json` layout, `number` field holding an integral double with 2^53 <= |x| < 2^63: SQLite reads
  *    the stored text back as an exact INTEGER, so `eq x` misses the row. Here it matches.
  * 2. Text containing U+0000: `node:sqlite` truncates it on read. Here it round-trips.
+ * 3. Text containing a lone surrogate (e.g. `"a\uD800b"`): `node:sqlite` binds strings as UTF-8,
+ *    which replaces it with U+FFFD. In the `columns` layout the value reads back as `"a�b"`
+ *    (and `eq "a\uD800b"` still matches, since the bound filter is replaced the same way). In the
+ *    `json` layout `JSON.stringify` escapes it as `\ud800`, so it round-trips, but `json_extract`
+ *    decodes the escape and the bound filter does not, so `eq "a\uD800b"` misses the row. Here the
+ *    value round-trips and `eq` matches in both layouts.
  *
  * No SQLite, no filesystem: `snapshot(path)` records the committed contents under `path` in
- * `MemoryStore.snapshots` (and runs `onSnapshot`, if given) instead of writing a file.
+ * `MemoryStore.snapshots` (and runs `onSnapshot`, if given) instead of writing a file. Live
+ * `VACUUM INTO` refuses a destination that already exists; the double can only know about paths it
+ * has itself snapshotted, so a second `snapshot` to the same path fails with the live error
+ * (`StorageError`, operation `snapshot`), but a path that exists only on disk — written by
+ * `onSnapshot`, another test or anything else — is not detected and the snapshot succeeds.
  *
  * No events either: the live layer's `sql`/`tx`/`queue` events describe SQL statements this double
  * never runs, so it does not require `EventSink`. Assert on events against `StorageLive`.
@@ -315,13 +329,20 @@ export interface StorageTestOptions {
    * to write a real file for a test that must read one back. Default: nothing.
    */
   readonly onSnapshot?: (path: string, contents: StoreContents) => Effect.Effect<void, StorageError>;
+  /**
+   * Replaces `evaluateSelect` for this service's reads (not `MemoryStore.select`, so not
+   * `ReaderTest`). Only for planting a deliberate divergence: the conformance suite uses it to
+   * prove that a double which diverged from SQLite fails against `StorageLive`. Default: the real
+   * evaluator.
+   */
+  readonly evaluate?: typeof evaluateSelect;
 }
 
 /** Builds the service in the caller's scope over the `MemoryStore` in context. */
 export function makeStorageTest(
   options: StorageTestOptions = {},
 ): Effect.Effect<StorageService, never, Scope.Scope | MemoryStore | IdGen> {
-  const { appId, onSnapshot } = options;
+  const { appId, onSnapshot, evaluate = evaluateSelect } = options;
   return Effect.gen(function* () {
     const store = yield* MemoryStore;
     const { schema, state } = store;
@@ -394,7 +415,7 @@ export function makeStorageTest(
     const execute = (op: Operation, tx: Tx): Effect.Effect<unknown, ExecuteError> => {
       switch (op.kind) {
         case "select":
-          return step(tx, () => evaluateSelect(schema, tx.working, op, "sqlite"));
+          return step(tx, () => evaluate(schema, tx.working, op, "sqlite"));
         case "insert":
           return Effect.gen(function* () {
             // Same order as live: id and clock first, so a rejected insert still spends an id.
@@ -425,7 +446,7 @@ export function makeStorageTest(
               const table = yield* tableFor(schema, op.table);
               const patch = yield* parseObject(table.fields, op.value, true);
               // The live path reads the old row through a compiled select, which also validates the id.
-              const found = (yield* evaluateSelect(schema, tx.working, {
+              const found = (yield* evaluate(schema, tx.working, {
                 kind: "select",
                 table: op.table,
                 filters: [{ field: "_id", op: "eq", value: op.id }],
@@ -484,6 +505,10 @@ export function makeStorageTest(
       snapshot: (path: string) =>
         exclusive(
           Effect.gen(function* () {
+            // As `VACUUM INTO`: an existing destination is refused, not overwritten.
+            if (HashMap.has(yield* Ref.get(store.snapshots), path)) {
+              return yield* new StorageError({ operation: "snapshot", detail: "output file already exists" });
+            }
             const contents = yield* Ref.get(state);
             yield* Ref.update(store.snapshots, HashMap.set(path, contents));
             if (onSnapshot) yield* onSnapshot(path, contents);
