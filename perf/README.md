@@ -62,6 +62,64 @@ commit. A later workstream joins these files for analysis (see `docs/adr/0003-k6
 Override target/auth with environment variables if needed: `BASE_URL` (default `http://127.0.0.1:8000`),
 `APP_ID` (default `tic-tac-toe`), `TOKEN` (default `dev-only`, matching the server's dev default).
 
+## Load scenarios
+
+Three scenarios sit beside `smoke.js`. They share `perf/lib/scenarios.js` (seeding, the weighted read mix,
+conflict-aware writes, artifact paths, `handleSummary`) and call the API only through `perf/lib/api.js`.
+
+| task                   | script             | shape                                                                                                                                         | thresholds                                                                                            |
+| ---------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `deno task perf:load`  | `mutation_load.js` | `ramping-vus` 1 → 20 over 1 min, hold 1 min; each iteration plays its own game                                                                | `checks` rate > 0.99; `http_req_duration{expected_response:true}` p(95) < 400; `http_req_failed` < 1% |
+| `deno task perf:query` | `query_load.js`    | `constant-arrival-rate` 50 rps for 2 min over 30 seeded games; `getGame`/`listGames`/`moveHistory`/`winsByMark` 4:2:2:1                       | `http_req_failed` < 1%; `http_req_duration` p(95) < 500; `checks` rate > 0.99; no dropped iterations  |
+| `deno task perf:mixed` | `mixed.js`         | `constant-arrival-rate` 50 rps for 3 min, 80% reads (same mix) / 20% writes (one move of the VU's own game, or `createGame` when it finished) | same as `perf:query`; **the default scenario for regression comparison**                              |
+
+**Conflicts are a success.** `mutation_load.js` deliberately sends a stale-`expectedVersion` move before every
+third move of a game. The server must reject it; the run records that in the custom `conflicts` counter and a
+check, and the request is declared an expected status (`400` today, `409` once the server maps
+`ConflictError`), so it does not count in `http_req_failed`. A stale write that is _accepted_ fails a check.
+
+**Seeding** happens in k6's `setup()`: `query_load.js` and `mixed.js` create 30 games (X wins, O wins, draws,
+in-progress) through the API before the timed phase, so a fresh `DATA_DIR` needs no preparation. Seed requests
+appear in `raw.json` under the `::setup` group with trace id `0-0-<run-id>`.
+
+### Running a scenario with artifacts
+
+The `perf:*` tasks are plain `k6 run <script>`; k6 only writes `raw.json` when given `--out`, and it creates
+no directories. So set the run id, create the directory, and pass `K6_OUT`:
+
+```sh
+export K6_RUN_ID=2026-10-10-mixed
+mkdir -p "logs/k6/$K6_RUN_ID"
+K6_OUT="json=logs/k6/$K6_RUN_ID/raw.json" deno task perf:mixed
+```
+
+Both `logs/k6/<run-id>/raw.json` (newline-delimited JSON; filter `type = 'Point'` before `read_json_auto`, see
+`docs/haiku-experiments/findings/sq-04.md`) and `summary.json` (written by the scenario's `handleSummary`,
+with `run_id` and `scenario` added) land there. `K6_RUN_ID` also feeds the `X-Trace-Id` suffix, so trace ids
+in the server's events match the directory name. If you forget it the run id falls back to `k6-smoke`, which
+is smoke's directory — always set it.
+
+`work-scripts/bash/k6-scenario-run.sh <perf:task> [run-id] [k6 args]` does all of the above against a
+throwaway server on a free port with a fresh scratch `DATA_DIR`:
+
+```sh
+bash work-scripts/bash/k6-scenario-run.sh perf:mixed 2026-10-10-mixed
+```
+
+Thresholds are enforced by k6: a crossed threshold makes the task exit 99 (verified by temporarily changing
+`query_load.js` to `p(95)<1`). `BASE_URL`, `APP_ID` and `TOKEN` work as for `smoke.js`.
+
+### What these numbers mean
+
+These scenarios measure this prototype's documented design: **one writer connection per app and one serial
+reader process** shared by every query. `perf:load` is bounded by the single writer, `perf:query` by the
+serial reader — that is the known capacity limit in the repo README, and `query_load.js` is the scenario that
+exercises it. The thresholds and the numbers they produce are for **regression detection** — compare a run to
+an earlier run of the same scenario on the same machine — not capacity claims.
+
+Reference run on the dev droplet (2026-10-10, one run each, before items 12–22 land): `perf:load` p(95) 162 ms
+with ~4k conflicts counted; `perf:query` p(95) 31 ms; `perf:mixed` p(95) 57 ms.
+
 ## Not a benchmark
 
 As the repo README states under "Deliberate limits": this is a local, trusted-application prototype with one
