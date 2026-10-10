@@ -11,26 +11,16 @@
  * Shape of the program:
  * - a scoped stdin consumer decodes frames with `core/ipc/framing` and serves them strictly in order,
  *   writing each reply before reading the next request (serialized execution, as before the port);
- * - per-app readers come from an `Effect.cachedFunction`, opened lazily into the program's scope and
- *   closed with it; a failed open is not cached, so the next request retries;
+ * - per-app readers come from `makeReaderPool` (`platform/duckdb.ts`), opened lazily into the
+ *   program's scope and closed with it; a failed open is not cached, and a reader whose `BEGIN`
+ *   failed is dropped, so the next request retries on a fresh connection;
  * - every failure a request can produce is answered as a `ReaderErrorFrame` (`platform/services.ts`),
  *   so the parent can rehydrate the tag. A malformed frame is a protocol violation and ends the
  *   process, as it did before the port;
  * - stdin EOF, SIGINT or SIGTERM closes the scope: readers close connection-then-instance, then the
  *   log sink drains and closes.
  */
-import {
-  Cause,
-  Context,
-  Duration,
-  Effect,
-  ExecutionStrategy,
-  Exit,
-  Layer,
-  Logger,
-  Option,
-  Scope,
-} from "effect";
+import { Cause, Effect, Exit, Layer, Logger, Option } from "effect";
 import {
   ConfigError,
   HandlerKindMismatch,
@@ -42,20 +32,12 @@ import {
   UnknownAppError,
   UnknownHandlerError,
 } from "../core/errors.ts";
-import { lifecycleEvent } from "../core/events.ts";
 import { decoder } from "../core/ipc/framing.ts";
 import { ConfigLive } from "./config.ts";
-import { type ReaderApp, ReaderLive } from "./duckdb.ts";
+import { emitLifecycle, makeReaderPool } from "./duckdb.ts";
 import { LoggingReaderLive } from "./logging/logger.ts";
 import { loadApps } from "./registry.ts";
-import {
-  Config,
-  EventSink,
-  Reader,
-  type ReaderErrorFrame,
-  type ReaderReply,
-  type ReaderRequestFrame,
-} from "./services.ts";
+import { EventSink, type ReaderErrorFrame, type ReaderReply, type ReaderRequestFrame } from "./services.ts";
 
 const encoder = new TextEncoder();
 
@@ -127,6 +109,15 @@ function toFrame(error: RemoteReaderError): ReaderErrorFrame {
   return { _tag, message: describe(_tag, safeFields), fields: safeFields };
 }
 
+/**
+ * `ReaderError.operation` is a closed union (`core/errors.ts`) with no label for "the reply could
+ * not be encoded" or "the handler died": every `ReaderError` this process raises outside the
+ * transaction steps is attributed to the query itself, `"select"`, and `detail` says what really
+ * happened (`handler defect: …`, `unencodable reply: …`). Both are bug-class failures that were
+ * already logged in full; a dedicated label needs a `core/errors.ts` change.
+ */
+const QUERY_OPERATION = "select" as const;
+
 /** The first line of what went wrong, for the caller; the full cause goes to the log. */
 function defectDetail(cause: Cause.Cause<unknown>): string {
   const squashed = Cause.squash(cause);
@@ -143,7 +134,9 @@ function encodeReply(reply: ReaderReply): Uint8Array {
   } catch (cause) {
     line = stringify({
       id: reply.id,
-      error: toFrame(new ReaderError({ operation: "select", detail: `unencodable reply: ${String(cause)}` })),
+      error: toFrame(
+        new ReaderError({ operation: QUERY_OPERATION, detail: `unencodable reply: ${String(cause)}` }),
+      ),
     });
   }
   return encoder.encode(line + "\n");
@@ -155,46 +148,10 @@ function encodeReply(reply: ReaderReply): Uint8Array {
 
 const program = Effect.gen(function* () {
   const sink = yield* EventSink;
-  const root = yield* Effect.scope;
-  // Readers open lazily, inside request handling; they get the program's own Config and sink.
-  const services = yield* Effect.context<Config | EventSink>();
+  const readerFor = yield* makeReaderPool();
   const apps = loadApps();
   const pid = Deno.pid;
-  const lifecycle = (phase: string, detail?: unknown) =>
-    Effect.gen(function* () {
-      yield* sink.emit(lifecycleEvent({
-        eventId: crypto.randomUUID(),
-        ts: new Date().toISOString(),
-        level: "info",
-        role: "reader",
-        pid,
-        traceId: "reader-lifecycle",
-        phase,
-        detail,
-      }));
-    });
-
-  // Each app's reader lives in its own child of the program scope: a failed open closes just
-  // that child (releasing whatever it had opened), and a successful one is closed with the program.
-  const open = (app: ReaderApp) =>
-    Effect.gen(function* () {
-      const scope = yield* Scope.fork(root, ExecutionStrategy.sequential);
-      const exit = yield* Effect.exit(
-        Effect.map(Layer.buildWithScope(ReaderLive(app), scope), (context) => Context.get(context, Reader))
-          .pipe(
-            Effect.provide(services),
-          ),
-      );
-      if (Exit.isFailure(exit)) yield* Scope.close(scope, exit);
-      return yield* exit;
-    });
-  // `cachedFunction` memoizes failures too, so it caches a per-app *slot*: a memoized open that
-  // is invalidated when it fails, which is what lets the next request retry.
-  const slotFor = yield* Effect.cachedFunction((appId: string) =>
-    Effect.cachedInvalidateWithTTL(open(apps.get(appId)!), Duration.infinity)
-  );
-  const readerFor = (appId: string) =>
-    Effect.flatMap(slotFor(appId), ([get, invalidate]) => Effect.tapError(get, () => invalidate));
+  const lifecycle = (phase: string, detail?: unknown) => emitLifecycle(sink, phase, detail);
 
   const answer = (frame: ReaderRequestFrame): Effect.Effect<unknown, RemoteReaderError> => {
     switch (frame.kind) {
@@ -216,8 +173,7 @@ const program = Effect.gen(function* () {
               actual: definition.kind,
             });
           }
-          const reader = yield* readerFor(app.id);
-          return yield* reader.query(definition, frame.args);
+          return yield* readerFor(app).query(definition, frame.args);
         });
       // Items 21 and 23 implement these over the event-log DuckDB file.
       case "ingest":
@@ -240,7 +196,12 @@ const program = Effect.gen(function* () {
           Effect.logError("query handler defect", cause),
           {
             id: frame.id,
-            error: toFrame(new ReaderError({ operation: "select", detail: defectDetail(cause) })),
+            error: toFrame(
+              new ReaderError({
+                operation: QUERY_OPERATION,
+                detail: `handler defect: ${defectDetail(cause)}`,
+              }),
+            ),
           },
         )
       ),

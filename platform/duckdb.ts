@@ -22,13 +22,33 @@
  * Whole queries are serialized on a `Semaphore(1)`: one DuckDB connection never interleaves two
  * transactions, whichever caller (the reader loop, or an in-process test layer) drives it.
  *
+ * ## A wedged connection
+ *
+ * A failed `ROLLBACK` is only logged, and a transaction left open makes every later `BEGIN` fail
+ * until the connection is replaced. `makeReaderPool` is the per-app cache the reader process uses:
+ * it drops (and closes) a reader whose `BEGIN` failed, so the next query opens a fresh connection.
+ *
  * Every compiled statement emits a `sql` event (duckdb engine and dialect) when `TRACE_SQL` is on;
  * failed statements are always emitted. Events are built with `core/events.ts`'s constructors and go
  * to `EventSink`; the envelope's `traceId` is the fiber's `traceId` log annotation, which the reader
  * loop sets per request.
  */
 import { DuckDBInstance } from "@duckdb/node-api";
-import { Cause, Clock, Effect, Exit, FiberId, FiberRef, HashMap, Layer, Option, type Scope } from "effect";
+import {
+  Cause,
+  Clock,
+  Context,
+  Duration,
+  Effect,
+  ExecutionStrategy,
+  Exit,
+  FiberId,
+  FiberRef,
+  HashMap,
+  Layer,
+  Option,
+  Scope,
+} from "effect";
 import {
   ContextExpiredError,
   HandlerKindMismatch,
@@ -40,6 +60,7 @@ import {
   type EventEnvelope,
   fromPlatformError,
   type Level,
+  lifecycleEvent,
   sqlEvent,
   txEvent,
   type TxOutcome,
@@ -50,7 +71,7 @@ import { type Bind, literal, type Row } from "../core/compile/dialect.ts";
 import type { Schema } from "../core/schema.ts";
 import { Documents, type Execute, type SelectPlan } from "../sdk/db.ts";
 import type { AnyDefinition } from "../sdk/functions.ts";
-import { Config, EventSink, Reader, type ReaderService } from "./services.ts";
+import { Config, EventSink, type EventSinkService, Reader, type ReaderService } from "./services.ts";
 
 // ---------------------------------------------------------------------------
 // The native seam
@@ -121,7 +142,19 @@ function elapsedMs(startNanos: bigint, endNanos: bigint): number {
   return Number(endNanos - startNanos) / 1e6;
 }
 
-/** Runs one native call; a rejection becomes `ReaderError({ operation })` carrying the driver's message. */
+/**
+ * Runs one native call; a rejection becomes `ReaderError({ operation })` carrying the driver's message.
+ *
+ * There is no abort signal: interrupting the fiber abandons the promise, it does not cancel the
+ * native call. For a `SELECT` that is mid-flight, the `ROLLBACK` the transaction's release issues
+ * therefore runs on the *same* connection while the abandoned statement may still be executing.
+ * That is safe only because DuckDB serializes statements per connection: the `ROLLBACK` queues
+ * behind a statement that is already running and can never interleave with it. A statement the
+ * driver has not yet started may be overtaken by the `ROLLBACK` and then run outside the
+ * transaction (or inside the next query's); it is a read-only `SELECT` whose result is discarded,
+ * so either order is harmless. A driver that ran statements concurrently on one connection, or
+ * allowed writes here, would break this.
+ */
 function native<A>(
   operation: ReaderError["operation"],
   run: () => Promise<A>,
@@ -139,6 +172,26 @@ function close(what: "connection" | "instance", handle: { closeSync(): void }): 
     try: () => handle.closeSync(),
     catch: (cause) => new ReaderError({ operation: "close", detail: `${what}: ${messageOf(cause)}`, cause }),
   }).pipe(Effect.catchAll((error) => Effect.logWarning("reader handle failed to close", error)));
+}
+
+/**
+ * One `lifecycle` event, stamped from the Effect `Clock` like every other reader event so tests can
+ * drive it with `TestClock`. Used by the reader process for `ready` / `stopping` / `failed`.
+ */
+export function emitLifecycle(sink: EventSinkService, phase: string, detail?: unknown): Effect.Effect<void> {
+  return Effect.gen(function* () {
+    const ts = new Date(yield* Clock.currentTimeMillis).toISOString();
+    yield* sink.emit(lifecycleEvent({
+      eventId: crypto.randomUUID(),
+      ts,
+      level: "info",
+      role: "reader",
+      pid: Deno.pid,
+      traceId: "reader-lifecycle",
+      phase,
+      detail,
+    }));
+  });
 }
 
 /** Per-query state: the expiry flag the handler's `Documents` checks, and the statement count. */
@@ -205,6 +258,8 @@ export function makeReader(
         const parameters = Object.fromEntries(sql.values.map((value, i) => [`p${i + 1}`, value]));
         context.operations += 1;
         const start = yield* Clock.currentTimeNanos;
+        // Interrupting here abandons the promise; see `native` for why the release's `ROLLBACK`
+        // on this same connection is still safe.
         const exit = yield* Effect.exit(
           native(
             "select",
@@ -342,4 +397,74 @@ export function ReaderLive(
   driver: DuckDriver = duckDriver,
 ): Layer.Layer<Reader, ReaderError, Config | EventSink> {
   return Layer.scoped(Reader, makeReader(app, driver));
+}
+
+/** One app's cached reader, and the child scope that owns its native handles. */
+interface PooledReader {
+  readonly reader: ReaderService;
+  readonly scope: Scope.CloseableScope;
+}
+
+/**
+ * The reader process's per-app reader cache, built in the current scope. The returned function
+ * yields a `ReaderService` for an app (keyed by the `ReaderApp` object's identity); its readers
+ * open lazily on the first query, each into its own child of the current scope, and close with it.
+ *
+ * - A failed open is not cached: the slot is invalidated, so the next query retries.
+ * - A failed `BEGIN` drops the reader: its slot is invalidated and its scope closed (connection,
+ *   then instance), so the next query opens a fresh connection instead of failing every `BEGIN`
+ *   against a transaction a failed `ROLLBACK` left open. The query that hit it still fails.
+ *
+ * The reader process serves one request at a time, so nothing else is using a reader being dropped.
+ */
+export function makeReaderPool(
+  driver: DuckDriver = duckDriver,
+): Effect.Effect<(app: ReaderApp) => ReaderService, never, Scope.Scope | Config | EventSink> {
+  return Effect.gen(function* () {
+    const root = yield* Effect.scope;
+    // Readers open lazily, inside request handling; they get the pool's own Config and sink.
+    const services = yield* Effect.context<Config | EventSink>();
+
+    // Each app's reader lives in its own child of the pool's scope: a failed open closes just
+    // that child (releasing whatever it had opened), and a successful one is closed with the pool.
+    const open = (app: ReaderApp): Effect.Effect<PooledReader, ReaderError> =>
+      Effect.gen(function* () {
+        const scope = yield* Scope.fork(root, ExecutionStrategy.sequential);
+        const exit = yield* Effect.exit(
+          Effect.map(Layer.buildWithScope(ReaderLive(app, driver), scope), (context) =>
+            Context.get(context, Reader))
+            .pipe(Effect.provide(services)),
+        );
+        if (Exit.isFailure(exit)) {
+          yield* Scope.close(scope, exit);
+        }
+        return { reader: yield* exit, scope };
+      });
+    // `cachedFunction` memoizes failures too, so it caches a per-app *slot*: a memoized open that
+    // is invalidated when it fails (or when its reader is dropped), which is what lets the next
+    // request retry.
+    const slotFor = yield* Effect.cachedFunction((app: ReaderApp) =>
+      Effect.cachedInvalidateWithTTL(open(app), Duration.infinity)
+    );
+
+    return (app) => ({
+      query: (definition, args) =>
+        Effect.gen(function* () {
+          const [get, invalidate] = yield* slotFor(app);
+          const pooled = yield* Effect.tapError(get, () => invalidate);
+          return yield* pooled.reader.query(definition, args).pipe(
+            Effect.tapError((error) =>
+              error._tag === "ReaderError" && error.operation === "begin"
+                ? Effect.zipRight(
+                  Effect.logWarning("reader dropped after a failed BEGIN", error).pipe(
+                    Effect.annotateLogs({ appId: app.id }),
+                  ),
+                  Effect.zipRight(invalidate, Scope.close(pooled.scope, Exit.void)),
+                )
+                : Effect.void
+            ),
+          );
+        }),
+    });
+  });
 }

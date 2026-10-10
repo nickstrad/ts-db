@@ -21,7 +21,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Cause, Deferred, Effect, Either, Exit, Fiber, Layer, Option } from "effect";
+import { Cause, Deferred, Effect, Either, Exit, Fiber, Layer, Option, TestClock, TestContext } from "effect";
 import { RuleError } from "../../core/errors.ts";
 import type { EventRecord, SqlEventRecord, TxEventRecord } from "../../core/events.ts";
 import { compileDDL } from "../../core/compile/ddl.ts";
@@ -272,35 +272,50 @@ if (fixture === undefined) {
 // ===========================================================================
 
 if (fixture !== undefined) {
-  const { duckDriver, ReaderLive } = await import("../../platform/duckdb.ts");
+  const { duckDriver, emitLifecycle, makeReaderPool, ReaderLive } = await import(
+    "../../platform/duckdb.ts"
+  );
 
-  /** Wraps the real driver, logging each native open and close in the order they happen. */
-  const probeDriver = (log: string[], fail?: "open" | "connect"): DuckDriver => ({
-    open: async () => {
-      if (fail === "open") throw new Error("probe: instance refused");
-      const instance = await duckDriver.open();
-      log.push("instance:open");
-      return {
-        connect: async () => {
-          if (fail === "connect") throw new Error("probe: connection refused");
-          const connection = await instance.connect();
-          log.push("connection:open");
-          return {
-            run: (sql) => connection.run(sql),
-            runAndReadAll: (sql, values) => connection.runAndReadAll(sql, values),
-            closeSync: () => {
-              log.push("connection:close");
-              connection.closeSync();
-            },
-          };
-        },
-        closeSync: () => {
-          log.push("instance:close");
-          instance.closeSync();
-        },
-      };
-    },
-  });
+  /**
+   * Wraps the real driver, logging each native open and close in the order they happen. `fail`
+   * "begin" makes the first connection's `BEGIN TRANSACTION` throw, as a transaction left open by a
+   * failed `ROLLBACK` would; later connections are healthy.
+   */
+  const probeDriver = (log: string[], fail?: "open" | "connect" | "begin"): DuckDriver => {
+    let connections = 0;
+    return {
+      open: async () => {
+        if (fail === "open") throw new Error("probe: instance refused");
+        const instance = await duckDriver.open();
+        log.push("instance:open");
+        return {
+          connect: async () => {
+            if (fail === "connect") throw new Error("probe: connection refused");
+            const connection = await instance.connect();
+            const wedged = fail === "begin" && connections++ === 0;
+            log.push("connection:open");
+            return {
+              run: (sql) => {
+                if (wedged && sql === "BEGIN TRANSACTION") {
+                  return Promise.reject(new Error("probe: cannot start a transaction within a transaction"));
+                }
+                return connection.run(sql);
+              },
+              runAndReadAll: (sql, values) => connection.runAndReadAll(sql, values),
+              closeSync: () => {
+                log.push("connection:close");
+                connection.closeSync();
+              },
+            };
+          },
+          closeSync: () => {
+            log.push("instance:close");
+            instance.closeSync();
+          },
+        };
+      },
+    };
+  };
 
   const columns: ReaderApp = { id: "tic-tac-toe", file: join(fixture, "tic-tac-toe.sqlite"), schema };
   const json: ReaderApp = {
@@ -522,5 +537,146 @@ if (fixture !== undefined) {
     assert.ok(Exit.isSuccess(exit), Exit.isFailure(exit) ? Cause.pretty(exit.cause) : "");
     assert.ok(exit.value.every((rows) => (rows as unknown[]).length === 1));
     assert.deepEqual(txs(events).map((t) => t.outcome), Array(5).fill("commit"));
+  });
+
+  test("a failed BEGIN drops the cached reader; the next query opens a fresh connection", async () => {
+    const log: string[] = [];
+    const events: EventRecord[] = [];
+    const program = Effect.gen(function* () {
+      const reader = (yield* makeReaderPool(probeDriver(log, "begin")))(columns);
+      const first = yield* Effect.exit(reader.query(functions.getGame, { gameId: "game-1" }));
+      const afterFirst = [...log];
+      const second = yield* reader.query(functions.getGame, { gameId: "game-1" });
+      const third = yield* reader.query(functions.getGame, { gameId: "game-1" });
+      return { first, afterFirst, second, third };
+    }).pipe(Effect.scoped, Effect.provide(deps(events)));
+    const exit = await Effect.runPromiseExit(program);
+    assert.ok(Exit.isSuccess(exit), Exit.isFailure(exit) ? Cause.pretty(exit.cause) : "");
+    const { first, afterFirst, second, third } = exit.value;
+
+    const error = failureOf(first);
+    assert.equal(error._tag === "ReaderError" && error.operation, "begin");
+    assert.deepEqual(
+      afterFirst,
+      ["instance:open", "connection:open", "connection:close", "instance:close"],
+      "the wedged reader is closed, connection then instance, as soon as its BEGIN fails",
+    );
+    assert.equal((second as { _id: string })._id, "game-1");
+    assert.equal((third as { _id: string })._id, "game-1");
+    assert.deepEqual(
+      log,
+      [...afterFirst, "instance:open", "connection:open", "connection:close", "instance:close"],
+      "one fresh reader serves the later queries and closes with the pool",
+    );
+    assert.deepEqual(txs(events).map((t) => t.outcome), ["commit", "commit"]);
+  });
+
+  test("the pool keeps a reader after an ordinary query failure and caches it across queries", async () => {
+    const log: string[] = [];
+    const events: EventRecord[] = [];
+    const program = Effect.gen(function* () {
+      const reader = (yield* makeReaderPool(probeDriver(log)))(columns);
+      const rule = yield* Effect.exit(reader.query(probes.rule, {}));
+      yield* reader.query(functions.getGame, { gameId: "game-1" });
+      return { rule, afterQueries: [...log] };
+    }).pipe(Effect.scoped, Effect.provide(deps(events)));
+    const exit = await Effect.runPromiseExit(program);
+    assert.ok(Exit.isSuccess(exit), Exit.isFailure(exit) ? Cause.pretty(exit.cause) : "");
+    assert.equal(failureOf(exit.value.rule)._tag, "RuleError");
+    assert.deepEqual(exit.value.afterQueries, ["instance:open", "connection:open"]);
+  });
+
+  test("interrupting a query mid-statement: ROLLBACK queues behind the running SELECT; the connection stays usable", async () => {
+    // A real, slow DuckDB statement stands in for the compiled SELECT of the first query only.
+    const SLOW = "SELECT sum(hash(range)) AS n FROM range(20000000)";
+    const log: string[] = [];
+    const at: Record<string, number> = {};
+    const mark = (event: string) => {
+      log.push(event);
+      at[event] = performance.now();
+    };
+    let started!: () => void;
+    const selectStarted = new Promise<void>((resolve) => (started = resolve));
+    let slowed = false;
+    const inner = probeDriver([]);
+    const driver: DuckDriver = {
+      open: async () => {
+        const instance = await inner.open();
+        return {
+          closeSync: () => instance.closeSync(),
+          connect: async () => {
+            const connection = await instance.connect();
+            return {
+              closeSync: () => connection.closeSync(),
+              run: async (sql) => {
+                const tracked = sql === "ROLLBACK";
+                if (tracked) mark("rollback:start");
+                const result = await connection.run(sql);
+                if (tracked) mark("rollback:done");
+                return result;
+              },
+              runAndReadAll: async (sql, values) => {
+                if (slowed) return await connection.runAndReadAll(sql, values);
+                slowed = true;
+                mark("select:start");
+                started();
+                try {
+                  const rows = await connection.runAndReadAll(SLOW, {});
+                  mark("select:ok");
+                  return rows;
+                } catch (error) {
+                  mark("select:failed");
+                  throw error;
+                }
+              },
+            };
+          },
+        };
+      },
+    };
+
+    const events: EventRecord[] = [];
+    const program = Effect.gen(function* () {
+      const reader = (yield* makeReaderPool(driver))(columns);
+      const { query: q } = defineFunctions(schema);
+      const slow = q({ args: {}, handler: ({ db }) => db.get("games", "game-1") });
+      const fiber = yield* Effect.fork(reader.query(slow, {}));
+      yield* Effect.promise(() => selectStarted);
+      // Let the native call actually begin: a ROLLBACK issued before it starts could overtake it.
+      yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 100)));
+      yield* Fiber.interrupt(fiber);
+      return yield* reader.query(functions.getGame, { gameId: "game-1" });
+    }).pipe(Effect.scoped, Effect.provide(deps(events)));
+    const exit = await Effect.runPromiseExit(program);
+    assert.ok(Exit.isSuccess(exit), Exit.isFailure(exit) ? Cause.pretty(exit.cause) : "");
+    assert.equal((exit.value as { _id: string })._id, "game-1");
+    assert.deepEqual(log.slice(0, 2), ["select:start", "rollback:start"], "ROLLBACK is issued mid-statement");
+    assert.ok(at["rollback:start"] - at["select:start"] >= 100, "the SELECT was running natively");
+    // The abandoned SELECT ran to completion and the ROLLBACK succeeded; their native completions
+    // land a few ms apart in either microtask order, so the check is "not materially earlier".
+    assert.deepEqual(log.slice(2).sort(), ["rollback:done", "select:ok"]);
+    assert.ok(
+      at["rollback:done"] >= at["select:ok"] - 25,
+      `ROLLBACK finished ${at["select:ok"] - at["rollback:done"]}ms before the SELECT it overlapped`,
+    );
+    assert.deepEqual(txs(events).map((t) => t.outcome), ["interrupted", "commit"]);
+    assert.equal(txs(events)[0].errorTag, undefined);
+  });
+
+  test("lifecycle events are stamped from the Effect Clock, so TestClock controls them", async () => {
+    const events: EventRecord[] = [];
+    const sink = { emit: (event: EventRecord) => Effect.sync(() => void events.push(event)) };
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.UTC(2026, 0, 2, 3, 4, 5));
+        yield* emitLifecycle(sink, "ready", { apps: ["a"] });
+        yield* TestClock.adjust("1 hour");
+        yield* emitLifecycle(sink, "stopping");
+      }).pipe(Effect.provide(TestContext.TestContext)),
+    );
+    assert.deepEqual(events.map((e) => [e.kind, e.ts]), [
+      ["lifecycle", "2026-01-02T03:04:05.000Z"],
+      ["lifecycle", "2026-01-02T04:04:05.000Z"],
+    ]);
   });
 }
