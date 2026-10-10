@@ -32,7 +32,8 @@ const _acceptsThePlatformUnion: (error: E.PlatformError) => number = E.toHttpSta
 /**
  * Independent restatement of §1.3. `Record<PlatformError["_tag"], number>` is exhaustive by
  * construction: omit a tag and this object literal fails to typecheck. The values are asserted
- * against `toHttpStatus` at the type level below, so the two cannot drift silently.
+ * against `toHttpStatus` is key-set only — value parity with `toHttpStatus` is a runtime
+ * concern for item 22's tests.
  */
 const statusByTag: Record<E.PlatformError["_tag"], number> = {
   SchemaError: 400,

@@ -167,8 +167,9 @@ interruption-safe rollback expressible, which the current try/catch code cannot 
 
 **Costs.** Two new runtime dependencies and a learning curve. Every module gains an `Effect` in its signature,
 so the port cannot be partial — hence the explicit compatibility wrappers in items 04, 09 and 10 and their
-removal in item 26. The two behaviour changes called out in the plan (`ConflictError` → 409, `QueueFullError`
-→ 503) are visible to clients.
+removal in item 26. The behaviour changes called out in the plan (`ConflictError` → 409, `QueueFullError`
+→ 503), plus `RequestTooLarge` → 413 and `BackupAlreadyRunning` → 409 (see ADR 0002),
+are visible to clients.
 
 **Deferred.** Effect 4.x. `@effect/platform`. Deterministic simulation testing, which the pure `core/` plus
 `StorageTest` makes reachable but which is explicitly future work.
