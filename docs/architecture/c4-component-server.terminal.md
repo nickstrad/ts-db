@@ -155,7 +155,8 @@ layer-composition direction: `core/` is provided to `Config`, `Config` is provid
 
 The payoff is testability: every box is a `Context.Tag` with a live layer and a test layer, so
 `tests/unit/http_test.ts` can exercise the **whole router** over `StorageTest` + `ReaderTest` +
-`ObjectStoreTest` with no subprocess and no DuckDB (plan items 20, 22).
+`ObjectStoreTest` with no subprocess and no DuckDB (the in-memory test layers landed in item 20; the router
+itself is item 22).
 
 Two changes are not refactors and are visible to callers, mapped by `toHttpStatus`:
 

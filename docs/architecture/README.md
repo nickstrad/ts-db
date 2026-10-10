@@ -38,7 +38,7 @@ tags), 03 (k6 install and smoke scenario), 04 (`core/schema.ts`), 05 (`core/ipc/
 (Effect-based `sdk/`), 11 (`platform/logging/` Logger service and rotating JSONL sink), 12–13
 (`tests/property/` waves 1 and 2) and 14 (`perf/` k6 load scenarios). Items 15–18 (Storage, Reader,
 ReaderClient, ObjectStore) were in progress at the audit; items 15 (Storage), 16 (Reader), 17 (ReaderClient),
-18 (ObjectStore) and 19 (Backups) have all landed since. So:
+18 (ObjectStore), 19 (Backups) and 20 (in-memory test layers) have all landed since. So:
 
 - Level 1 and the Level 2 request path are **built** — the container topology does not change. The SDK is
   already Effect-based; the reader is a scoped Effect program (item 16), the parent-side IPC is the scoped
