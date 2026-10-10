@@ -90,18 +90,25 @@ and moves on.
 ## File sync protocol
 
 This repo maintains two instruction files: **AGENTS.md** (agent orchestration and repo structure)
-and **CLAUDE.md** (repo conventions for Claude Code CLI). The Claude Code CLI auto-discovers only
-CLAUDE.md, not AGENTS.md — empirically validated in sq-05.
+and **CLAUDE.md** (repo conventions for the Claude Code CLI). The CLI auto-discovers only
+CLAUDE.md, never AGENTS.md — empirically validated in sq-05.
 
 - **AGENTS.md** is the single source of truth for agent orchestration, work protocols, model
   assignments, and repo structure. It is read by human coordinators and agent prompts, never
   auto-discovered by the CLI.
-- **CLAUDE.md** is auto-discovered by the `claude` CLI and defines repo conventions (environment
-  setup, branch etiquette, docs-only sessions, commit style). It is a hand-maintained summary of
-  AGENTS.md sections that are relevant to CLI behavior, plus CLI-specific conventions.
-- **Keep them in sync**: When editing AGENTS.md, ensure that CLAUDE.md reflects any changes to
-  environment setup, branch/worktree etiquette, docs-only/implementation boundaries, or commit
-  style. Do not attempt a symlink: the CLI looks for CLAUDE.md by filename, not by target.
+- **CLAUDE.md** is auto-discovered by the `claude` CLI and defines CLI-facing repo conventions
+  (environment setup, branch/worktree etiquette, docs-only session boundaries, commit style).
+  The two files are deliberately disjoint — CLAUDE.md is not a summary of AGENTS.md and neither
+  is derivable from the other.
+- **Keep the overlap in sync, in both directions.** The files share exactly two topics:
+  branch/worktree etiquette and commit style. When either file changes one of those, update the
+  other to match. Everything else lives in exactly one file: orchestration protocol, model
+  assignments, and batch rules live only in AGENTS.md; environment setup and docs-only session
+  boundaries live only in CLAUDE.md.
+- **Do not replace CLAUDE.md with a symlink to AGENTS.md.** A symlink technically works (the CLI
+  opens the `CLAUDE.md` path and the filesystem resolves the link — verified 3/3 in review),
+  but it would collapse two intentionally different documents, written for different audiences,
+  into one.
 
 ## Stopping-point convention
 
