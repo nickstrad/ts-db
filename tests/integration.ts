@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import { createClient } from "../sdk/client.ts";
 import type { functions } from "../app/functions.ts";
+import type { ResultOf } from "../sdk/functions.ts";
 import { sha256 } from "../platform/object_store.ts";
 import type { Manifest } from "../platform/backup.ts";
 const root = await Deno.makeTempDir({ prefix: "document-db-integration-" });
@@ -42,7 +43,7 @@ try {
     assert.equal(game!._version, 1);
     assert.equal(typeof game!._creationTime, "number");
     for (const [playerId, cell] of [["alice", 0], ["bob", 3], ["alice", 1], ["bob", 4], ["alice", 2]] as const) {
-      const written = await client.mutation("makeMove", { gameId, playerId, cell, expectedVersion: game!._version });
+      const written: ResultOf<typeof functions["makeMove"]> = await client.mutation("makeMove", { gameId, playerId, cell, expectedVersion: game!._version });
       game = await client.query("getGame", { gameId });
       assert.deepEqual(game, written, "DuckDB must see the acknowledged SQLite commit");
     }

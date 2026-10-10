@@ -1,5 +1,5 @@
 // Reader process ONLY. It deliberately never imports node:sqlite.
-import { DuckDBInstance, type DuckDBConnection } from "npm:@duckdb/node-api@1.5.6";
+import { DuckDBInstance, type DuckDBConnection } from "@duckdb/node-api";
 import { Documents } from "../sdk/db.ts";
 import type { Schema } from "../sdk/schema.ts";
 import type { AnyDefinition } from "../sdk/functions.ts";
