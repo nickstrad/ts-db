@@ -2,6 +2,13 @@
 
 Dated decisions with rationale. Plans carry the _what_; this page carries the _why_. Newest first.
 
+## 2026-10-11 — No ORM for Postgres access
+
+Human decision: MT-03 (and any other item touching Postgres) uses the pinned `npm:postgres` client directly
+with hand-written SQL, leveraging SQL syntax — not an ORM or query builder generating SQL internally.
+Rationale: direct hand-written SQL is tunable and has no hidden query generation. Recorded in
+`docs/plans/multitenancy.md` §2.4 and MT-03.
+
 ## 2026-10-11 — Knowledge lives in plain markdown, no `kb` CLI
 
 Human decision: `docs/knowledge/` is markdown with `index.md`, deliberately not the nickstrad/kb full-text

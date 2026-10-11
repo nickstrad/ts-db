@@ -111,9 +111,12 @@ only a `db-shell` convenience target.
 
 ### 2.4 New npm dependencies under the `deno.json` freeze
 
-MT-03 needs a Postgres driver (`postgres` or `pg` — pinned, choice justified in a code comment) and MT-08
-needs `better-auth`. The main plan's §2.2 freezes `deno.json` after item 01, so neither item may add
-import-map entries.
+MT-03 needs a Postgres driver (`npm:postgres@3.4.9` — pinned per the sq-10 bake-off, choice justified in a
+code comment) and MT-08 needs `better-auth`. **No ORM, ever:** MT-03 (and any other item touching Postgres)
+uses the pinned `npm:postgres` client directly with hand-written SQL, leveraging SQL syntax — not an ORM or
+query builder generating SQL internally. Direct hand-written SQL is tunable and has no hidden query
+generation. The main plan's §2.2 freezes `deno.json` after item 01, so neither item may add import-map
+entries.
 
 **Decision:** builders use **inline pinned `npm:` specifiers** (e.g.
 `import postgres from "npm:postgres@3.4.5"`) — exact versions, no ranges — which Deno resolves without
@@ -184,13 +187,16 @@ exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy a
   `tenantsDir` (default `<dataDir>/tenants`), `tenantRouter` (default `"local"`; validated against the known
   router kinds — `"local"` today, `"control-plane"` reserved for the future), `betterAuthSecret` (no default —
   required when `tenancyMode` is `better-auth`), `betterAuthUrl` (default `http://localhost:3000`-style
-  platform base URL). Semantics: `off` = pre-tenancy behavior (single SQLite file, existing app-token auth) —
-  MT-07's middleware must be a no-op in this mode so the default app-token path keeps working; `api-key` =
-  tenant API-key resolution enforced on `/apps/*`; `better-auth` = session tokens accepted alongside API keys.
-  Keep the README section in sync (reviewer verifies parity, per the item-08 precedent).
+  platform base URL), `tenantKeyCacheTtlMs` (env `TENANT_KEY_CACHE_TTL_MS`, default `30000`, validated `> 0`
+  and `<= 300000` — the fixed, non-sliding TTL for MT-07's tenant-key cache). Semantics: `off` = pre-tenancy
+  behavior (single SQLite file, existing app-token auth) — MT-07's middleware must be a no-op in this mode so
+  the default app-token path keeps working; `api-key` = tenant API-key resolution enforced on `/apps/*`;
+  `better-auth` = session tokens accepted alongside API keys. Keep the README section in sync (reviewer
+  verifies parity, per the item-08 precedent).
 - **Acceptance criteria:**
   - `ConfigLive` decodes the new options; missing `betterAuthSecret` fails with `ConfigError` only when
     `tenancyMode` is `better-auth`; an unknown `TENANCY` value fails with `ConfigError`.
+  - `tenantKeyCacheTtlMs` decodes with its default; `0` and values above `300000` fail with `ConfigError`.
   - With `tenancyMode: "off"`, the pre-tenancy default path is preserved (no tenant resolution, no new auth
     behavior) — covered by the new rows in `tests/unit/config_test.ts`.
   - Reviewer verifies README lists exactly the new options.
@@ -209,12 +215,19 @@ exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy a
   1. `TenantRegistry` `Context.Tag` + interface in the `services.ts` style: `createTenant({name, slug})`,
      `getTenant(id)`, `listTenants()`, `updateTenant(id, patch)`, `deactivateTenant(id)`,
      `issueApiKey(tenantId, name)`, `revokeApiKey(keyId)`, `resolveTenantByKeyHash(hash)`.
-  2. `store.ts`: Postgres access via a single pinned driver (pick `npm:postgres` or `npm:pg`, justify in a
-     code comment). API keys: `tsdb_` prefix + 32 random bytes; **SHA-256 hash stored**, plaintext returned
-     exactly once at issuance; `resolveTenantByKeyHash` joins `api_keys` → `tenants` and rejects revoked keys
-     and inactive tenants.
-  3. Unit tests with a test layer (ephemeral Postgres via `make up` in CI, or pg-mem if the driver allows —
-     builder's choice, documented).
+  2. `store.ts`: Postgres access via the pinned `npm:postgres@3.4.9` driver (sq-10 bake-off; justify in a code
+     comment with the citable paragraph from `docs/haiku-experiments/findings/sq-10.md`). **No ORM, ever**:
+     the store uses the pinned `npm:postgres` client directly with hand-written SQL, leveraging SQL syntax —
+     not an ORM or query builder generating SQL internally; direct hand-written SQL is tunable and has no
+     hidden query generation. API keys: `tsdb_` prefix + 32 random bytes; **SHA-256 hash stored**, plaintext
+     returned exactly once at issuance; `resolveTenantByKeyHash` joins `api_keys` → `tenants` and rejects
+     revoked keys and inactive tenants. Use `sql.begin` for `issueApiKey`-style atomic writes; match errors on
+     `PostgresError` + `code === "23505"` (constraint `tenants_slug_key` in real Postgres); keep prepared
+     statements (the default); re-measure if `prepare: false` is ever used (PgBouncer transaction mode).
+  3. Unit tests with a test layer (ephemeral Postgres via `make up` in CI — MT-01's compose `postgres:17`;
+     pg-mem is NO: its ROLLBACK silently does nothing across separate statements, it misnames the
+     duplicate-slug constraint, and it does not parse the plan's bare `REFERENCES tenants` DDL. Do NOT change
+     the bare `REFERENCES tenants` DDL to suit pg-mem — it is valid Postgres.)
 - **Acceptance criteria:**
   - `deno task test` passes; tests cover: duplicate slug rejected, key plaintext shown once (second read
     impossible), revoked key rejected, inactive tenant's keys rejected, `resolveTenantByKeyHash` round-trip.
@@ -238,19 +251,29 @@ exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy a
        `{ _tag: "ControlPlane", endpoint: string }`) extend the union without touching the interface.
      - `prepare(location: StorageLocation): Effect<void, TenantError>` — idempotent: ensure the location
        exists and carries the schema DDL (creates the file on first use for the local implementation).
+       Re-check containment with `realpath` at open; refuse symlinks at `<tenantsDir>/<id>.db`.
+       `StorageLocation` is constructible only by `resolve` (opaque/branded) — `prepare` never accepts a
+       caller-constructed path.
      - Contract guarantees: `resolve` is deterministic per tenant id; implementations must reject malformed
        ids so path traversal is impossible by construction; `Storage` depends **only** on the
        `TenantStorageRouter` tag — never on paths, env vars, or a concrete router.
   2. **Local-folder implementation now:** `LocalFolderRouter` — `resolve` returns
-     `{ _tag: "SqliteFile", path: "<tenantsDir>/<tenantId>.db" }`; the tenant id is a validated uuid (assert:
-     no `..`, no separators). Selected via the `tenantRouter: "local"` config value.
+     `{ _tag: "SqliteFile", path: "<tenantsDir>/<tenantId>.db" }`; the tenant id is a strictly parsed,
+     canonical-lowercase UUID — a branded `TenantId` type. Anything else (uppercase, `urn:uuid:` forms, NUL,
+     whitespace, percent-encoded forms, separators) is rejected with `MalformedTenantId`, never a path.
+     Selected via the `tenantRouter: "local"` config value.
   3. **`sqlite.ts`:** `Storage` gains tenant-scoped access through the router — a bounded
-     `Map<tenantId, handle>` with idle eviction keyed off `resolve`; **each tenant file keeps item 15's
+     `Map<tenantId, handle>` with single-flight get-or-create (concurrent first opens share one handle) and a
+     lease/refcount so idle eviction never closes an in-flight handle; **each tenant file keeps item 15's
      guarantee** (own `Semaphore(1)` queue, `BEGIN IMMEDIATE`). The single-file path remains for the
-     pre-tenancy default (back-compat for existing deployments). **The `Storage` service interface is
-     unchanged** — the tenant id arrives via a `TenantContext` tag in the Effect layer (injected by MT-07's
-     middleware), never as a new method parameter; item 20's `StorageTest` and the conformance suite keep
-     running against the existing interface.
+     pre-tenancy default (back-compat for existing deployments) — it is chosen once at startup by
+     `tenancyMode`, never as a per-call fallback. **The `Storage` service interface is unchanged** — the
+     tenant id arrives via a `TenantContext` tag in the Effect layer (injected per request by MT-07's
+     middleware), never as a new method parameter. `TenantContext` is fiber-local (provided via
+     `Effect.provideService`/`FiberRef`, never a process-global `Ref`); `Storage` reads it with `R = never`
+     (e.g. `Effect.serviceOption(TenantContext)` or a `FiberRef`). In `api-key` and `better-auth` modes a
+     missing context is a typed failure, never the single-file path. Item 20's `StorageTest` and the
+     conformance suite keep running against the existing interface.
   4. **Document the extension point** in `routing.ts` header comments: a future `ControlPlaneRouter` (central
      routing service, remote files, whatever comes later) implements `TenantStorageRouter`, is selected via
      `tenantRouter: "control-plane"` + endpoint config, and plugs in as a different layer — no changes to
@@ -261,7 +284,11 @@ exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy a
   - Two tenants write the same document id → fully isolated reads.
   - 50 concurrent writes across 5 tenants → no cross-talk, no lost updates (extends the sq-06 stress
     approach).
-  - Path-traversal tenant id (`../x`) rejected by `resolve`.
+  - Path-traversal tenant id (`../x`) rejected by `resolve`; non-canonical ids (uppercase UUID, `urn:uuid:`
+    form, NUL, whitespace, percent-encoded) rejected with `MalformedTenantId`.
+  - Concurrent first requests to a new tenant open exactly one handle; eviction under load causes no failed
+    request.
+  - `Storage` call with no `TenantContext` in api-key mode → typed error (never the single-file path).
   - Item 20's `StorageTest` and conformance suite pass unmodified (the `Storage` interface is unchanged).
 
 #### MT-05 — Admin CRUD HTTP endpoints
@@ -274,7 +301,8 @@ exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy a
 - **Work:** `POST /admin/tenants` (create, returns api key once), `GET /admin/tenants`,
   `GET /admin/tenants/:id`, `PATCH /admin/tenants/:id` (name/status), `DELETE /admin/tenants/:id` (soft →
   deactivate), `POST /admin/tenants/:id/keys` (issue), `DELETE /admin/tenants/:id/keys/:keyId` (revoke). All
-  behind the existing `ADMIN_TOKEN` bearer check.
+  behind the existing `ADMIN_TOKEN` bearer check. Reactivation semantics: deactivation revokes the tenant's
+  keys, so a reactivated tenant's old keys stay dead — reactivation requires issuing new keys.
 - **Acceptance criteria:**
   - `curl` each endpoint: 200s with valid admin token, 401 without.
   - `POST /admin/tenants` response contains the plaintext key exactly once; a second `GET` never does.
@@ -290,7 +318,8 @@ exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy a
   table output; prints the API key once on create/issue-key with a "save this" warning.
 - **Acceptance criteria:**
   - Full cycle against a live server: create → key works on `/apps/*`; revoke-key → key 401s; deactivate → all
-    keys 401.
+    keys 401 (keys are revoked, not merely gated — reactivating the tenant does not resurrect them; new keys
+    must be issued).
 
 #### MT-07 — Tenant resolution in the request path + TS client tenant config
 
@@ -303,17 +332,24 @@ exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy a
 - **Reads:** `platform/tenants/registry.ts`, `platform/tenants/routing.ts`, `sdk/client.ts`.
 - **Work:**
   1. Request middleware: extract `Authorization: Bearer <key>` → `SHA-256` →
-     `TenantRegistry.resolveTenantByKeyHash` (with a short TTL cache) → inject `TenantContext { tenantId }`
-     into the Effect layer. Every `Storage` access resolves through it.
+     `TenantRegistry.resolveTenantByKeyHash` (with a fixed, non-sliding TTL cache from `tenantKeyCacheTtlMs`
+     (MT-02); negative lookups cached; cache size capped) → inject `TenantContext { tenantId }` into the
+     Effect layer per request (fiber-local via `Effect.provideService`/`FiberRef`, never a global `Ref`).
+     Every `Storage` access resolves through it. Revocation and deactivation evict the cached entry
+     in-process; other instances see the change within one TTL (no cross-instance invalidation — the window is
+     stated, not hidden).
   2. **Never trust client tenant identity:** ignore (and log at warn) any `x-tenant-id` header or tenant field
-     in the body — the credential is the single source of truth (§2.1).
+     in the body — the credential is the single source of truth (§2.1). Cap and rate-limit the warn line (a
+     flood of unauthenticated `x-tenant-id` requests must not fill `LOG_DIR`).
   3. `sdk/client.ts`: document that `token` is now the tenant API key; add
      `createTenantClient(baseURL, appId, apiKey)` as a named alias for discoverability. No wire-format change.
 - **Acceptance criteria:**
   - Tenant A's key reading tenant B's document id returns not-found (indistinguishable from missing) — test
     with two CLI-created tenants.
-  - Missing/invalid key → 401; revoked key → 401.
+  - Missing/invalid key → 401; revoked key → 401 within `tenantKeyCacheTtlMs` of revocation.
   - A request carrying a forged `x-tenant-id` is still scoped to the key's tenant (test asserts this).
+  - Interleaved-concurrency test through the real HTTP middleware: two tenant keys, concurrent mutations —
+    each tenant sees only its own writes.
 
 #### MT-08 — Better Auth email/password, headless
 
@@ -336,6 +372,11 @@ exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy a
      membership (`memberships(user_id, tenant_id, role)`); extend MT-07's middleware to accept session tokens
      (session → user → tenant); `scripts/auth.ts`: `users create <email> [--tenant]`,
      `users link <email> <tenant>`.
+  3. **Decide token transport before build** (sq-09): `plugins: [bearer()]` iff the tenant middleware consumes
+     `Authorization: Bearer <session token>` (without the plugin the body token 401s); else forward the signed
+     cookie. Re-verify at the pinned better-auth version (record the `deno.lock` delta). Better Auth vs `pg`
+     Pool compat is an open item: check whether Better Auth accepts a postgres.js client or needs its own `pg`
+     Pool, and record the driver decision here. MT-08 depends on MT-01 landing `postgres:17` in compose.
 - **Acceptance criteria:**
   - Headless sign-up/sign-in round-trip from a Deno script, exit 0.
   - Session token authenticates tenant-scoped requests; wrong password → 401; unknown user → 401.
@@ -357,11 +398,14 @@ exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy a
      `titled()` suffixes every test name with `[seed=..., runs=...]` so the seed appears in `deno test`
      output. A failure therefore prints the shrunk counterexample AND the seed; re-running with
      `PROP_SEED=<n>` reproduces the exact failing case. Do not invent a second seed mechanism.
-  2. **Arbitraries:** tenant ids (valid uuids), malformed ids (`../x`, separators, unicode, empty strings),
-     registry states per tenant (active/deactivated/unknown), doc ids, op sequences (put/get/del).
+  2. **Arbitraries:** tenant ids (valid canonical-lowercase uuids), malformed ids (`../x`, separators,
+     unicode, empty strings, uppercase UUIDs, `urn:uuid:` forms, NUL, whitespace, percent-encoded forms — all
+     of which must be rejected with `MalformedTenantId`), registry states per tenant
+     (active/deactivated/unknown), doc ids, op sequences (put/get/del).
   3. **Properties over the router + registry seam:**
-     - **Isolation:** for arbitrary distinct tenant ids `a ≠ b`, `resolve(a)` and `resolve(b)` never produce
-       the same `StorageLocation.path`.
+     - **Isolation:** for arbitrary distinct parsed canonical tenant ids `a ≠ b`, `resolve(a)` and
+       `resolve(b)` never produce the same `StorageLocation.path`. (The property is over parsed ids: a
+       canonicalizing resolver must not be penalized for mapping case variants to one file.)
      - **Determinism:** `resolve(id)` called twice yields deep-equal locations.
      - **Traversal impossibility:** for arbitrary string ids, `resolve` either returns a typed `TenantError`
        (`MalformedTenantId`) or a path strictly contained in `tenantsDir` after normalization — it never
@@ -372,7 +416,10 @@ exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy a
      - **Concurrent multi-tenant load (extends the sq-06 approach):** arbitrary tenant sets × concurrent
        put/get op sequences run in parallel; each tenant's reads see exactly its own writes — no cross-talk,
        no lost updates, and every write lands in the right tenant's file.
-  4. `numRuns >= 200` per property, following the repo convention.
+  4. `numRuns >= 200` per property, following the repo convention. Report coverage assertions separately from
+     correctness assertions so a coverage miss is never triaged as an invariant break; baseline expected
+     per-seed failure rates (pre-fix): rules ≈6.4%, offsets ≈1%, rotation ≈0.2% (→≈0 after the item-12/13
+     rules fix).
 - **Acceptance criteria:**
   - `deno task test:prop` passes and includes the new file (it matches the existing `tests/property/**/*.ts`
     glob).
@@ -412,15 +459,14 @@ exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy a
   Disjoint from item 25's `tests/integration.ts` and `tests/e2e/observability_test.ts`, and from MT-07's
   tenancy tests (including any `tests/e2e/tenancy_test.ts`); the suite may import exported helpers from those
   files but never edits them. Not `deno.json`, not `deno.lock`, not `docker-compose.yml`, not `Makefile`.
-- **Reads:** `platform/config.ts` (`OPTIONS`, including the MT-02 rows and the tenant-key cache TTL option if
-  MT-07 added one), `platform/http/router.ts`, `platform/http/auth.ts`, `core/errors.ts` (`toHttpStatus`),
-  `sdk/client.ts` (`createClient`, `createTenantClient`), `app/schema.ts`, `app/functions.ts`,
-  `platform/analysis/catalog.ts`, `scripts/logs.ts`, `scripts/restore.ts`, `scripts/tenants.ts`,
-  `scripts/auth.ts` and `platform/auth/*` (if MT-08 passed its spike), `platform/tenants/schema.sql`,
-  `docker-compose.yml` (the `postgres` image tag), `Makefile` (the `db-migrate` recipe),
-  `tests/property/arbitraries.ts` (`SEED`, `titled` — the seed harness), `tests/integration.ts`,
-  `tests/e2e/observability_test.ts`, `docs/observability.md`, `deno.lock` (existing pins only), and the
-  main-plan items 22, 23, 25 and 28 plus MT-02 through MT-08 in this plan.
+- **Reads:** `platform/config.ts` (`OPTIONS`, including the MT-02 rows and the `tenantKeyCacheTtlMs` option),
+  `platform/http/router.ts`, `platform/http/auth.ts`, `core/errors.ts` (`toHttpStatus`), `sdk/client.ts`
+  (`createClient`, `createTenantClient`), `app/schema.ts`, `app/functions.ts`, `platform/analysis/catalog.ts`,
+  `scripts/logs.ts`, `scripts/restore.ts`, `scripts/tenants.ts`, `scripts/auth.ts` and `platform/auth/*` (if
+  MT-08 passed its spike), `platform/tenants/schema.sql`, `docker-compose.yml` (the `postgres` image tag),
+  `Makefile` (the `db-migrate` recipe), `tests/property/arbitraries.ts` (`SEED`, `titled` — the seed harness),
+  `tests/integration.ts`, `tests/e2e/observability_test.ts`, `docs/observability.md`, `deno.lock` (existing
+  pins only), and the main-plan items 22, 23, 25 and 28 plus MT-02 through MT-08 in this plan.
 - **Work:**
   1. **One command without touching `deno.json`.** Main-plan §2.2 freezes `deno.json`, so the task lives in
      `package.json`, which no item owns and which Deno 2's `deno task` already reads: `deno task` lists
@@ -492,11 +538,11 @@ exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy a
        `TENANCY=off`, one app's token is 401 on the other app. **(b) Better Auth, gated:** the gate is open
        iff MT-08's step-2 deliverables exist (`scripts/auth.ts` and `platform/auth/`). Open → run headless
        `signUp.email`/`signIn.email` through `better-auth/client` at the version MT-08 pinned (no new
-       specifier), link the user to tenant A with `scripts/auth.ts`, then: the session token reads A's
-       documents; it reads B's documents as missing; a wrong password is 401; an unknown user is 401. Any
-       failure while the gate is open fails the run. Closed → register these cases with `ignore: true` and a
-       name carrying `[skipped: MT-08 headless-infeasible]`, so `deno test` reports them as ignored, never
-       passed.
+       specifier), link the user to tenant A with `scripts/auth.ts`, then (presenting the session token per
+       MT-08's bearer-or-cookie transport decision): the session token reads A's documents; it reads B's
+       documents as missing; a wrong password is 401; an unknown user is 401. Any failure while the gate is
+       open fails the run. Closed → register these cases with `ignore: true` and a name carrying
+       `[skipped: MT-08 headless-infeasible]`, so `deno test` reports them as ignored, never passed.
      - **6 log ingest → DuckDB analysis:** run a seeded workload with a caller-supplied `X-Trace-Id` on one
        request, one deliberate 409, one unknown-handler 404 and one backup. Call `POST /admin/logs/ingest`,
        retrying for at most 10 s until the trace id is queryable (the sink flushes asynchronously). Then
@@ -513,8 +559,8 @@ exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy a
        `revoke-key` on the first, it is 401 while the second still works. After `deactivate`, both are 401,
        and `show` reports the tenant deactivated. Neither `list` nor `show` ever prints a plaintext key. The
        CLI with a wrong `ADMIN_TOKEN` exits non-zero. If MT-07's tenant-key cache delays revocation, each "→
-       401" step polls up to the configured TTL plus 1 s and fails past that bound; the bound comes from
-       config, not a hardcoded sleep.
+       401" step polls up to the `tenantKeyCacheTtlMs` option (MT-02) plus 1 s and fails past that bound; the
+       bound comes from config, not a hardcoded sleep.
   6. **Runner (`main.ts`) and hermeticity self-check.** Record `git status --porcelain` and the set of
      `tsdb-e2e-*` containers, start Postgres, and run `deno test -A tests/e2e/platform/suite_test.ts` (plus
      passthrough args) with the connection details in env. Tear down on exit, on failure, and on
@@ -577,4 +623,6 @@ exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy a
 - If MT-08's spike fails: full user auth defers to a later phase; API keys remain the identity story.
 - Per-tenant backup/restore: item 19 covers the single-file path only. No MT item backs up or restores
   per-tenant SQLite files — **deferred** to a follow-up item (per-tenant `snapshot()` → object store, restore
-  by tenant id, retention per tenant).
+  by tenant id, retention per tenant). Until that item lands, `POST /admin/backup/<app>` in `api-key` /
+  `better-auth` mode must refuse (or document legacy-file-only) — it must never report success while tenant
+  data is excluded.

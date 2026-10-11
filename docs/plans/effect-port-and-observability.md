@@ -1102,14 +1102,23 @@ and emits events through `EventSink`, replacing `platform/registry.ts:trace`.
 #### Item 23 — Analysis query catalog and `logs` CLI
 
 - **Scoping:** CONCURRENT with 24, 25.
-- **Model:** **Sonnet / sol.** A fixed list of named SQL queries over the schema frozen in item 21, plus a
-  small CLI. The queries are specified below.
-- **Owns:** `platform/analysis/catalog.ts`, `scripts/logs.ts`, `docs/observability.md`.
-- **Reads:** `core/eventlog/ddl.ts`, `platform/eventlog/*`, `platform/services.ts`.
+- **Model:** **Sonnet / sol.** A fixed list of named SQL queries over item 35's v2 DDL and taxonomy
+  (`event_kind`/`handler_kind`), plus a small CLI. The queries are specified below.
+- **Owns:** `platform/analysis/catalog.ts`, `scripts/logs.ts`, `docs/observability.md`,
+  `scripts/duckdb/event-counts-by-type.sql`, `scripts/duckdb/recent-errors.sql`,
+  `scripts/duckdb/trace-timeline.sql` (the three starters broken by the v1→v2 `kind` drift — they get fixed
+  here so they don't stay ownerless).
+- **Reads:** `core/eventlog/ddl.ts` (item 35's v2 DDL and taxonomy: `event_kind`/`handler_kind` — §4.1 is
+  updated to match; never the item-21-frozen `kind VARCHAR`), `platform/eventlog/*`, `platform/services.ts`.
 - **Work:**
   1. `catalog.ts`: a `Record<name, { sql, params, description }>` of the named queries in §4.3, all
      parameterized, all read-only. `AnalysisLive.run(name, params)` validates the name against the catalog —
-     callers never supply SQL.
+     callers never supply SQL. Fix the v1→v2 drift per the corrected punch list in
+     `docs/haiku-experiments/findings/sq-12.md`: resolve `kind` in all 7 queries (`event-counts-by-type`,
+     `recent-errors`, `trace-timeline`, `error-rate-by-handler`, `handler-throughput`, `trace`, and
+     `k6-vs-platform`); cast `k6_points.tags` to `VARCHAR` in the trace-timeline UNION (the `path` cast is
+     redundant); `date_bin`→`time_bucket` (bucket semantics unverified); add a non-zero-row check or seeded
+     data guaranteeing bucket overlap, since item 23's acceptance requires queries to return rows.
   2. `scripts/logs.ts`: `ingest`, `query <name> [--param k=v] [--format table|json|csv]`, `list`, `sweep`.
      Runs as its own Effect program with the reader-side layer stack.
   3. `docs/observability.md`: the log directory layout, the DuckDB table schemas, each named query with the
@@ -1175,6 +1184,9 @@ and emits events through `EventSink`, replacing `platform/registry.ts:trace`.
     assertions.
   - `deno task perf:smoke && deno task perf:ingest && deno task logs:query k6-vs-platform` returns rows and
     exits 0.
+  - k6 gate (decide the host at run time): `p(95)<160` on the shared VM — host load is recorded per run in
+    `baseline.json` (`work-scripts/bash/k6-baseline.sh` warns on stderr when a run's 1-minute load exceeds the
+    CPU count); `p(95)<60` on a quiet host. Never gate p99 (on a 1-VU 30 s run it rests on ~2 samples).
   - The e2e observability test fails if `EventSinkLive` is swapped for a no-op sink — proving it actually
     asserts on logged data.
   - If DuckDB or k6 cannot be installed in the executing environment, the commit message states exactly which
@@ -1406,7 +1418,7 @@ Neither item edits `deno.json` (§2.2): item 01 wrote it once. Item 28's demos t
 CREATE TABLE IF NOT EXISTS platform_events (
   event_id   VARCHAR, ts TIMESTAMP, level VARCHAR, role VARCHAR, pid INTEGER,
   trace_id   VARCHAR, span_id VARCHAR, parent_span_id VARCHAR,
-  app_id     VARCHAR, kind VARCHAR, name VARCHAR,
+  app_id     VARCHAR, event_kind VARCHAR, handler_kind VARCHAR, name VARCHAR,
   outcome    VARCHAR, error_tag VARCHAR, duration_ms DOUBLE,
   attrs      JSON, source_file VARCHAR, source_offset BIGINT
 );
@@ -1424,7 +1436,7 @@ CREATE TABLE IF NOT EXISTS tx_events (
 );
 CREATE TABLE IF NOT EXISTS http_events (
   ts TIMESTAMP, trace_id VARCHAR, method VARCHAR, path VARCHAR,
-  app_id VARCHAR, kind VARCHAR, name VARCHAR, status INTEGER,
+  app_id VARCHAR, handler_kind VARCHAR, name VARCHAR, status INTEGER,
   duration_ms DOUBLE, bytes_in BIGINT, bytes_out BIGINT, error_tag VARCHAR
 );
 CREATE TABLE IF NOT EXISTS queue_events (
