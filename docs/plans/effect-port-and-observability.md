@@ -1164,8 +1164,11 @@ and emits events through `EventSink`, replacing `platform/registry.ts:trace`.
 
 - **Scoping:** CONCURRENT with 23, 24.
 - **Model:** **Opus / astra.** It is the item that proves the whole phase: a real multi-process run, real
-  DuckDB, real backup/restore, plus correlating k6 client-side latency with server-side event durations by
-  trace id. Diagnosing a failure here requires reasoning across every layer.
+  DuckDB, real backup/restore, plus correlating k6 client-side latency with server-side event durations: k6
+  mints per-request trace IDs (`<vu>-<iter>-<runId>`, sent as `X-Trace-Id`) that scope the server side to the
+  run's requests, and the `k6-vs-platform` join correlates the two sides by 10-second time bucket (client p95
+  > = server p95 per bucket; the difference is transport overhead). Diagnosing a failure here requires
+  > reasoning across every layer.
 - **Owns:** `tests/integration.ts`, `perf/ingest_k6.ts`, `tests/e2e/observability_test.ts`.
 - **Reads:** everything.
 - **Work:**
@@ -1187,6 +1190,9 @@ and emits events through `EventSink`, replacing `platform/registry.ts:trace`.
   - k6 gate (decide the host at run time): `p(95)<160` on the shared VM — host load is recorded per run in
     `baseline.json` (`work-scripts/bash/k6-baseline.sh` warns on stderr when a run's 1-minute load exceeds the
     CPU count); `p(95)<60` on a quiet host. Never gate p99 (on a 1-VU 30 s run it rests on ~2 samples).
+    Throughput-at-fixed-latency (open-model k6, read/write split, per the lx-04 review) is the prescribed
+    methodology for dedicated performance investigations; it is informational, not a merge gate, until a
+    quiet-host CI runner exists.
   - The e2e observability test fails if `EventSinkLive` is swapped for a no-op sink — proving it actually
     asserts on logged data.
   - If DuckDB or k6 cannot be installed in the executing environment, the commit message states exactly which
