@@ -22,7 +22,13 @@
  *   out of the tree is refused by a `realPath` check on each file's parent. One bad path refuses
  *   the *whole* plan before anything is touched, and emits an `error` lifecycle event.
  * - **Today's directory** (and anything dated later) is never in a plan; `validatePlan` re-checks
- *   that independently of `rotation.plan` as defence in depth.
+ *   that independently of `rotation.plan` as defence in depth. A future-dated directory (clock skew,
+ *   a restored backup) is held out of `rotation.plan` entirely and reported as `futureDated`, so it
+ *   can neither be touched nor make `validatePlan` refuse the rest of the sweep.
+ * - **Resolved paths only.** `applyPlan` normalises every planned path with `resolve` and hands
+ *   *only* that to the filesystem and to the lifecycle event. `resolve` is lexical, so a raw
+ *   `LOG_DIR/server/link/../<date>/<file>` that was validated as `LOG_DIR/server/<date>/<file>`
+ *   would otherwise be executed by the OS as "follow `link`, then go up" — somewhere else entirely.
  * - **The open file.** The caller passes the paths its sink holds open (`FileSink.openPath`); they
  *   are moved to `keep` whatever the plan said. This only matters across a date boundary — an open
  *   file is otherwise in today's directory — and only for this process's own sink. A sweep run from
@@ -34,6 +40,15 @@
  *   `<file>.gz`, decompressed and hashed against the source, and only then is the source removed. A
  *   crash at any point leaves the original intact, plus at worst a complete `.gz` that the next
  *   sweep verifies or a `.tmp` that is swept once it is an hour old.
+ * - **Recheck before every destructive step.** Immediately before removing a file (a plain delete, or
+ *   the source after its gzip is verified) its parent directory is `realPath`ed again and must still
+ *   be inside the real `LOG_DIR`, and the file must still be the regular file, size and mtime the
+ *   inventory saw. That closes the window a symlink swap or an append could use between `validatePlan`
+ *   and the delete. (A check-then-unlink race can only be narrowed, not removed, without `openat`.)
+ * - **Durability.** The directory is fsynced after the `.gz` rename and before its source is removed
+ *   (so a crash cannot persist the removal without the rename), and every touched directory is
+ *   fsynced once more when the sweep is done. A filesystem that cannot fsync a directory is skipped,
+ *   not an error.
  * - Anything else in a dated directory (an operator's notes, a subdirectory, a symlink) is never
  *   inventoried or touched, and keeps its directory from being removed.
  *
@@ -46,6 +61,14 @@
  * `platform/eventlog/ingest.ts` matches only `*.jsonl` (`.jsonl.gz` is skipped), so a gzipped file
  * is never ingested. Nothing in this module checks that a file's tail was ingested before gzip; the
  * only protection is the age gap (`gzipAfterDays`, default 7 in config). Item 36 owns closing that.
+ * So this item implements the plan's second option for gzip-vs-ingest: ingest *skips* `.gz`.
+ *
+ * `_ingest_state` pruning is handed off, not done. `ingest.ts` (its `readState` FOLLOW-UP) says item 24
+ * owns deleting a row when its source file leaves the tree, but that table lives in the reader's
+ * single-writer DuckDB file and this module is a file-only sweeper that also runs in the server and
+ * the CLI. It reports exactly which sources it gzipped or deleted (`SweepReport`, the lifecycle
+ * event) and item 36's ingest-then-sweep coordinator, which holds the DuckDB connection, is where
+ * that list is turned into row deletions.
  *
  * ## Scheduling
  *
@@ -54,8 +77,19 @@
  * reported the same way — so a bad day cannot stop tomorrow's sweep. Wiring it into the server's
  * root is item 22's file and not done here.
  *
- * A dry run emits no event: the event sink writes a file, and a dry run must change nothing on
- * disk. The report carries the plan for the caller (the `logs:sweep` CLI, item 23) to print.
+ * A dry run that succeeds emits no event: the event sink writes a file, and a dry run must change
+ * nothing on disk. The report carries the plan for the caller (the `logs:sweep` CLI, item 23) to
+ * print. A dry run that *fails* (unsafe root, unreadable tree, a plan that fails a rail) still emits
+ * its `error` lifecycle event: a refusal is exactly what an operator needs on record, and that
+ * event is the only thing a dry run ever writes.
+ *
+ * ## Events
+ *
+ * One `lifecycle` event per real sweep, phase `retention-sweep` (`warn` if anything was skipped).
+ * A sweep that is interrupted mid-apply emits `retention-sweep-interrupted` instead, with what had
+ * been done so far; a refused or failed one emits `retention-sweep-failed`. Every one of them
+ * carries `gzippedCount`, `deletedCount` and `keptCount` next to its path lists: files gzipped,
+ * files deleted, and inventoried files left exactly as they were.
  */
 import { createHash } from "node:crypto";
 import { dirname, relative, resolve, sep } from "node:path";
@@ -299,7 +333,7 @@ function realPath(path: string): Effect.Effect<string | undefined, RetentionIoEr
 /** A planned action that was not carried out, and why. Not an error: the sweep carries on. */
 export interface SkippedAction {
   readonly path: string;
-  readonly action: "gzip" | "delete" | "rmdir";
+  readonly action: "gzip" | "delete" | "rmdir" | "fsync";
   readonly reason: string;
 }
 
@@ -310,6 +344,8 @@ export interface SweepReport {
   readonly plan: RetentionPlan;
   /** Dated directories the plan would leave empty (and a real sweep removes). */
   readonly emptiedDirs: readonly string[];
+  /** Dated directories newer than today: held out of the plan, never touched, and no obstacle. */
+  readonly futureDated: readonly string[];
   /** What actually happened. All empty on a dry run. */
   readonly gzipped: readonly string[];
   readonly deleted: readonly string[];
@@ -376,11 +412,71 @@ async function changedSince(path: string, entry: FileEntry): Promise<string | un
   return undefined;
 }
 
-/** Returns a skip reason, or `undefined` once `path` is gone. Never throws. */
-async function deleteOne(path: string, entry: FileEntry): Promise<string | undefined> {
+/** What the destructive steps recheck against, taken once after the plan validated. */
+interface Guard {
+  readonly root: string;
+  /** `realPath(root)`, or `undefined` if the root has vanished. */
+  readonly rootReal: string | undefined;
+}
+
+/**
+ * Why `path` may no longer be removed, or `undefined` if it still may: it is not a resolved path,
+ * its parent directory no longer resolves to where the inventory put it (a symlink was swapped in),
+ * or it is no longer the file the inventory saw. Called immediately before each removal.
+ */
+async function recheck(guard: Guard, path: string, entry: FileEntry): Promise<string | undefined> {
+  if (resolve(path) !== path) return "path is not resolved";
+  if (guard.rootReal === undefined) return "log root is gone";
+  let parentReal: string;
   try {
-    const changed = await changedSince(path, entry);
-    if (changed !== undefined) return changed;
+    parentReal = await Deno.realPath(dirname(path));
+  } catch (cause) {
+    if (cause instanceof Deno.errors.NotFound) return "missing";
+    throw cause;
+  }
+  if (parentReal !== resolve(guard.rootReal, relative(guard.root, dirname(path)))) {
+    return "parent directory is not where the inventory found it";
+  }
+  return changedSince(path, entry);
+}
+
+/** `fsync` returns these when a filesystem (or platform) cannot sync a directory at all. */
+const DIR_SYNC_UNSUPPORTED = new Set(["EINVAL", "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EISDIR", "EPERM"]);
+
+/**
+ * fsyncs directory `path` so renames and unlinks inside it are durable. A filesystem or platform
+ * that cannot sync a directory (or a directory that is already gone) is not a problem: `undefined`.
+ * Anything else is an I/O note for the caller to report. Exported for the unit tests.
+ */
+export async function syncDir(path: string): Promise<string | undefined> {
+  const unsupported = (cause: unknown) => {
+    const code = (cause as { code?: unknown } | null)?.code;
+    return cause instanceof Deno.errors.PermissionDenied ||
+      (typeof code === "string" && DIR_SYNC_UNSUPPORTED.has(code));
+  };
+  const note = (cause: unknown) =>
+    unsupported(cause) ? undefined : `io error: ${cause instanceof Error ? cause.message : String(cause)}`;
+  let dir: Deno.FsFile;
+  try {
+    dir = await Deno.open(path, { read: true });
+  } catch (cause) {
+    return cause instanceof Deno.errors.NotFound ? undefined : note(cause);
+  }
+  try {
+    await dir.sync();
+    return undefined;
+  } catch (cause) {
+    return note(cause);
+  } finally {
+    dir.close();
+  }
+}
+
+/** Returns a skip reason, or `undefined` once `path` is gone. Never throws. */
+async function deleteOne(path: string, entry: FileEntry, guard: Guard): Promise<string | undefined> {
+  try {
+    const refused = await recheck(guard, path, entry);
+    if (refused !== undefined) return refused;
     await Deno.remove(path);
     return undefined;
   } catch (cause) {
@@ -388,21 +484,38 @@ async function deleteOne(path: string, entry: FileEntry): Promise<string | undef
   }
 }
 
+/**
+ * The last step of a gzip: removes the source once its `.gz` is verified. The directory is synced
+ * first so the rename cannot be lost while the removal survives, and the path is rechecked
+ * immediately before the unlink, since the gzip and its verification took real time.
+ */
+async function removeVerifiedSource(
+  guard: Guard,
+  path: string,
+  entry: FileEntry,
+): Promise<string | undefined> {
+  const note = await syncDir(dirname(path));
+  if (note !== undefined) return `gzip not durable: ${note}`;
+  const refused = await recheck(guard, path, entry);
+  if (refused !== undefined) return refused;
+  await Deno.remove(path);
+  return undefined;
+}
+
 /** Returns a skip reason, or `undefined` once `<path>.gz` exists, verified, and `path` is gone. */
-async function gzipOne(path: string, entry: FileEntry): Promise<string | undefined> {
+async function gzipOne(path: string, entry: FileEntry, guard: Guard): Promise<string | undefined> {
   const dst = `${path}.gz`;
   const tmp = `${dst}.${Deno.pid}.tmp`;
   try {
-    const changed = await changedSince(path, entry);
-    if (changed !== undefined) return changed;
+    const refused = await recheck(guard, path, entry);
+    if (refused !== undefined) return refused;
     const expected = await digestFile(path);
     if (await exists(dst)) {
       // Left by an interrupted sweep (rename done, source not yet removed). Trust it only if it
       // decompresses to exactly the source; otherwise leave both files for a human.
       const actual = await digestGzip(dst).catch(() => undefined);
       if (actual !== expected) return "a different .gz already exists";
-      await Deno.remove(path);
-      return undefined;
+      return await removeVerifiedSource(guard, path, entry);
     }
     try {
       await compressTo(path, tmp, entry.mtime);
@@ -415,8 +528,7 @@ async function gzipOne(path: string, entry: FileEntry): Promise<string | undefin
       await Deno.remove(dst);
       return "gzip verification failed";
     }
-    await Deno.remove(path);
-    return undefined;
+    return await removeVerifiedSource(guard, path, entry);
   } catch (cause) {
     return `io error: ${cause instanceof Error ? cause.message : String(cause)}`;
   }
@@ -461,12 +573,28 @@ function emitLifecycle(
   });
 }
 
-function emitFailure(role: Role, root: string, error: RetentionError): Effect.Effect<void, never, EventSink> {
+/** What a sweep changed: `kept` is every inventoried file left exactly as it was found. */
+interface Counts {
+  readonly gzippedCount: number;
+  readonly deletedCount: number;
+  readonly keptCount: number;
+}
+
+/** Counts for a failure before anything was inventoried or touched. */
+const NOTHING_DONE: Counts = { gzippedCount: 0, deletedCount: 0, keptCount: 0 };
+
+function emitFailure(
+  role: Role,
+  root: string,
+  error: RetentionError,
+  counts: Counts = NOTHING_DONE,
+): Effect.Effect<void, never, EventSink> {
   const { _tag: errorTag, ...fields } = error;
   return emitLifecycle(role, "error", `${PHASE}-failed`, {
     errorTag,
     root,
     ...fields,
+    ...counts,
     // `cause` is a non-enumerable property on tagged errors and a foreign object besides.
     cause: "cause" in error ? String(error.cause) : undefined,
   });
@@ -489,24 +617,39 @@ export interface ApplyOptions {
 
 /**
  * Validates `plan` against `root` and the inventory, then executes it: delete, then gzip (so a full
- * disk frees space first), then remove emptied dated directories. A path that fails a safety rail
- * refuses the whole plan: an `error` lifecycle event is emitted and `RetentionPathError` returned,
- * with nothing changed. Per-file problems (a file that changed, an I/O error) are skipped and
- * reported, not fatal.
+ * disk frees space first), then remove emptied dated directories, then fsync what was touched. A
+ * path that fails a safety rail refuses the whole plan: an `error` lifecycle event is emitted and
+ * `RetentionPathError` returned, with nothing changed. Per-file problems (a file that changed, an
+ * I/O error) are skipped and reported, not fatal.
  *
- * Emits one `lifecycle` event naming exactly what was gzipped and deleted; none on `dryRun`.
+ * Validation sees the caller's spelling of each path; execution sees only its `resolve`d form, so
+ * what was validated is exactly what is touched and what the events name.
+ *
+ * Emits one `lifecycle` event naming exactly what was gzipped and deleted, with counts. None on a
+ * successful `dryRun` (a failed one still emits its `error` event). If the fiber is interrupted
+ * mid-apply, a `retention-sweep-interrupted` event records the state reached, including the one
+ * file whose operation was in flight; that operation, being crash-safe, may still finish.
  */
 export function applyPlan(
   options: ApplyOptions,
 ): Effect.Effect<SweepReport, RetentionPathError | RetentionIoError, EventSink> {
   const { root, role, today, inventory: inv } = options;
-  const plan = options.plan;
   const rel = (path: string) => relative(root, path).split(sep).join("/");
   const byPath = new Map([...inv.entries, ...inv.partials].map((e) => [e.path, e]));
+  const inventoried = byPath.size;
 
   return Effect.gen(function* () {
-    yield* validatePlan(root, plan, new Set(byPath.keys()), today);
-    const emptied = emptiedDirs(inv.dirs, new Set(plan.delete.map((p) => resolve(p))), today);
+    yield* validatePlan(root, options.plan, new Set(byPath.keys()), today);
+    // From here on only these resolved paths exist: `link/../<date>/<file>` passed validation as
+    // `<date>/<file>`, and the OS must never be given the spelling it would resolve differently.
+    const resolved = (paths: readonly string[]) => [...new Set(paths.map((p) => resolve(p)))].sort();
+    const plan: RetentionPlan = {
+      gzip: resolved(options.plan.gzip),
+      delete: resolved(options.plan.delete),
+      keep: resolved(options.plan.keep),
+    };
+    const emptied = emptiedDirs(inv.dirs, new Set(plan.delete), today);
+    const futureDated = inv.dirs.filter((d) => d.date > today).map((d) => rel(d.path)).sort();
     const reportPlan: RetentionPlan = {
       gzip: plan.gzip.map(rel),
       delete: plan.delete.map(rel),
@@ -518,6 +661,7 @@ export function applyPlan(
         dryRun: true,
         plan: reportPlan,
         emptiedDirs: emptied.map(rel),
+        futureDated,
         gzipped: [],
         deleted: [],
         removedDirs: [],
@@ -525,60 +669,109 @@ export function applyPlan(
       } satisfies SweepReport;
     }
 
+    const guard: Guard = { root, rootReal: yield* realPath(root) };
     const skipped: SkippedAction[] = [];
     const deleted: string[] = [];
     const gzipped: string[] = [];
+    const removedDirs: string[] = [];
+    let inFlight: string | undefined;
+    const counts = (): Counts => ({
+      gzippedCount: gzipped.length,
+      deletedCount: deleted.length,
+      keptCount: inventoried - gzipped.length - deleted.length,
+    });
     const run = (
       action: "gzip" | "delete",
       paths: readonly string[],
-      op: (path: string, entry: FileEntry) => Promise<string | undefined>,
+      op: (path: string, entry: FileEntry, guard: Guard) => Promise<string | undefined>,
       done: string[],
     ) =>
       Effect.forEach(paths, (path) =>
-        Effect.promise(() => op(path, byPath.get(resolve(path))!)).pipe(
+        Effect.promise(() => {
+          inFlight = rel(path);
+          return op(path, byPath.get(path)!, guard);
+        }).pipe(
           Effect.map((reason) => {
+            inFlight = undefined;
             if (reason === undefined) done.push(rel(path));
             else skipped.push({ path: rel(path), action, reason });
           }),
         ), { discard: true });
 
-    yield* run("delete", plan.delete, deleteOne, deleted);
-    yield* run("gzip", plan.gzip, gzipOne, gzipped);
+    const apply = Effect.gen(function* () {
+      yield* run("delete", plan.delete, deleteOne, deleted);
+      yield* run("gzip", plan.gzip, gzipOne, gzipped);
 
-    // Directories empty only because of what we actually deleted, plus any that were already empty.
-    const goneNow = new Set(deleted.map((p) => resolve(root, p)));
-    const removedDirs: string[] = [];
-    yield* Effect.forEach(
-      emptiedDirs(inv.dirs, goneNow, today),
-      (dir) =>
-        Effect.promise(() => removeEmptyDir(dir)).pipe(
-          Effect.map((reason) => {
-            if (reason === undefined) removedDirs.push(rel(dir));
-            else skipped.push({ path: rel(dir), action: "rmdir", reason });
-          }),
-        ),
-      { discard: true },
+      // Directories empty only because of what we actually deleted, plus any that were already empty.
+      const goneNow = new Set(deleted.map((p) => resolve(root, p)));
+      yield* Effect.forEach(
+        emptiedDirs(inv.dirs, goneNow, today),
+        (dir) =>
+          Effect.promise(() => removeEmptyDir(dir)).pipe(
+            Effect.map((reason) => {
+              if (reason === undefined) removedDirs.push(rel(dir));
+              else skipped.push({ path: rel(dir), action: "rmdir", reason });
+            }),
+          ),
+        { discard: true },
+      );
+
+      // Per-file durability was handled in `gzipOne`; this makes the unlinks and rmdirs durable too.
+      const touched = new Set(
+        [...deleted, ...gzipped, ...removedDirs].map((p) => dirname(resolve(root, p))),
+      );
+      yield* Effect.forEach(
+        [...touched].sort(),
+        (dir) =>
+          Effect.promise(() => syncDir(dir)).pipe(
+            Effect.map((reason) => {
+              if (reason !== undefined) skipped.push({ path: rel(dir), action: "fsync", reason });
+            }),
+          ),
+        { discard: true },
+      );
+    }).pipe(
+      Effect.onInterrupt(() =>
+        emitLifecycle(role, "warn", `${PHASE}-interrupted`, {
+          root,
+          interrupted: true,
+          inFlight,
+          gzipped,
+          deleted,
+          removedDirs,
+          skipped,
+          futureDated,
+          ...counts(),
+        })
+      ),
     );
+    yield* apply;
 
     const report: SweepReport = {
       dryRun: false,
       plan: reportPlan,
       emptiedDirs: emptied.map(rel),
+      futureDated,
       gzipped,
       deleted,
       removedDirs,
       skipped,
     };
-    yield* emitLifecycle(role, skipped.length > 0 ? "warn" : "info", PHASE, {
+    yield* emitLifecycle(role, skipped.length > 0 || futureDated.length > 0 ? "warn" : "info", PHASE, {
       root,
       gzipped,
       deleted,
       removedDirs,
       skipped,
+      futureDated,
+      ...counts(),
     });
     return report;
   }).pipe(
-    Effect.tapError((error) => emitFailure(role, root, error)),
+    // A refusal happens before the first change: everything inventoried was kept.
+    Effect.tapError((error) =>
+      emitFailure(role, root, error, { gzippedCount: 0, deletedCount: 0, keptCount: inventoried })
+    ),
   );
 }
 
@@ -588,7 +781,7 @@ export interface SweepOptions {
   readonly policy: RotationPolicy;
   /** The role stamped on the `lifecycle` event: `"server"` for the fiber, `"cli"` for `logs:sweep`. */
   readonly role: Role;
-  /** Plan and validate, but change nothing and emit nothing. */
+  /** Plan and validate, but change nothing. Emits no event unless the sweep fails. */
   readonly dryRun?: boolean;
   /** Paths this process's sink(s) hold open — `FileSink.openPath`. Kept whatever the plan says. */
   readonly openPaths?: Effect.Effect<readonly string[]>;
@@ -613,7 +806,14 @@ export function sweep(
     const today = todayBucket(options.policy, now);
 
     const open = options.openPaths === undefined ? [] : yield* options.openPaths;
-    const railed = applySafetyRails(rotationPlan(inv.entries, now, options.policy), open);
+    // A directory dated after today (clock skew, a restored backup) is not retention's to judge:
+    // `rotation.plan` would let the size cap delete it, `validatePlan` would then refuse the whole
+    // plan, and one stray directory would stop every other file from ever being swept.
+    const future = inv.entries.filter((e) => e.dir > today);
+    const railed = applySafetyRails(
+      rotationPlan(inv.entries.filter((e) => e.dir <= today), now, options.policy),
+      open,
+    );
     // A leftover `.tmp` from a gzip that died is garbage once it is old enough that nothing can
     // still be writing it — except in today's directory, which is never touched.
     const stale = inv.partials
@@ -624,7 +824,11 @@ export function sweep(
     return yield* applyPlan({
       root,
       inventory: inv,
-      plan: { gzip: railed.gzip, delete: toDelete, keep: railed.keep },
+      plan: {
+        gzip: railed.gzip,
+        delete: toDelete,
+        keep: [...railed.keep, ...future.map((e) => e.path)].sort(),
+      },
       today,
       role: options.role,
       dryRun: options.dryRun,

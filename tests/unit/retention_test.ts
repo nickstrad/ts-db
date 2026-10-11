@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { dirname, join, relative } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
-import { Cause, Duration, Effect, Exit, Option, TestClock } from "effect";
+import { Cause, Duration, Effect, Exit, Fiber, Option, TestClock } from "effect";
 import { currentPath, plan as rotationPlan, type RotationPolicy } from "../../core/logging/rotation.ts";
 import type { EventRecord } from "../../core/events.ts";
 import { ConfigTest } from "../../platform/config.ts";
@@ -28,6 +28,7 @@ import {
   RetentionPathError,
   startRetentionSweeper,
   sweep,
+  syncDir,
   validatePlan,
 } from "../../platform/logging/retention.ts";
 import { events } from "../layers/index.ts";
@@ -271,6 +272,12 @@ test("30-day tree: gzips days 2–13, deletes day 14+, keeps today and yesterday
     assert.deepEqual(detail.gzipped, report.gzipped);
     assert.deepEqual(detail.deleted, report.deleted);
     assert.deepEqual(detail.removedDirs, report.removedDirs);
+    assert.deepEqual(detail.futureDated, []);
+    // Counts ride along with the path lists: gzipped, deleted, and everything else left as found.
+    assert.equal(detail.gzippedCount, expectGzipped.length);
+    assert.equal(detail.deletedCount, expectDeleted.length);
+    assert.equal(detail.keptCount, fixtures.length - expectGzipped.length - expectDeleted.length);
+    assert.deepEqual(report.futureDated, []);
   });
 });
 
@@ -342,6 +349,45 @@ test("dry run reports the plan and changes nothing on disk, not even directories
     assert.deepEqual(report.deleted, []);
     assert.deepEqual(report.removedDirs, []);
     assert.deepEqual(emitted, [], "an event sink writes a file; a dry run must not emit");
+  });
+});
+
+test("a dry run that fails still emits its error event, with counts, and changes nothing", async () => {
+  await withTempDir(async (base) => {
+    const root = join(base, "logs");
+    await writeTree(root);
+    const inv = await Effect.runPromise(inventory(root));
+    const before = await snapshot(base);
+
+    const { exit, emitted } = await runEffect(Effect.gen(function* () {
+      yield* TestClock.setTime(NOW.getTime());
+      const exit = yield* Effect.exit(applyPlan({
+        root,
+        inventory: inv,
+        plan: { gzip: [], delete: ["/etc/passwd"], keep: [] },
+        today: TODAY,
+        role: "cli",
+        dryRun: true,
+      }));
+      return { exit, emitted: yield* events };
+    }));
+
+    assert.equal(failureOf(exit) instanceof RetentionPathError, true);
+    const errors = lifecycleEvents(emitted);
+    assert.equal(errors.length, 1);
+    assert.equal(errors[0].level, "error");
+    assert.equal(errors[0].phase, `${PHASE}-failed`);
+    const detail = errors[0].detail as Record<string, unknown>;
+    assert.deepEqual(
+      [detail.gzippedCount, detail.deletedCount, detail.keptCount],
+      [0, 0, inv.entries.length],
+    );
+    assert.deepEqual(await snapshot(base), before);
+
+    // And a dry run refused before it ever reads the tree.
+    const unsafe = await runSweep(sweepOptions("/", { dryRun: true }));
+    assert.equal(failureOf(unsafe.exit) instanceof RetentionPathError, true);
+    assert.equal(lifecycleEvents(unsafe.emitted).length, 1);
   });
 });
 
@@ -461,6 +507,9 @@ test("a planned path outside LOG_DIR refuses the whole plan and emits an error e
       assert.equal(errors.length, 1, path);
       assert.equal((errors[0].detail as Record<string, unknown>).errorTag, "RetentionPathError");
       assert.equal((errors[0].detail as Record<string, unknown>).reason, reason);
+      assert.equal((errors[0].detail as Record<string, unknown>).gzippedCount, 0);
+      assert.equal((errors[0].detail as Record<string, unknown>).deletedCount, 0);
+      assert.equal((errors[0].detail as Record<string, unknown>).keptCount, inv.entries.length);
       assert.deepEqual(await snapshot(base), before, `nothing may change for ${path}`);
     }
     assert.equal(await exists(legit), true);
@@ -486,13 +535,121 @@ test("a file reached through a symlinked parent directory is refused", async () 
   });
 });
 
+test("a `link/..` path acts on the resolved path only, never on what the OS would reach", async () => {
+  await withTempDir(async (base) => {
+    const root = join(base, "logs");
+    const outside = join(base, "outside");
+    const deleteName = "events-09-100-001.jsonl";
+    const gzipName = "events-10-100-001.jsonl";
+    await Deno.mkdir(outside);
+    await Deno.mkdir(join(root, "server"), { recursive: true });
+    // `link` points at `base/outside`, so the OS reads `server/link/..` as `base`, while a lexical
+    // `resolve` reads it as `server` — the two disagree about which `2026-09-01` is meant.
+    await Deno.symlink(outside, join(root, "server", "link"));
+
+    // The in-root files and the look-alikes outside have the same bytes and the same mtime, so
+    // the identity recheck cannot be what saves the outside ones: only acting on the resolved path can.
+    const stamp = new Date(2026, 8, 1, 9, 0, 0);
+    const mine = [
+      join(root, "server", "2026-09-01", deleteName),
+      join(root, "server", "2026-09-02", gzipName),
+    ];
+    const victims = [join(base, "2026-09-01", deleteName), join(base, "2026-09-02", gzipName)];
+    for (const path of [...mine, ...victims]) {
+      await put(path, "precious\n");
+      await Deno.utime(path, stamp, stamp);
+    }
+    const victimsBefore = await snapshot(join(base, "2026-09-01"));
+    const victimsBefore2 = await snapshot(join(base, "2026-09-02"));
+    const inv = await Effect.runPromise(inventory(root));
+    // `join` would collapse the `..`; the whole point is that the string keeps it.
+    const rawDelete = `${root}/server/link/../2026-09-01/${deleteName}`;
+    const rawGzip = `${root}/server/link/../2026-09-02/${gzipName}`;
+
+    const { exit, emitted } = await runEffect(Effect.gen(function* () {
+      yield* TestClock.setTime(NOW.getTime());
+      const exit = yield* Effect.exit(applyPlan({
+        root,
+        inventory: inv,
+        plan: { gzip: [rawGzip], delete: [rawDelete], keep: [] },
+        today: TODAY,
+        role: "cli",
+      }));
+      return { exit, emitted: yield* events };
+    }));
+    const report = succeeded(exit);
+
+    // (a) Nothing outside LOG_DIR was touched.
+    assert.deepEqual(await snapshot(join(base, "2026-09-01")), victimsBefore);
+    assert.deepEqual(await snapshot(join(base, "2026-09-02")), victimsBefore2);
+    assert.equal(await Deno.readTextFile(victims[0]), "precious\n");
+    assert.equal(await exists(`${victims[1]}.gz`), false);
+    assert.deepEqual(await listFiles(outside), []);
+    // The files the validated (resolved) paths name are the ones that were acted on.
+    assert.equal(await exists(mine[0]), false);
+    assert.equal(await exists(mine[1]), false);
+    assert.equal(gunzipSync(await Deno.readFile(`${mine[1]}.gz`)).toString("utf8"), "precious\n");
+
+    // (b) The report and the event record the resolved path, not the `link/..` spelling.
+    const resolvedDelete = `server/2026-09-01/${deleteName}`;
+    const resolvedGzip = `server/2026-09-02/${gzipName}`;
+    assert.deepEqual(report.deleted, [resolvedDelete]);
+    assert.deepEqual(report.gzipped, [resolvedGzip]);
+    assert.deepEqual(report.skipped, []);
+    const lifecycle = lifecycleEvents(emitted);
+    assert.equal(lifecycle.length, 1);
+    const detail = lifecycle[0].detail as Record<string, unknown>;
+    assert.deepEqual(detail.deleted, [resolvedDelete]);
+    assert.deepEqual(detail.gzipped, [resolvedGzip]);
+    assert.ok(!JSON.stringify(detail).includes("link") && !JSON.stringify(detail).includes(".."));
+  });
+});
+
+test("a future-dated directory is held out of the sweep instead of blocking it", async () => {
+  await withTempDir(async (root) => {
+    const fixtures = await writeTree(root);
+    const future = join(root, "server", "2026-10-20", "events-09-100-001.jsonl");
+    await put(future, "from the future\n".repeat(100));
+    // So small a cap that `rotation.plan` reaches the future directory, which it counts as the
+    // newest non-today directory — the case that used to make `validatePlan` refuse everything.
+    const policy = { ...POLICY, maxTotalBytes: 1_000 };
+
+    const { exit, emitted } = await runSweep(sweepOptions(root, { policy }));
+    const report = succeeded(exit);
+
+    assert.equal(await Deno.readTextFile(future), "from the future\n".repeat(100));
+    assert.deepEqual(report.futureDated, ["server/2026-10-20"]);
+    assert.ok(report.plan.keep.includes("server/2026-10-20/events-09-100-001.jsonl"));
+    assert.ok(!report.deleted.includes("server/2026-10-20/events-09-100-001.jsonl"));
+    // The rest of retention still ran: everything past keepDays is gone.
+    for (const f of fixtures.filter((x) => x.age >= POLICY.keepDays)) {
+      assert.equal(await exists(f.path), false, f.path);
+    }
+    const lifecycle = lifecycleEvents(emitted);
+    assert.equal(lifecycle.length, 1);
+    assert.equal(lifecycle[0].level, "warn");
+    assert.deepEqual((lifecycle[0].detail as Record<string, unknown>).futureDated, ["server/2026-10-20"]);
+    // The independent defence in depth is intact: a crafted plan that names it is still refused.
+    const inv = await Effect.runPromise(inventory(root));
+    const refused = await Effect.runPromiseExit(
+      validatePlan(root, { gzip: [], delete: [future] }, new Set(inv.entries.map((e) => e.path)), TODAY),
+    );
+    const error = failureOf(refused);
+    assert.ok(error instanceof RetentionPathError);
+    assert.equal(error.reason, "today-or-future");
+  });
+});
+
 test("an unsafe LOG_DIR is refused before anything is read", async () => {
   for (const logDir of ["/", ""]) {
     const { exit, emitted } = await runSweep(sweepOptions(logDir));
     const error = failureOf(exit);
     assert.ok(error instanceof RetentionPathError);
     assert.equal(error.reason, "root-unsafe");
-    assert.equal(lifecycleEvents(emitted).filter((e) => e.level === "error").length, 1);
+    const errors = lifecycleEvents(emitted).filter((e) => e.level === "error");
+    assert.equal(errors.length, 1);
+    const detail = errors[0].detail as Record<string, unknown>;
+    assert.deepEqual([detail.gzippedCount, detail.deletedCount, detail.keptCount], [0, 0, 0]);
   }
 });
 
@@ -524,6 +681,113 @@ test("a file that changed between inventory and apply is skipped, not touched", 
     assert.equal(await Deno.readTextFile(grew), `${original}one more line\n`);
     assert.equal(await exists(`${grew}.gz`), false);
     assert.equal(await exists(stable), false);
+  });
+});
+
+/** `megabytes` of incompressible bytes: slow enough to gzip that a test can act mid-gzip. */
+async function putRandom(path: string, megabytes: number): Promise<void> {
+  const bytes = new Uint8Array(megabytes * 1024 * 1024);
+  for (let at = 0; at < bytes.length; at += 65_536) crypto.getRandomValues(bytes.subarray(at, at + 65_536));
+  await put(path, bytes);
+}
+
+/** Polls the real filesystem until `ready()` holds; the sweep does real I/O while `TestClock` stands still. */
+const until = (ready: () => Promise<boolean>) =>
+  Effect.gen(function* () {
+    for (let i = 0; i < 5_000; i++) {
+      if (yield* Effect.promise(ready)) return;
+      yield* realPause(2);
+    }
+    return yield* Effect.die("timed out waiting for the filesystem");
+  });
+
+test("gzip rechecks the parent directory just before removing the source", async () => {
+  await withTempDir(async (root) => {
+    const source = join(root, "server", "2026-09-01", "events-09-100-001.jsonl");
+    await putRandom(source, 32);
+    const inv = await Effect.runPromise(inventory(root));
+    const moved = join(root, "server", "2026-09-01.moved");
+
+    const exit = await runEffect(Effect.gen(function* () {
+      yield* TestClock.setTime(NOW.getTime());
+      const fiber = yield* Effect.fork(Effect.exit(applyPlan({
+        root,
+        inventory: inv,
+        plan: { gzip: [source], delete: [], keep: [] },
+        today: TODAY,
+        role: "cli",
+      })));
+      // Mid-gzip: swap the dated directory for a symlink. The open descriptors and the rename
+      // still work, so only the recheck can notice that the path no longer means the same place.
+      yield* until(() => exists(`${source}.gz.${Deno.pid}.tmp`));
+      yield* Effect.promise(async () => {
+        await Deno.rename(dirname(source), moved);
+        await Deno.symlink(moved, dirname(source));
+      });
+      return yield* Fiber.join(fiber);
+    }));
+    const report = succeeded(exit);
+
+    assert.deepEqual(report.gzipped, []);
+    assert.equal(report.skipped.length, 1);
+    assert.equal(report.skipped[0].action, "gzip");
+    assert.equal(report.skipped[0].reason, "parent directory is not where the inventory found it");
+    assert.equal(await exists(join(moved, "events-09-100-001.jsonl")), true, "the source survives");
+  });
+});
+
+test("an interrupted sweep emits an audit event with the state it reached", async () => {
+  await withTempDir(async (root) => {
+    const small = [1, 2, 3].map((n) => join(root, "server", "2026-08-01", `events-0${n}-100-001.jsonl`));
+    for (const path of small) await put(path, "old\n");
+    const big = join(root, "server", "2026-09-01", "events-09-100-001.jsonl");
+    await putRandom(big, 32);
+    const inv = await Effect.runPromise(inventory(root));
+
+    const { emitted } = await runEffect(Effect.gen(function* () {
+      yield* TestClock.setTime(NOW.getTime());
+      const fiber = yield* Effect.fork(applyPlan({
+        root,
+        inventory: inv,
+        plan: { gzip: [big], delete: small, keep: [] },
+        today: TODAY,
+        role: "server",
+      }));
+      // Deletes run first, so a gzip in progress means the three deletes are done.
+      yield* until(() => exists(`${big}.gz.${Deno.pid}.tmp`));
+      yield* Fiber.interrupt(fiber);
+      // The in-flight gzip is crash-safe and not abortable; let it land before the temp dir goes.
+      yield* until(async () => !(await exists(big)));
+      return { emitted: yield* events };
+    }));
+
+    const lifecycle = lifecycleEvents(emitted);
+    assert.equal(lifecycle.length, 1);
+    assert.equal(lifecycle[0].phase, `${PHASE}-interrupted`);
+    assert.equal(lifecycle[0].level, "warn");
+    assert.equal(lifecycle[0].role, "server");
+    const detail = lifecycle[0].detail as Record<string, unknown>;
+    assert.equal(detail.interrupted, true);
+    assert.deepEqual(detail.deleted, small.map((p) => rel(root, p)).sort());
+    assert.deepEqual(detail.gzipped, []);
+    assert.equal(detail.inFlight, rel(root, big));
+    assert.deepEqual(
+      [detail.gzippedCount, detail.deletedCount, detail.keptCount],
+      [0, 3, 1],
+    );
+  });
+});
+
+test("syncDir fsyncs a directory and treats an unsyncable or missing one as fine", async () => {
+  await withTempDir(async (dir) => {
+    assert.equal(await syncDir(dir), undefined);
+    assert.equal(await syncDir(join(dir, "gone")), undefined);
+    await put(join(dir, "f"), "x");
+    assert.equal(await syncDir(join(dir, "f")), undefined);
+    if (Deno.build.os === "linux") {
+      // procfs refuses fsync on its directories with EINVAL: "not supported here", not a failure.
+      assert.equal(await syncDir("/proc/self"), undefined);
+    }
   });
 });
 
