@@ -1,23 +1,28 @@
 -- recent-errors.sql
 --
--- Question: what are the most recent errors, with their detail/attrs, newest first?
--- Table: platform_events (PLANNED SCHEMA — items 21-23 not yet landed).
--- Variables: $limit (row cap, e.g. 100).
+-- Question: what are the most recent errors and warnings, with their detail, newest first?
+-- Table: platform_events.
+-- Variables (optional): row_limit — row cap, default 100.
 --
--- Assumption: `attrs` is the generic JSON payload column from §4.1. core/events.ts notes
--- EventRecord has no `attrs` field today — it carries error payloads in `errorDetail` —
--- and that item 11 should map `errorDetail` -> `attrs` when it populates this table.
+-- Included: every row with an error_tag (failed sql/tx/backup/ingest; a rolled-back tx carries
+-- its tag with outcome 'rollback', not 'error'), plus warn/error-level rows without one — queue
+-- drops/rejections and Effect.logWarning/logError lines (kind lifecycle, name `log`).
+-- `attrs` is errorDetail, or detail for lifecycle records (platform/eventlog/tables.ts).
 
 SELECT
   ts,
-  trace_id,
+  level,
   role,
+  pid,
+  trace_id,
   app_id,
   kind,
   name,
+  outcome,
   error_tag,
   attrs
 FROM platform_events
-WHERE outcome = 'error'
-ORDER BY ts DESC
-LIMIT $limit;
+WHERE error_tag IS NOT NULL
+   OR level IN ('warn', 'error')
+ORDER BY ts DESC, source_file DESC, source_offset DESC
+LIMIT coalesce(getvariable('row_limit')::INTEGER, 100);
