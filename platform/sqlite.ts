@@ -49,8 +49,9 @@
  *
  * At the bottom, `SQLiteWriter` is a COMPATIBILITY WRAPPER with the pre-port constructor and async
  * methods, for the callers this item does not own (`platform/server.ts`, `platform/backup.ts`,
- * `tests/core_test.ts`). It is a thin adapter over `makeStorage`; items 19, 20 and 22 move those
- * callers onto `StorageLive`, and item 26 deletes it.
+ * `tests/core_test.ts`). It is a thin adapter over `makeStorage`; items 19, 20 and 22 moved those
+ * callers onto `StorageLive`. Item 26 left it in place (dead code, zero callers) — removal is a
+ * follow-up.
  */
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import {
