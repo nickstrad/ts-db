@@ -6,52 +6,115 @@ TypeScript control flow (the tic-tac-toe rules) still runs as TypeScript.
 
 ## Verification status
 
-Evidence recorded on 2026-10-11 on this build host (Deno 2.9.5, DuckDB `@duckdb/node-api` 1.5.6-r.1), tree
-`e423ed1` plus the documentation changes of plan item 37. It is a dated snapshot, not a standing claim.
+Item 27 audit on 2026-10-11, based on landed main `643b706`, on this 8 GB VM with Deno 2.9.5 and
+`@duckdb/node-api` 1.5.6-r.1. These are dated observations, not standing guarantees.
 
-| Check                                                                    | Result                                                                                 |
-| ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------- |
-| `deno task fmt:check`, `lint`, `check` (steps of `ci`)                   | passed                                                                                 |
-| `deno task ci` (fmt:check, lint, check, test, test:prop)                 | **passed on the third attempt**; `test` 539 passed, `test:prop` 71 passed, 0 failed    |
-| `deno task test` (full suite, one process)                               | passed on the third run, after two exit-139 runs (native segfault; see below)          |
-| Same unit files and `tests/core_test.ts`, one at a time                  | 26 files, 539 tests passed, 0 failed (one ignored case in `backup_test.ts`)            |
-| `deno task test:prop`                                                    | 71 passed, 0 failed                                                                    |
-| `deno task integration`                                                  | `PASS`: both layouts, DuckDB read-after-write, aggregation, isolation, backup, restore |
-| `trace_e2e_test.ts`, `reader_ingest_test.ts`, `retention_ingest_test.ts` | 1 + 6 + 15 = 22 passed: the real SDK, server, reader child and event-log file          |
-| `python3 docs/architecture/diagrams/render.py --check`                   | all embeds current                                                                     |
+| Command                                                | Evidence in this environment                                                                                                                 |
+| ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `deno task ci`                                         | **PASS on first attempt**: formatting, lint, type checks; 597 unit/service passed, 1 optional S3 case ignored; 79 property passed; 0 failed. |
+| `deno task integration`                                | PASS: both layouts, read-after-write, aggregation, app isolation, backup/restore, HTTP auth, trace JSONL, ingest and analysis.               |
+| `deno task e2e`                                        | **PASS locally**: 7 passed, 0 failed, seed 20261010, skipped=none; 101.75 s including setup/cleanup. MT-10 also landed green at `643b706`.   |
+| `PROP_SEED=20261010 deno task test:prop`               | PASS: 79 passed, 0 failed; explicit default-seed replay (2m20s).                                                                             |
+| `deno task explain > GENERATED_SQL.txt`                | Regenerated; deterministic output checked after committing.                                                                                  |
+| `python3 docs/architecture/diagrams/render.py --check` | Passed for all four diagram pairs (both formats).                                                                                            |
 
-- **Flake, recorded.** A single-process `deno task test` intermittently ends in exit 139 inside the DuckDB
-  native worker; it reproduces on clean `main` without item code. The first two attempts here died that way,
-  so the 26 unit files plus `tests/core_test.ts` were also run one at a time as the interim evidence (539
-  passed, 0 failed). The third attempt completed `deno task ci` end to end. Treat the exit-139 as
-  environmental, and re-run `ci` where it is stable.
-- **Not executed here:** real S3 uploads (`S3_INTEGRATION=1` suites need an S3-compatible endpoint, and
-  `backup_test.ts` skips its real-S3 case without it) and k6 load runs (`deno task perf:*` need the k6 binary
-  and a running server). The unit tests use the local object-store stand-in.
-- **Not present:** the item 23 logs CLI and analysis catalog, and item 25's k6 loader. Their `deno.json` tasks
-  (`logs:*`, `perf:ingest`) fail until those scripts exist.
-- `tests/CORE_TEST_RESULTS.txt` is an older Node 22 run of the first 20 core tests; it is historical.
-- DuckDB native API calls were checked against official documentation and source. `deno.lock` is committed;
-  the package pins `@duckdb/node-api@1.5.6-r.1` and `aws4fetch@1.0.20` in `deno.json`.
+The older Node run in `tests/CORE_TEST_RESULTS.txt` is historical. Earlier full unit runs sometimes exited 139
+in a native DuckDB worker; item 27 records its actual results below rather than borrowing those counts. Real
+S3 cases are not executed: no endpoint/credentials were supplied; the optional backup test is ignored.
+
+Operational examples in this README and [SKIM.md](SKIM.md) (serve, demo, backup curl, restore and alternate
+server configurations) are **not executed individually in item 27**: they need a managed, long-lived server
+and operator-selected files/tokens. The integration and E2E harnesses exercise their underlying paths in
+isolated scratch environments. Performance tasks are **not executed here**: latency thresholds depend on host
+capacity and this VM is shared with other builders. See [perf/README.md](perf/README.md).
+
+Command audit for the read-only [observability guide](docs/observability.md): `logs:ingest`, `logs:list`,
+`logs:sweep` (including `--dry-run`) and its concrete `logs:query` examples are executed against an empty
+scratch event log in item 27 (all exit 0; successful execution with no rows is not evidence of real traffic).
+The placeholder query syntax (`<name>`, `[--param ...]`) is a usage template, not an executable command. Its
+`TRACE_SQL=true bash ... perf:mixed my-run` example is **not executed** because it runs shared-host load
+thresholds; its curl and jq trace pipeline are **not executed** because `$BASE_URL` and a managed
+authenticated server are operator inputs. Its `perf:ingest` example is **not executed** because no fresh k6
+raw-output artifact is produced by this audit. Integration/E2E verify trace and analysis paths; the k6 join
+also has fixture coverage. No live load-performance claim follows from that coverage.
 
 ## Start here to skim
 
-| File                   | What it demonstrates                                                                         |
-| ---------------------- | -------------------------------------------------------------------------------------------- |
-| `app/schema.ts`        | The developer's schema builder: typed fields and indexes.                                    |
-| `app/functions.ts`     | All application code: create/move/delete mutations, reads, grouped statistics. No SQL.       |
-| `sdk/db.ts`            | Document operations become an engine-neutral query plan.                                     |
-| `platform/compiler.ts` | Schema to DDL; query plan to dialect-specific SQL; document writes to SQL; row decoding.     |
-| `platform/sqlite.ts`   | Per-app mutation serialization and SQLite transactions, including mutation-internal reads.   |
-| `platform/duckdb.ts`   | Read-only attachment of the same SQLite file; generated DuckDB queries.                      |
-| `platform/server.ts`   | Server entrypoint: scoped listener, backup and ingest-then-sweep timers, signal shutdown.    |
-| `platform/layers.ts`   | `PlatformLive`: the server's ordered layer chain (config, logging, per-app storage, reader). |
-| `platform/http/`       | Router, auth, handlers, and the `X-Trace-Id` / span contract (`trace.ts`).                   |
-| `platform/reader.ts`   | Reader child entrypoint; its layer root is `platform/reader_layers.ts`.                      |
-| `platform/backup.ts`   | Consistent SQLite snapshot, checksum, immutable object, latest manifest.                     |
+| File                 | What it demonstrates                                                                         |
+| -------------------- | -------------------------------------------------------------------------------------------- |
+| `app/schema.ts`      | The developer's schema builder: typed fields and indexes.                                    |
+| `app/functions.ts`   | All application code: create/move/delete mutations, reads, grouped statistics. No SQL.       |
+| `sdk/db.ts`          | Document operations become an engine-neutral query plan.                                     |
+| `core/compile/`      | Schema to DDL; query plan to dialect-specific SQL; document writes to SQL; row decoding.     |
+| `platform/sqlite.ts` | Per-app mutation serialization and SQLite transactions, including mutation-internal reads.   |
+| `platform/duckdb.ts` | Read-only attachment of the same SQLite file; generated DuckDB queries.                      |
+| `platform/server.ts` | Server entrypoint: scoped listener, backup and ingest-then-sweep timers, signal shutdown.    |
+| `platform/layers.ts` | `PlatformLive`: the server's ordered layer chain (config, logging, per-app storage, reader). |
+| `platform/http/`     | Router, auth, handlers, and the `X-Trace-Id` / span contract (`trace.ts`).                   |
+| `platform/reader.ts` | Reader child entrypoint; its layer root is `platform/reader_layers.ts`.                      |
+| `platform/backup.ts` | Consistent SQLite snapshot, checksum, immutable object, latest manifest.                     |
 
-`GENERATED_SQL.txt` shows actual compiler output for the two layouts and two dialects. `deno task explain`
-regenerates it without running either database engine.
+`GENERATED_SQL.txt` shows actual compiler output for the two layouts and two dialects.
+`deno task explain > GENERATED_SQL.txt` regenerates it without running either database engine.
+
+## Effect services and layers
+
+`core/` holds pure validation, plans, compilation/decoding, tagged errors and event policy. SDK terminal
+operations return `Effect.Effect<_, DbError>`; application handlers compose them with `yield*`.
+`platform/services.ts` declares service tags. `PlatformLive` in `platform/layers.ts` acquires Config, logging,
+IdGen, ObjectStore/AppRegistry, scope-owned TenantRegistry, per-app Storage/Backups, then the ReaderClient
+child. TenantRegistry connects lazily; off mode retains the existing app tokens/files. `Layer.provideMerge`
+orders resource acquisition and finalization. Shutdown drains HTTP, stops timers, closes the reader and SQLite
+handles, then emits the final lifecycle record and drains logging.
+
+The reader has a separate root in `platform/reader_layers.ts`: Config, reader logging, IdGen and
+EventLogIngest. `makeAnalysis` shares the event-log instance for live analysis after ingest. App query readers
+are scoped independently. Writer and reader retain separate native module graphs.
+
+With tenancy enabled, credentials resolve request-local `TenantContext`; client tenant selectors are ignored.
+`TenantStorageRouter` uses `LocalFolderRouter` to prepare validated per-tenant SQLite locations. Each app
+builds a router over the configured tenant directory; trusted tenant id/path travels in reader IPC. Each
+tenant has one schema-guarded file, so incompatible layouts need distinct tenants (as in E2E), or separate
+deployments with separate TENANTS_DIR values. Tenant-mode readers are scoped per request; legacy mode uses the
+app reader pool. Postgres holds tenants, hashed API keys, users, sessions and memberships, not application
+documents. See [platform/auth/README.md](platform/auth/README.md).
+
+## Tasks
+
+Task names below are invoked as `deno task NAME`. Standalone steps of `ci` are executed by that task.
+Operational tasks marked not executed have the reasons in Verification status above.
+
+| Tasks                                                                | Purpose / item-27 execution                                                                               |
+| -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `fmt:check`, `lint`, `check`, `test`, `test:prop`, `ci`              | Format, lint, types, unit/service, property, aggregate gate; executed.                                    |
+| `e2e`                                                                | Seven real-platform scenarios (package.json task); executed separately from ci.                           |
+| `integration`                                                        | Both layouts and real server/reader/backup/log paths; executed.                                           |
+| `explain`                                                            | Compiler artifact; executed, redirect stdout to GENERATED_SQL.txt.                                        |
+| `serve`, `demo`, `restore`                                           | Operator server/client/restore examples; not executed individually.                                       |
+| `logs:ingest`, `logs:list`, `logs:query`, `logs:sweep`               | Offline ingest, catalog, analysis, retention; executed on scratch files.                                  |
+| `perf:smoke`, `perf:load`, `perf:query`, `perf:mixed`, `perf:ingest` | k6 load and point import; not executed.                                                                   |
+| `db:migrate`                                                         | Journaled Postgres migrations; exercised by e2e harness, not separately executed against a persistent DB. |
+
+## Errors and HTTP statuses
+
+`core/errors.ts:toHttpStatus` is exhaustive. Startup `ConfigError`/`SchemaDriftError` stop layer construction;
+CLI and client errors are not served by this table.
+
+| Status | Tags                                                                                                                                                                                              |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 400    | MalformedTenantId, SchemaError, CompileError, RuleError, HandlerKindMismatch                                                                                                                      |
+| 401    | AuthError (also tenant credential refusals, deliberately normalized to auth failure)                                                                                                              |
+| 403    | TenantDeactivated (direct mapping; authentication normalizes deactivated credentials to 401)                                                                                                      |
+| 404    | UnknownTenant, RouteNotFound, UnknownAppError, UnknownHandlerError, NotFoundError, UnknownAnalysisQuery                                                                                           |
+| 409    | ConflictError, BackupAlreadyRunning                                                                                                                                                               |
+| 413    | RequestTooLarge                                                                                                                                                                                   |
+| 500    | DecodeError, ContextExpiredError, NonSerializableResultError, StorageError, ReaderError, QueryWriteAttemptError, InvalidKeyError, BackupError, SnapshotIntegrityError, IngestError, AnalysisError |
+| 502    | IpcError, ReaderExitedError, ObjectStoreError                                                                                                                                                     |
+| 503    | QueueFullError                                                                                                                                                                                    |
+
+The Effect port deliberately changes stale-version conflicts from blanket 400 to **409**, and queue saturation
+to **503**. An overlapping backup is also 409; oversized bodies are 413. A mutation client should refresh
+state after a conflict; retries after load shedding still need application-level idempotency.
 
 ## Minimum process model
 
@@ -103,7 +166,7 @@ deno task demo
 deno task demo tic-tac-toe-json
 
 # Inspect compiler output without database drivers.
-deno task explain
+deno task explain > GENERATED_SQL.txt
 
 # Core tests, API type checks, then the real multi-process integration test.
 deno task test
@@ -152,11 +215,15 @@ otherwise a generated UUID. See "Trace propagation" below for what the server do
 Supported: `get`, `find` with top-level scalar equality, chained `where`, numeric `gt`, `sort`, `limit`,
 `collect`, `first`, `count`, `countBy`; and `insert`, `patch`, `delete` within mutations.
 
-```ts
-await db.find("games", { status: "playing" })
-  .sort("_creationTime", "desc").limit(20).collect();
+Inside a handler with `db` in scope:
 
-await db.find("games", { status: "won" }).countBy("winner");
+```ts
+Effect.gen(function* () {
+  const games = yield* db.find("games", { status: "playing" })
+    .sort("_creationTime", "desc").limit(20).collect();
+  const wins = yield* db.find("games", { status: "won" }).countBy("winner");
+  return { games, wins };
+});
 ```
 
 The first operation produces a plan such as:
@@ -241,24 +308,21 @@ overlapping write.
 
 ## Observability and the event log
 
-Every process writes structured JSONL under `LOG_DIR/<role>/<date>/` (`server` and `reader` roles). The reader
-additionally ingests those files into a derived DuckDB event-log file. This section separates what is
-**available** (code exists), **connected** (mounted in a running process), **tested** (a named test exercises
-the composition) and **target** (not built). Detailed diagrams: `docs/architecture/`.
+Every process writes structured JSONL under `LOG_DIR/<role>/<date>/`. The reader owns ingest, retention and
+live named analysis; the server reaches these through RPC and never imports DuckDB. The standalone `logs:*`
+CLI opens the same derived file between reader writes. DuckDB permits one writer, so use the live admin
+analysis route while the reader owns it. [docs/observability.md](docs/observability.md) describes the schema,
+catalog, parameters and worked examples; [perf/README.md](perf/README.md) describes k6 scenarios and the
+loader into `k6_points`.
 
-| Capability                              | Available | Connected in a running process                                                  | Tested by                                                                        | Target (not built)                                                                   |
-| --------------------------------------- | --------- | ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| JSONL logging, both processes           | yes       | yes: `LoggingLive` (server), `LoggingReaderLive` (reader)                       | `tests/unit/logger_test.ts`, `http_test.ts`                                      |                                                                                      |
-| Event-log ingest into DuckDB            | yes       | yes: reader `ingest` RPC, hourly timer in the server, `POST /admin/logs/ingest` | `tests/unit/reader_ingest_test.ts`, `eventlog_test.ts`                           |                                                                                      |
-| Retention (gzip/delete) after ingest    | yes       | yes: runs inside that same `ingest` RPC, never on its own                       | `tests/unit/retention_ingest_test.ts`, `tests/property/retention_ingest_test.ts` |                                                                                      |
-| Caller trace propagation                | yes       | yes: SDK to server to reader child                                              | `tests/unit/trace_test.ts`, `ipc_test.ts`, `trace_e2e_test.ts`                   |                                                                                      |
-| Named analysis queries, logs CLI        | no        | no: `analysis` answers `UnknownAnalysisQuery` (404)                             |                                                                                  | item 23 (`platform/analysis/catalog.ts`, `scripts/logs.ts`, `docs/observability.md`) |
-| k6 results into the event log           | no        | no                                                                              |                                                                                  | item 25 (`perf/ingest_k6.ts`)                                                        |
-| Event-table pruning / DuckDB compaction | no        | no                                                                              |                                                                                  | a future `logs:compact`                                                              |
-
-`deno.json` declares `logs:ingest`, `logs:query`, `logs:sweep` and `perf:ingest`, but `scripts/logs.ts` and
-`perf/ingest_k6.ts` do not exist yet; those tasks fail until items 23 and 25 land. The only live paths to
-ingest are the ones in the table.
+`LOG_LEVEL=info` is the default; `TRACE_SQL=true` or debug level enables SQL events. Bind values stay hidden
+unless `LOG_INCLUDE_BIND_VALUES=true`. Logging uses a dropping queue (`EVENT_QUEUE_CAPACITY=10000`) and
+batched flushes (`EVENT_FLUSH_MS=250`); shutdown drains the sink. Retention defaults to gzip after 7 days,
+delete after 30 days, 1 GiB total JSONL, and 64 MiB rotation. `LOG_GZIP_AFTER_DAYS`, `LOG_RETENTION_DAYS`,
+`LOG_MAX_TOTAL_BYTES` and `LOG_MAX_FILE_BYTES` control those limits. Only closed, settled, fully ingested
+files with matching committed watermarks may be swept; today's files and pinned tails may exceed the cap.
+Retention does not prune the derived DuckDB file. The hourly ingest-then-sweep timer and admin ingest RPC use
+the same coordinator; dry-run plans from already committed state without writing.
 
 ### Trace propagation (item 34)
 
@@ -275,8 +339,8 @@ ingest are the ones in the table.
   as annotations, so its `sql`/`tx` events and logs share the trace id. Calls made outside any request (the
   startup ping, the ingest timer) send no trace properties and run under the reader's fallback
   `reader-<pid>-<requestId>`. A late reply to a timed-out call is logged under that call's trace.
-- **Not yet joined.** k6 sends `X-Trace-Id` per iteration, but nothing loads k6 output into the event log
-  (item 25), so client-side latency is not joined to server events.
+- **k6 joins.** `perf/ingest_k6.ts` loads raw points into `k6_points`; `k6-vs-platform` compares overlapping
+  time buckets with HTTP events. This is a bucket-level latency comparison, not a one-to-one request join.
 - Tested end to end by `tests/unit/trace_e2e_test.ts` (real SDK, server and reader child).
 
 ### Runtime ingest and retention (items 32, 33, 35, 36)
@@ -361,6 +425,10 @@ upload; replace that path before using large databases. Local `object-store/` is
 
 ## Configuration
 
+The mechanically mirrored options table still carries MT-02’s historical “reserved” description; `api-key` and
+`better-auth` are now implemented as described above. `DATABASE_URL` may also be used by admin tenant
+operations in off mode because the registry is acquired lazily.
+
 `platform/config.ts` is the single env boundary: `ConfigLive` reads every option below once, at layer
 construction, and fails with a typed `ConfigError` rather than at first use. Every option is declared exactly
 once, in `platform/config.ts`'s options table — this section is checked against that table mechanically
@@ -407,24 +475,25 @@ tests.
 
 This is a local, trusted-application prototype. Two database files are not a hostile-tenant security sandbox.
 Handlers are statically registered modules; uploaded code execution, per-tenant process isolation, deployment
-tooling, authenticated end-user identity, row-level authorization, and secret isolation are not implemented.
-`playerId` is supplied by the demo caller, not verified identity. App-level shared bearer tokens are only a
-basic routing/access check. Client mutations have no automatic retry or idempotency key, so a network timeout
-can leave an unknown commit outcome.
+tooling, row-level authorization, and secret isolation are not implemented. Better Auth provides headless
+email/password sessions and single-tenant membership resolution. `playerId` is supplied by the demo caller,
+not verified identity. App-level shared bearer tokens are only a basic routing/access check. Client mutations
+have no automatic retry or idempotency key, so a network timeout can leave an unknown commit outcome.
 
-One writer connection per app and one shared serial reader process are enough to expose the design, not to
-establish capacity. SQLite's synchronous API and snapshot creation can block the API event loop. There are
-queue-size and result-size caps but no complete deadline/cancellation, overload, restart, or
-resource-governance policy. Avoid network I/O or long-running work inside mutation handlers. All long-lived
-processes must remain on one local filesystem; object storage is a backup target, not a mounted live SQLite
-volume.
+Legacy mode uses one writer connection per app; tenancy leases writers from a bounded per-app handle cache.
+Both use one shared serial reader process. This demonstrates the design without establishing capacity.
+SQLite's synchronous API and snapshot creation can block the API event loop. There are queue-size and
+result-size caps but no complete deadline/cancellation, overload, restart, or resource-governance policy.
+Avoid network I/O or long-running work inside mutation handlers. All long-lived processes must remain on one
+local filesystem; object storage is a backup target, not a mounted live SQLite volume.
 
 Reactive subscriptions, automatic dependency tracking, optimistic UI, durable actions/jobs, automatic
-migrations, production authentication, and a full query optimizer are not included. Routing all reads through
-DuckDB demonstrates the requested architecture; it is not a claim that this is faster than SQLite indexed
-point reads. In a later design, the platform could select SQLite for transactional point reads and DuckDB for
-analytical plans without changing the SDK. Benchmark the actual extension's scan/predicate behavior rather
-than assuming every declared SQLite index accelerates every DuckDB query.
+application-schema migrations, a complete production authentication policy, and a full query optimizer are not
+included. Routing all reads through DuckDB demonstrates the requested architecture; it is not a claim that
+this is faster than SQLite indexed point reads. In a later design, the platform could select SQLite for
+transactional point reads and DuckDB for analytical plans without changing the SDK. Benchmark the actual
+extension's scan/predicate behavior rather than assuming every declared SQLite index accelerates every DuckDB
+query.
 
 ## Primary references
 
