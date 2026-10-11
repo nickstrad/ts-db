@@ -41,6 +41,12 @@
  * `Clock` and `IdGen` are captured when the layer is built: `_creationTime` comes from Effect's
  * `Clock` (so `TestClock` drives it) and document ids from `IdGen`.
  *
+ * Text containing U+0000 never crosses this boundary (plan item 31,
+ * `docs/adr/0005-text-storage-contract.md`): `node:sqlite` binds it intact but truncates TEXT at the
+ * NUL on read. Bodies, ids and filter values holding one fail `SchemaError` before their statement
+ * runs, and a read of NUL text stored before the contract fails `StorageError` (see `nulProbe`)
+ * rather than returning the truncated value.
+ *
  * At the bottom, `SQLiteWriter` is a COMPATIBILITY WRAPPER with the pre-port constructor and async
  * methods, for the callers this item does not own (`platform/server.ts`, `platform/backup.ts`,
  * `tests/core_test.ts`). It is a thin adapter over `makeStorage`; items 19, 20 and 22 move those
@@ -52,6 +58,7 @@ import {
   Clock as EffectClock,
   Deferred,
   Effect,
+  Either,
   Exit,
   FiberId,
   HashMap,
@@ -82,12 +89,12 @@ import {
   type TxOutcome,
 } from "../core/events.ts";
 import type { Schema } from "../core/schema.ts";
-import { parseObject } from "../core/schema.ts";
+import { NUL, parseObject, storable } from "../core/schema.ts";
 import { compileDDL } from "../core/compile/ddl.ts";
-import { compileSelect, tableFor } from "../core/compile/select.ts";
+import { compileSelect, fieldNode, tableFor } from "../core/compile/select.ts";
 import { compileDelete, compileInsert, compileReplace } from "../core/compile/write.ts";
 import { decode } from "../core/compile/decode.ts";
-import type { Row, SQL } from "../core/compile/dialect.ts";
+import { literal, quote, type Row, type SQL } from "../core/compile/dialect.ts";
 import { Documents, type Operation, type SelectPlan } from "../sdk/db.ts";
 import type { AnyDefinition } from "../sdk/functions.ts";
 import { formatSchemaError } from "../sdk/schema.ts";
@@ -161,6 +168,57 @@ function errorColumns(cause: Cause.Cause<unknown>): { errorTag?: string; errorDe
     return fromPlatformError(failure as MutationError);
   }
   return { errorTag: "Defect", errorDetail: { message: messageOf(failure) } };
+}
+
+/**
+ * The stored-text probe for one compiled read (`docs/adr/0005-text-storage-contract.md`): a statement
+ * over the same SQL and binds that names the first result column holding U+0000, or returns no row.
+ * Text columns (`_id`, `string`/`enum` fields, a `countBy` group value) are searched with `instr`;
+ * JSON text (`doc`, array fields) with `json_tree`, because the NUL is stored there as a `\u0000`
+ * escape. It asks whether *any* row of the read holds one, so the outer query needs no ordering of its
+ * own; the subquery's `ORDER BY ... LIMIT` still picks the same rows the read returned. `json_tree`
+ * fails on malformed JSON, so a corrupt `doc` or array column (unreachable past the `json_valid`
+ * CHECKs) now surfaces here as a `StorageError` rather than as `decode`'s `malformed-json`.
+ * `undefined` when the read returns no text (`count`).
+ */
+function nulProbe(
+  schema: Schema,
+  plan: SelectPlan,
+  sql: SQL,
+): Either.Either<SQL | undefined, CompileError | SchemaError> {
+  return Either.gen(function* () {
+    const table = yield* tableFor(schema, plan.table);
+    const checks: [string, string][] = [];
+    const text = (name: string, column: string) =>
+      Either.map(quote(column), (c) => checks.push([name, `instr(q.${c}, char(0)) > 0`]));
+    const json = (name: string, column: string) =>
+      Either.map(quote(column), (c) =>
+        checks.push([
+          name,
+          `EXISTS (SELECT 1 FROM json_tree(q.${c}) WHERE type = 'text' AND instr(atom, char(0)) > 0)`,
+        ]));
+    if (plan.aggregate?.kind === "count") return undefined;
+    if (plan.aggregate?.kind === "countBy") {
+      const node = yield* fieldNode(table, plan.aggregate.field);
+      if (node.kind === "string" || node.kind === "enum") yield* text(plan.aggregate.field, "value");
+    } else {
+      yield* text("_id", "_id");
+      if (table.storage === "json") yield* json("doc", "doc");
+      else {
+        for (const [name, { node }] of Object.entries(table.fields)) {
+          if (node.kind === "string" || node.kind === "enum") yield* text(name, name);
+          if (node.kind === "array") yield* json(name, name);
+        }
+      }
+    }
+    if (!checks.length) return undefined;
+    const cases = checks.map(([name, check]) => `WHEN ${check} THEN ${literal(name)}`).join(" ");
+    return {
+      text: `SELECT "field" FROM (SELECT CASE ${cases} END AS "field" FROM (${sql.text}) AS q) ` +
+        'WHERE "field" IS NOT NULL LIMIT 1',
+      values: sql.values,
+    };
+  });
 }
 
 /**
@@ -403,6 +461,7 @@ export function makeStorage(
     const select = (plan: SelectPlan, tx: Tx) =>
       Effect.gen(function* () {
         const sql = yield* compileSelect(schema, plan, "sqlite");
+        for (const filter of plan.filters) yield* storable(filter.value, filter.field);
         const rows = yield* statement(
           "select",
           plan.table,
@@ -412,6 +471,25 @@ export function makeStorage(
           "select",
           live(tx),
         );
+        const probe = rows.length ? yield* nulProbe(schema, plan, sql) : undefined;
+        if (probe) {
+          const hit = yield* statement(
+            "select",
+            plan.table,
+            probe,
+            (s) => s.get(...probe.values),
+            (row) => (row ? 1 : 0),
+            "select",
+            live(tx),
+          );
+          if (hit) {
+            return yield* new StorageError({
+              operation: "select",
+              table: plan.table,
+              detail: `Stored text in "${hit.field}" contains U+0000, which node:sqlite truncates on read`,
+            });
+          }
+        }
         return yield* decode(schema, plan, rows as Row[]);
       });
 
@@ -430,18 +508,22 @@ export function makeStorage(
           return Effect.gen(function* () {
             const id = yield* idGen.next;
             const now = yield* clock.currentTimeMillis;
-            yield* write(
-              "insert",
-              op.table,
-              yield* compileInsert(schema, op.table, op.value, { _id: id, _creationTime: now }),
-              live(tx),
-            );
+            const sql = yield* compileInsert(schema, op.table, op.value, { _id: id, _creationTime: now });
+            yield* storable(op.value, "");
+            if (id.includes(NUL)) {
+              return yield* new StorageError({
+                operation: "insert",
+                table: op.table,
+                detail: "IdGen produced an _id containing U+0000",
+              });
+            }
+            yield* write("insert", op.table, sql, live(tx));
             return id;
           });
         case "patch":
           return Effect.gen(function* () {
             const table = yield* tableFor(schema, op.table);
-            const patch = yield* parseObject(table.fields, op.value, true);
+            const patch = yield* storable(yield* parseObject(table.fields, op.value, true), "");
             const found = yield* select({
               kind: "select",
               table: op.table,
@@ -461,7 +543,9 @@ export function makeStorage(
           });
         case "delete":
           return Effect.gen(function* () {
-            yield* write("delete", op.table, yield* compileDelete(schema, op.table, op.id), live(tx));
+            const sql = yield* compileDelete(schema, op.table, op.id);
+            yield* storable(op.id, "_id");
+            yield* write("delete", op.table, sql, live(tx));
             return null;
           });
       }

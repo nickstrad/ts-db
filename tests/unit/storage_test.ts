@@ -9,6 +9,9 @@
  * The two behaviours the pre-port writer did not have get the most attention: an interrupted
  * mutation fiber rolls its transaction back and leaves the connection usable, and the writer queue
  * rejects job 1001 with a typed `QueueFullError` instead of an untyped rejection.
+ *
+ * The last section (plan item 31) shows where the U+0000 text storage contract is enforced, from the
+ * events: before the statement on writes, and by a second, guarded select on reads.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -598,6 +601,96 @@ test("a failing statement emits an error sql event and a StorageError", async ()
       const [sql] = ofKind(h.events, "sql");
       assert.deepEqual([sql.outcome, sql.errorTag, sql.level], ["error", "StorageError", "warn"]);
       assert.equal(ofKind(h.events, "tx")[0].outcome, "rollback");
+    })
+  );
+});
+
+// ---------------------------------------------------------------------------
+// The text storage contract (plan item 31, docs/adr/0005-text-storage-contract.md)
+//
+// `tests/unit/nul_contract_test.ts` covers the contract on all four backends; these two tests read
+// the live layer's events to show *where* it is enforced.
+// ---------------------------------------------------------------------------
+
+const newGame = (xPlayer: string) => ({
+  xPlayer,
+  oPlayer: "b",
+  board: Array(9).fill(null),
+  turn: "X" as const,
+  status: "playing" as const,
+  winner: null,
+});
+
+test("a U+0000 rejection runs no statement for the rejected write and rolls back the earlier ones", async () => {
+  await withStorageLayer((storage, h) =>
+    Effect.gen(function* () {
+      h.events.length = 0;
+      const twoInserts = app.mutation({
+        args: {},
+        handler: ({ db }) =>
+          Effect.gen(function* () {
+            yield* db.insert("games", newGame("a"));
+            return yield* db.insert("games", newGame("a\u0000b"));
+          }),
+      });
+      const failure = failureOf(yield* Effect.exit(storage.mutation(twoInserts, {})));
+      assert.deepEqual(
+        { ...(failure as object) },
+        {
+          _tag: "SchemaError",
+          reason: "type-mismatch",
+          path: "xPlayer",
+          expected: "text without U+0000",
+          actual: "a\u0000b",
+        },
+      );
+      // Only the first insert reached SQLite; the transaction then rolled it back.
+      assert.deepEqual(ofKind(h.events, "sql").map((e) => e.statementKind), ["insert"]);
+      const [tx] = ofKind(h.events, "tx");
+      assert.deepEqual([tx.outcome, tx.operations, tx.errorTag], ["rollback", 2, "SchemaError"]);
+      const state = (yield* storage.mutation(inspect, {})) as { games: unknown[] };
+      assert.equal(state.games.length, 0);
+    })
+  );
+});
+
+test("a read of pre-existing U+0000 text fails StorageError via a second, guarded select", async () => {
+  await withStorageLayer((storage, h) =>
+    Effect.gen(function* () {
+      const { gameId } = (yield* storage.mutation(functions.createGame, { xPlayer: "a", oPlayer: "b" })) as {
+        gameId: string;
+      };
+      // What a pre-contract build could have committed: SQLite holds all three bytes.
+      const side = new DatabaseSync(h.file);
+      side.prepare('UPDATE "games" SET "xPlayer" = ? WHERE "_id" = ?').run("a\u0000b", gameId);
+      side.close();
+      const read = (definition: Parameters<StorageService["mutation"]>[0]) =>
+        Effect.gen(function* () {
+          h.events.length = 0;
+          const exit = yield* Effect.exit(storage.mutation(definition, {}));
+          return { exit, sql: ofKind(h.events, "sql") };
+        });
+
+      const get = app.mutation({ args: {}, handler: ({ db }) => db.get("games", gameId) });
+      const { exit, sql } = yield* read(get);
+      assert.deepEqual({ ...(failureOf(exit) as object) }, {
+        _tag: "StorageError",
+        operation: "select",
+        table: "games",
+        detail: 'Stored text in "xPlayer" contains U+0000, which node:sqlite truncates on read',
+      });
+      assert.deepEqual(sql.map((e) => [e.statementKind, e.outcome]), [["select", "ok"], ["select", "ok"]]);
+      assert.match(sql[1].sqlText, /instr\(q\."xPlayer", char\(0\)\) > 0/);
+      assert.equal(sql[1].rowCount, 1, "the probe found the stored NUL");
+      assert.equal(ofKind(h.events, "tx")[0].errorTag, "StorageError");
+
+      // No rows, or no text in the result: no probe.
+      const none = app.mutation({ args: {}, handler: ({ db }) => db.get("games", "absent") });
+      assert.deepEqual((yield* read(none)).sql.length, 1);
+      const count = app.mutation({ args: {}, handler: ({ db }) => db.find("games").count() });
+      const counted = yield* read(count);
+      assert.ok(Exit.isSuccess(counted.exit) && counted.exit.value === 1);
+      assert.equal(counted.sql.length, 1);
     })
   );
 });

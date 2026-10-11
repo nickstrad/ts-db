@@ -44,15 +44,24 @@
  * thing restore cannot give: `ReaderTest` reading the same store never sees an uncommitted write,
  * exactly as DuckDB never sees an uncommitted SQLite transaction.
  *
+ * ## The text storage contract
+ *
+ * U+0000 follows `docs/adr/0005-text-storage-contract.md` exactly as live does, in the same order:
+ * bodies, ids and filter values holding one fail `SchemaError` (`core/schema.ts`'s `storable`) after
+ * the compiler's own checks; an `IdGen` id holding one fails the insert with `StorageError`; and a
+ * Storage read whose rows carry stored NUL text (only reachable by planting documents in
+ * `MemoryStore.state`, as a pre-contract database would hold them) fails `StorageError` (operation
+ * `select`) before decoding — the live layer's stored-text probe. `MemoryStore.select`, which
+ * `ReaderTest` uses, has no such probe: the DuckDB reader reads NUL text losslessly.
+ *
  * ## Known divergences (live-side bugs, not semantics to copy)
  *
- * The first two were found by item 13's oracle (`tests/property/sqlite_oracle_test.ts`, known
- * issues 1 and 2); the third is the same class of finding, filed here alongside them because the
- * oracle's generators never produce a lone surrogate.
+ * Item 13's oracle (`tests/property/sqlite_oracle_test.ts`) found two live-side bugs that are now
+ * resolved: `json`-layout numbers at or above 2^53 (item 30's `CAST(... AS REAL)`), and U+0000
+ * truncation (item 31's contract, above). One divergence remains. It is the same class of finding,
+ * filed here because the oracle's generators never produce a lone surrogate. It keeps its old number,
+ * 3, because `tests/core_test.ts` pins it as "known divergence 3".
  *
- * 1. `json` layout, `number` field holding an integral double with 2^53 <= |x| < 2^63: SQLite reads
- *    the stored text back as an exact INTEGER, so `eq x` misses the row. Here it matches.
- * 2. Text containing U+0000: `node:sqlite` truncates it on read. Here it round-trips.
  * 3. Text containing a lone surrogate (e.g. `"a\uD800b"`): `node:sqlite` binds strings as UTF-8,
  *    which replaces it with U+FFFD. In the `columns` layout a scalar text column reads back as
  *    `"a�b"` (and `eq "a\uD800b"` still matches, since the bound filter is replaced the same way);
@@ -84,7 +93,7 @@ import {
   type SchemaError,
   StorageError,
 } from "../../core/errors.ts";
-import { type Node, parseObject, type Schema, type Table } from "../../core/schema.ts";
+import { type Node, NUL, parseObject, type Schema, storable, type Table } from "../../core/schema.ts";
 import { normalise } from "../../core/plan.ts";
 import { compileDDL } from "../../core/compile/ddl.ts";
 import { compileSelect, encode, fieldNode, tableFor } from "../../core/compile/select.ts";
@@ -196,6 +205,16 @@ export function evaluateSelect(
   plan: SelectPlan,
   dialect: Dialect = "sqlite",
 ): Either.Either<unknown, SelectError> {
+  return Either.flatMap(selectRows(schema, contents, plan, dialect), (rows) => decode(schema, plan, rows));
+}
+
+/** `evaluateSelect` up to the engine rows, before `decode`: what the driver would have returned. */
+function selectRows(
+  schema: Schema,
+  contents: StoreContents,
+  plan: SelectPlan,
+  dialect: Dialect,
+): Either.Either<Row[], SelectError> {
   return Either.gen(function* () {
     yield* compileSelect(schema, plan, dialect);
     const table = yield* tableFor(schema, plan.table);
@@ -243,8 +262,26 @@ export function evaluateSelect(
         .slice(0, limit)
         .map((doc) => rowOf(table, doc));
     }
-    return yield* decode(schema, plan, rows);
+    return rows;
   });
+}
+
+/**
+ * The live stored-text probe over the rows a read returned: the first column holding U+0000, either
+ * as raw text or, in the JSON text of `doc` and array columns, as an escape. A `countBy` group value
+ * is named by its field, as live names it. `undefined` when there is none.
+ */
+function storedNul(table: Table, plan: SelectPlan, rows: readonly Row[]): string | undefined {
+  const json = (column: string) =>
+    column === "doc" ? table.storage === "json" : table.fields[column]?.node.kind === "array";
+  for (const row of rows) {
+    for (const [column, value] of Object.entries(row)) {
+      if (typeof value !== "string") continue;
+      if (Either.isRight(storable(json(column) ? JSON.parse(value) : value, column))) continue;
+      return plan.aggregate?.kind === "countBy" ? plan.aggregate.field : column;
+    }
+  }
+  return undefined;
 }
 
 /** Every committed document of every table, as a read decodes it, ordered by `_id`. */
@@ -414,10 +451,32 @@ export function makeStorageTest(
       tx.working = HashMap.set(tx.working, table, docs);
     };
 
+    /**
+     * A read inside a mutation, in live's order: the compiler's checks, then the filter values
+     * (`storable`), then the stored-text probe over the rows the driver would return, then `decode`.
+     */
+    const read = (working: StoreContents, plan: SelectPlan): Either.Either<unknown, ExecuteError> =>
+      Either.gen(function* () {
+        yield* compileSelect(schema, plan, "sqlite");
+        for (const filter of plan.filters) yield* storable(filter.value, filter.field);
+        const table = yield* tableFor(schema, plan.table);
+        const column = storedNul(table, plan, yield* selectRows(schema, working, plan, "sqlite"));
+        if (column !== undefined) {
+          return yield* Either.left(
+            new StorageError({
+              operation: "select",
+              table: plan.table,
+              detail: `Stored text in "${column}" contains U+0000, which node:sqlite truncates on read`,
+            }),
+          );
+        }
+        return yield* evaluate(schema, working, plan, "sqlite");
+      });
+
     const execute = (op: Operation, tx: Tx): Effect.Effect<unknown, ExecuteError> => {
       switch (op.kind) {
         case "select":
-          return step(tx, () => evaluate(schema, tx.working, op, "sqlite"));
+          return step(tx, () => read(tx.working, op));
         case "insert":
           return Effect.gen(function* () {
             // Same order as live: id and clock first, so a rejected insert still spends an id.
@@ -428,6 +487,16 @@ export function makeStorageTest(
                 yield* compileInsert(schema, op.table, op.value, { _id: id, _creationTime: now });
                 const table = yield* tableFor(schema, op.table);
                 const body = yield* parseObject(table.fields, op.value);
+                yield* storable(op.value, ""); // the input, as live checks it, so paths agree
+                if (id.includes(NUL)) {
+                  return yield* Either.left(
+                    new StorageError({
+                      operation: "insert",
+                      table: op.table,
+                      detail: "IdGen produced an _id containing U+0000",
+                    }),
+                  );
+                }
                 const docs = documentsOf(tx.working, op.table);
                 if (docs.some((doc) => doc._id === id)) {
                   return yield* Either.left(
@@ -446,9 +515,9 @@ export function makeStorageTest(
           return step(tx, () =>
             Either.gen(function* () {
               const table = yield* tableFor(schema, op.table);
-              const patch = yield* parseObject(table.fields, op.value, true);
+              const patch = yield* storable(yield* parseObject(table.fields, op.value, true), "");
               // The live path reads the old row through a compiled select, which also validates the id.
-              const found = (yield* evaluate(schema, tx.working, {
+              const found = (yield* read(tx.working, {
                 kind: "select",
                 table: op.table,
                 filters: [{ field: "_id", op: "eq", value: op.id }],
@@ -475,6 +544,7 @@ export function makeStorageTest(
           return step(tx, () =>
             Either.gen(function* () {
               yield* compileDelete(schema, op.table, op.id);
+              yield* storable(op.id, "_id");
               const docs = documentsOf(tx.working, op.table);
               if (docs.some((doc) => doc._id === op.id)) {
                 replaceTable(tx, op.table, docs.filter((doc) => doc._id !== op.id));
