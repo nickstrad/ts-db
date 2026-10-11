@@ -57,6 +57,7 @@ import { DatabaseSync, type StatementSync } from "node:sqlite";
 import {
   Cause,
   Clock as EffectClock,
+  Context,
   Deferred,
   Effect,
   Either,
@@ -102,6 +103,8 @@ import type { AnyDefinition } from "../sdk/functions.ts";
 import { formatSchemaError } from "../sdk/schema.ts";
 import { ConfigTest } from "./config.ts";
 import { Config, EventSink, type EventSinkService, IdGen, Storage, type StorageService } from "./services.ts";
+
+import { TenantContext, type TenantId, TenantStorageRouter } from "./tenants/routing.ts";
 
 /** Jobs admitted to the writer queue at once, running plus waiting. Unchanged from the pre-port cap. */
 export const WRITER_QUEUE_CAP = 1000;
@@ -226,8 +229,9 @@ function nulProbe(
  * Builds the service inside the caller's scope. Requires `EventSink`, `IdGen` and `Config`; reads
  * `Clock` from the running fiber once, here.
  */
-export function makeStorage(
+function makeSingleStorage(
   options: StorageOptions,
+  open?: () => DatabaseSync,
 ): Effect.Effect<
   StorageService,
   StorageError | SchemaDriftError | CompileError | SchemaError,
@@ -268,7 +272,7 @@ export function makeStorage(
     // The handle exists before anything can fail, so every later startup failure closes it.
     const database = yield* Effect.acquireRelease(
       Effect.try({
-        try: () => new DatabaseSync(file),
+        try: () => open ? open() : new DatabaseSync(file),
         catch: (cause) => new StorageError({ operation: "open", detail: messageOf(cause), cause }),
       }),
       (db) =>
@@ -631,6 +635,155 @@ export function makeStorage(
         ),
     };
     return service;
+  });
+}
+
+/** Tenant handle cache controls; limits apply to open handles, including leased handles. */
+export interface TenantCacheOptions {
+  readonly capacity?: number;
+  readonly idleMs?: number;
+}
+
+/** Startup chooses the mode exactly once. Enabled tenancy never falls back to options.file. */
+export function makeStorage(
+  options: StorageOptions,
+  cacheOptions: TenantCacheOptions = {},
+): Effect.Effect<
+  StorageService,
+  StorageError | SchemaDriftError | CompileError | SchemaError,
+  Scope.Scope | EventSink | IdGen | Config
+> {
+  return Effect.gen(function* () {
+    const config = yield* Config;
+    if (config.tenancy.mode === "off") return yield* makeSingleStorage(options);
+    const selected = yield* Effect.serviceOption(TenantStorageRouter);
+    const failure = (detail: string, cause?: unknown) =>
+      new StorageError({ operation: "open", detail, cause });
+    if (Option.isNone(selected)) return yield* failure("TenantStorageRouter is required in tenancy mode");
+    const router = selected.value;
+    const capacity = cacheOptions.capacity ?? 64;
+    const idleMs = cacheOptions.idleMs ?? 60_000;
+    if (!Number.isSafeInteger(capacity) || capacity < 1 || !Number.isFinite(idleMs) || idleMs <= 0) {
+      return yield* failure("Invalid tenant cache limits");
+    }
+    // Pick at runtime: a narrowed context type alone still contains the parent Scope.
+    const deps = Context.pick(EventSink, IdGen, Config)(yield* Effect.context<EventSink | IdGen | Config>());
+    const clock = yield* Effect.clock;
+    const lock = yield* Effect.makeSemaphore(1);
+    interface Entry {
+      readonly storage: StorageService;
+      readonly scope: Scope.CloseableScope;
+      leases: number;
+      idleSince: number;
+    }
+    const entries = new Map<TenantId, Entry>();
+    let changed = yield* Deferred.make<void>();
+    let closing = false;
+    const signal = Effect.gen(function* () {
+      const previous = changed;
+      changed = yield* Deferred.make<void>();
+      yield* Deferred.succeed(previous, undefined);
+    });
+    const remove = (id: TenantId, entry: Entry) =>
+      Effect.uninterruptible(Effect.gen(function* () {
+        entries.delete(id);
+        yield* Scope.close(entry.scope, Exit.void);
+      }));
+    const sweep = lock.withPermits(1)(Effect.gen(function* () {
+      for (const [id, entry] of entries) {
+        if (entry.leases === 0 && clock.unsafeCurrentTimeMillis() - entry.idleSince >= idleMs) {
+          yield* remove(id, entry);
+        }
+      }
+      yield* signal;
+    }));
+    // Shutdown refuses new leases, then drains active operations before closing any handle.
+    yield* Effect.addFinalizer(() =>
+      Effect.gen(function* () {
+        yield* lock.withPermits(1)(Effect.gen(function* () {
+          closing = true;
+          yield* signal;
+        }));
+        while (true) {
+          const wait = yield* lock.withPermits(1)(Effect.gen(function* () {
+            for (const [id, entry] of entries) if (entry.leases === 0) yield* remove(id, entry);
+            return entries.size === 0 ? undefined : changed;
+          }));
+          if (!wait) break;
+          yield* Deferred.await(wait);
+        }
+      })
+    );
+    yield* Effect.forkScoped(Effect.forever(Effect.zipRight(Effect.sleep(idleMs), sweep)));
+
+    const acquire = (restore: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>) =>
+      Effect.gen(function* () {
+        const context = yield* Effect.serviceOption(TenantContext);
+        if (Option.isNone(context)) return yield* failure("Missing TenantContext in tenancy mode");
+        const id = context.value.tenantId;
+        while (true) {
+          const result = yield* lock.withPermits(1)(Effect.gen(function* () {
+            if (closing) return yield* failure("Tenant storage is closing");
+            const cached = entries.get(id);
+            if (cached) {
+              cached.leases++;
+              return { entry: cached };
+            }
+            if (entries.size >= capacity) {
+              let oldest: [TenantId, Entry] | undefined;
+              for (const candidate of entries) {
+                if (candidate[1].leases === 0 && (!oldest || candidate[1].idleSince < oldest[1].idleSince)) {
+                  oldest = candidate;
+                }
+              }
+              if (!oldest) return { wait: changed };
+              yield* remove(...oldest);
+            }
+            // The lock covers publication as well as opening: concurrent first requests share one handle.
+            const scope = yield* Scope.make();
+            const opened = yield* Effect.exit(Effect.gen(function* () {
+              const location = yield* router.resolve(id);
+              yield* router.prepare(location);
+              return yield* makeSingleStorage({ ...options, file: location.path }, location.open).pipe(
+                Effect.provide(deps),
+                Effect.provideService(Scope.Scope, scope),
+              );
+            }));
+            if (Exit.isFailure(opened)) {
+              yield* Scope.close(scope, opened);
+              yield* signal;
+              return yield* failure("Tenant storage open failed", Cause.squash(opened.cause));
+            }
+            const entry: Entry = { storage: opened.value, scope, leases: 1, idleSince: 0 };
+            entries.set(id, entry);
+            return { entry };
+          }));
+          if (result.entry) return result.entry;
+          yield* restore(Deferred.await(result.wait!));
+        }
+      });
+    const use = <A, E>(
+      run: (storage: StorageService) => Effect.Effect<A, E>,
+    ): Effect.Effect<A, E | StorageError> =>
+      Effect.uninterruptibleMask((restore) =>
+        Effect.gen(function* () {
+          // Waiting for capacity remains interruptible. Once acquired, install release before restoring use.
+          const entry = yield* acquire(restore);
+          return yield* restore(run(entry.storage)).pipe(
+            Effect.ensuring(
+              lock.withPermits(1)(Effect.gen(function* () {
+                entry.leases--;
+                entry.idleSince = clock.unsafeCurrentTimeMillis();
+                yield* signal;
+              })),
+            ),
+          );
+        })
+      );
+    return {
+      mutation: (definition, args) => use((storage) => storage.mutation(definition, args)),
+      snapshot: (path) => use((storage) => storage.snapshot(path)),
+    };
   });
 }
 
