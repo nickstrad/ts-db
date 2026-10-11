@@ -21,24 +21,30 @@
  *
  * Runs against real `node:sqlite`; `numRuns: 50`, each with up to six plans, to keep it fast.
  *
- * **Known issues the oracle found, excluded from its documents** (sweeping 200 seeds, ~10 000
- * scenarios; each is pinned by an opt-in regression test at the bottom of this file, run with
- * `ORACLE_KNOWN_ISSUES=1 deno task test:prop`, which fails until the issue is fixed):
+ * **What the oracle found** (sweeping 200 seeds, ~10 000 scenarios). Both findings are resolved, and
+ * their regressions at the bottom of this file run in the default suite:
  *
  * 1. `json` layout, `number` field holding an integral double with 2^53 <= |x| < 2^63. The writer
- *    stores `JSON.stringify(x)`, the shortest decimal that round-trips *in JS* (`1693240866440448800`
- *    for the double 1693240866440448768). SQLite's `json_extract` reads that text as an exact 64-bit
- *    INTEGER, which is not the double, so `eq x` silently misses the row; and reading the field
- *    (`countBy`) returns an INTEGER beyond 2^53, on which `node:sqlite` raises a `RangeError`. The
- *    `columns` layout (REAL) is correct. A compiler-side fix is a `CAST(... AS REAL)` around
- *    SQLite's `json_extract` for `number` nodes, mirroring DuckDB's `DOUBLE` cast.
- * 2. Text containing U+0000. Deno's `node:sqlite` binds it intact but returns TEXT truncated at the
- *    first NUL, so `_id: "\0"` reads back as `""`. A driver issue, not a compiler one.
+ *    stores `JSON.stringify(x)` (`1693240866440448800` for the double 1693240866440448768), which
+ *    SQLite's `json_extract` read as an exact 64-bit INTEGER: `eq x` missed the row and `countBy`
+ *    returned an INTEGER that `node:sqlite` refuses beyond 2^53. Fixed by item 30's
+ *    `CAST(... AS REAL)` for `number` nodes; regressions 1a and 1b. The generated documents include
+ *    such numbers again.
+ * 2. Text containing U+0000. `node:sqlite` binds it intact but returns TEXT truncated at the first
+ *    NUL, so `_id: "\0"` read back as `""`. A driver issue, resolved by item 31's text storage
+ *    contract (`docs/adr/0005-text-storage-contract.md`): `Storage` rejects such text before commit
+ *    and fails a read of older stored NUL text instead of truncating it. Regression 2 asserts that
+ *    through the real `StorageLive`. The generated documents still exclude U+0000: this oracle runs
+ *    compiled SQL directly, beneath the Storage boundary where the contract is enforced.
  */
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { Effect } from "effect";
 import fc from "fast-check";
-import { type Node, type Schema, Table } from "../../core/schema.ts";
+import { type Node, NUL, type Schema, Table } from "../../core/schema.ts";
 import type { SelectPlan } from "../../core/plan.ts";
 import type { SQL } from "../../core/compile/dialect.ts";
 import { compileDDL } from "../../core/compile/ddl.ts";
@@ -58,6 +64,9 @@ import {
   validPlanArb,
 } from "./compiler_arbitraries.ts";
 import { titled } from "./arbitraries.ts";
+import { makeStorage } from "../../platform/sqlite.ts";
+import { defineFunctions } from "../../sdk/functions.ts";
+import { runTest } from "../helpers/run.ts";
 
 // ---------------------------------------------------------------------------
 // Reference implementation
@@ -159,18 +168,11 @@ function applyMutations(inserted: readonly Doc[], mutations: readonly Mutation[]
 }
 
 /**
- * Whether a document holds a value in one of the known-issue classes above: a top-level string (or
- * the `_id`) containing U+0000, or a top-level `number` that SQLite's JSON parser would read as an
- * INTEGER beyond 2^53. Array items are exempt: arrays travel as JSON text and are decoded by
- * `JSON.parse`, never by SQLite.
+ * Whether a document holds text the storage contract refuses: a top-level string containing U+0000
+ * (finding 2). Array items need no check: arrays travel as JSON text, which escapes the NUL.
  */
-function knownIssue(table: Table, doc: Record<string, unknown>): boolean {
-  return Object.entries(doc).some(([field, value]) => {
-    if (typeof value === "string") return value.includes("\u0000");
-    const node = table.fields[field]?.node;
-    return table.storage === "json" && node?.kind === "number" && typeof value === "number" &&
-      Number.isInteger(value) && Math.abs(value) >= 2 ** 53 && Math.abs(value) < 2 ** 63;
-  });
+function outsideContract(doc: Record<string, unknown>): boolean {
+  return Object.values(doc).some((value) => typeof value === "string" && value.includes(NUL));
 }
 
 /** Small pools for ids and times, so ties on `_creationTime` happen and `_id` must break them. */
@@ -179,8 +181,8 @@ const timeArb = fc.oneof(fc.integer({ min: 0, max: 3 }), fc.integer({ min: 0, ma
 
 const scenario: fc.Arbitrary<Scenario> = fc.tuple(tableName, tableArb()).chain(([name, table]) => {
   const schema: Schema = { [name]: table };
-  const body = bodyArb(table).filter((b) => !knownIssue(table, b));
-  const doc = fc.record({ _id: idArb.filter((id) => !id.includes("\u0000")), _creationTime: timeArb, body });
+  const body = bodyArb(table).filter((b) => !outsideContract(b));
+  const doc = fc.record({ _id: idArb.filter((id) => !id.includes(NUL)), _creationTime: timeArb, body });
   return fc.uniqueArray(doc, { selector: (d) => d._id, maxLength: 12 }).chain((rows) => {
     const inserted: Doc[] = rows.map(({ _id, _creationTime, body }) => ({
       ...body,
@@ -246,10 +248,8 @@ Deno.test(titled("oracle: compiled selects on real SQLite return what the plan m
 });
 
 // ---------------------------------------------------------------------------
-// Known issues found by the oracle (opt-in; each fails until its issue is fixed)
+// Regressions for what the oracle found (default suite; no opt-in)
 // ---------------------------------------------------------------------------
-
-const knownIssues = { ignore: !Deno.env.get("ORACLE_KNOWN_ISSUES") };
 
 /** Runs one plan against a fresh database holding `bodies`, returning the decoded result. */
 function runOne(table: Table, bodies: Record<string, unknown>[], plan: SelectPlan): unknown {
@@ -271,51 +271,87 @@ function runOne(table: Table, bodies: Record<string, unknown>[], plan: SelectPla
 const bigNumber = new Table({ n: { node: { kind: "number" } } }, "json");
 const big = 1693240866440448800; // the double 1693240866440448768; its shortest decimal is not
 
-Deno.test({
-  ...knownIssues,
-  name: "oracle known issue 1a: json layout, eq on a number field holding an integral double >= 2^53",
-  fn: () => {
-    const plan: SelectPlan = {
-      kind: "select",
-      table: "t",
-      filters: [{ field: "n", op: "eq", value: big }],
-      limit: 10,
-    };
-    assert.deepStrictEqual(runOne(bigNumber, [{ n: big }], plan), [{
-      n: big,
-      _id: "id0",
-      _creationTime: 0,
-      _version: 1,
-    }]);
-  },
+Deno.test("oracle regression 1a: json layout, eq on a number field holding an integral double >= 2^53", () => {
+  const plan: SelectPlan = {
+    kind: "select",
+    table: "t",
+    filters: [{ field: "n", op: "eq", value: big }],
+    limit: 10,
+  };
+  assert.deepStrictEqual(runOne(bigNumber, [{ n: big }], plan), [{
+    n: big,
+    _id: "id0",
+    _creationTime: 0,
+    _version: 1,
+  }]);
 });
 
-Deno.test({
-  ...knownIssues,
-  name: "oracle known issue 1b: json layout, countBy over a number field holding 2^53",
-  fn: () => {
-    const plan: SelectPlan = {
-      kind: "select",
-      table: "t",
-      filters: [],
-      limit: 10,
-      aggregate: { kind: "countBy", field: "n" },
-    };
-    assert.deepStrictEqual(runOne(bigNumber, [{ n: 2 ** 53 }], plan), [{ value: 2 ** 53, count: 1 }]);
-  },
+Deno.test("oracle regression 1b: json layout, countBy over a number field holding 2^53", () => {
+  const plan: SelectPlan = {
+    kind: "select",
+    table: "t",
+    filters: [],
+    limit: 10,
+    aggregate: { kind: "countBy", field: "n" },
+  };
+  assert.deepStrictEqual(runOne(bigNumber, [{ n: 2 ** 53 }], plan), [{ value: 2 ** 53, count: 1 }]);
 });
 
-Deno.test({
-  ...knownIssues,
-  name: "oracle known issue 2: node:sqlite truncates TEXT at U+0000 on read",
-  fn: () => {
-    const table = new Table({ s: { node: { kind: "string" } } }, "columns");
-    const plan: SelectPlan = { kind: "select", table: "t", filters: [], limit: 10 };
-    assert.deepStrictEqual(runOne(table, [{ s: "a\u0000b" }], plan), [{
-      s: "a\u0000b",
-      _id: "id0",
-      _creationTime: 0,
-      _version: 1,
-    }]);
-  },
-});
+/**
+ * Regression 2, through the real `StorageLive` rather than raw compiled SQL: text with U+0000 is
+ * rejected before commit, and the same text written the way this file used to write it (compiled SQL,
+ * beneath Storage) fails the read rather than coming back truncated. The full matrix — positions, ids,
+ * patch, both `Storage` implementations — is `tests/unit/nul_contract_test.ts`.
+ */
+for (const layout of ["columns", "json"] as const) {
+  runTest(
+    `oracle regression 2: U+0000 text is rejected before commit, never read back truncated (${layout})`,
+    Effect.gen(function* () {
+      const schema: Schema = { t: new Table({ s: { node: { kind: "string" } } }, layout) };
+      const dir = yield* Effect.acquireRelease(
+        Effect.sync(() => mkdtempSync(join(tmpdir(), "ts-db-oracle-"))),
+        (dir) => Effect.sync(() => rmSync(dir, { recursive: true, force: true })),
+      );
+      const file = join(dir, "app.sqlite");
+      const storage = yield* makeStorage({ file, schema });
+      const app = defineFunctions(schema);
+      const all = app.mutation({
+        args: {},
+        handler: ({ db }) => db.find("t").collect(),
+      });
+      const insertBoth = app.mutation({
+        args: {},
+        handler: ({ db }) =>
+          Effect.gen(function* () {
+            yield* db.insert("t", { s: "ok" });
+            return yield* db.insert("t", { s: "a\u0000b" });
+          }),
+      });
+
+      const rejected = yield* Effect.flip(storage.mutation(insertBoth, {}));
+      assert.deepStrictEqual({ ...rejected }, {
+        _tag: "SchemaError",
+        reason: "type-mismatch",
+        path: "s",
+        expected: "text without U+0000",
+        actual: "a\u0000b",
+      });
+      assert.deepStrictEqual(yield* storage.mutation(all, {}), [], "the earlier insert rolled back too");
+
+      // The old bypass: `_id: "\0"` and `s: "a\0b"` committed beneath Storage, as before item 31.
+      const db = new DatabaseSync(file);
+      try {
+        const sql = rightOf(compileInsert(schema, "t", { s: "a\u0000b" }, { _id: NUL, _creationTime: 0 }));
+        db.prepare(sql.text).run(...sql.values);
+        assert.equal(db.prepare('SELECT "_id" FROM "t"').get()?._id, "", "the driver truncates");
+      } finally {
+        db.close();
+      }
+      const stored = yield* Effect.flip(storage.mutation(all, {}));
+      assert.deepStrictEqual(
+        [stored._tag, (stored as { operation?: string }).operation, (stored as { table?: string }).table],
+        ["StorageError", "select", "t"],
+      );
+    }),
+  );
+}

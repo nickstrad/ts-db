@@ -14,7 +14,9 @@ import {
   defineTable,
   identifier,
   type Node,
+  NUL,
   parseObject,
+  storable,
   Table,
   v,
   validate,
@@ -311,6 +313,67 @@ Deno.test("defineSchema: rejects _-prefixed and sqlite_-prefixed table names in 
   // `sqlite_` is reserved only as a prefix.
   assert.equal(Object.keys(expectRight(defineSchema({ not_sqlite_master: games }))).length, 1);
   assert.equal(expectLeft(defineSchema({ "bad name": games })).reason, "invalid-identifier");
+});
+
+// ---------------------------------------------------------------------------
+// The text storage contract (plan item 31, docs/adr/0005-text-storage-contract.md)
+// ---------------------------------------------------------------------------
+
+Deno.test("names: table, field and index names holding U+0000 fail the identifier rule", () => {
+  for (const name of [`${NUL}a`, `a${NUL}b`, `a${NUL}`]) {
+    assert.equal(expectLeft(identifier(name)).reason, "invalid-identifier");
+    assert.equal(expectLeft(defineTable({ [name]: v.string() })).path, name);
+    assert.equal(expectLeft(defineSchema({ [name]: new Table({}) })).reason, "invalid-identifier");
+    assert.equal(expectLeft(new Table({ s: v.string() }).addIndex(name, ["s"])).reason, "invalid-identifier");
+  }
+});
+
+Deno.test("defineTable: rejects an enum member holding U+0000, directly or inside arrays", () => {
+  for (
+    const field of [
+      v.enum("ok", "b\u0000"),
+      v.nullable(v.enum("\u0000")),
+      v.array(v.array(v.enum("ok", "x\u0000"))),
+    ]
+  ) {
+    const error = expectLeft(defineTable({ status: field }));
+    assertMismatch(error, "status", "enum values without U+0000");
+    assert.ok(String(error.actual).includes(NUL));
+  }
+  assert.ok(
+    Either.isRight(defineTable({ status: v.enum("ok", "\\u0000", "\u0001") })),
+    "near misses are members",
+  );
+});
+
+Deno.test("validate: U+0000 is still a valid string; storage refusal is storable's job", () => {
+  assert.equal(expectRight(validate({ kind: "string" }, `a${NUL}b`, "s")), `a${NUL}b`);
+  assert.deepEqual(expectRight(parseObject({ s: v.string() }, { s: NUL })), { s: NUL });
+});
+
+Deno.test("storable: rejects the first string holding U+0000 at validate's path, leading, interior or trailing", () => {
+  for (const text of [`${NUL}abc`, `a${NUL}bc`, `abc${NUL}`, NUL]) {
+    assertMismatch(expectLeft(storable(text, "_id")), "_id", "text without U+0000");
+    assert.equal(expectLeft(storable(text, "_id")).actual, text);
+    assertMismatch(expectLeft(storable({ name: "ok", note: text }, "")), "note", "text without U+0000");
+    assertMismatch(expectLeft(storable({ tags: ["ok", text] }, "")), "tags[1]", "text without U+0000");
+    assertMismatch(
+      expectLeft(storable({ grid: [[], ["ok", text]] }, "")),
+      "grid[1][1]",
+      "text without U+0000",
+    );
+    assertMismatch(expectLeft(storable(["x", text], "board")), "board[1]", "text without U+0000");
+  }
+  // The first NUL in walk order wins.
+  assert.equal(expectLeft(storable({ a: "ok", b: [NUL], c: NUL }, "")).path, "b[0]");
+});
+
+Deno.test("storable: passes every value without U+0000 through unchanged, by reference", () => {
+  const body = { name: "\\u0000", note: null, n: 0, flag: false, tags: ["", "\u0001", "é日😀"], grid: [[]] };
+  assert.equal(expectRight(storable(body, "")), body);
+  for (const value of [null, undefined, 0, NaN, true, "", "\u0001", [], {}]) {
+    assert.equal(expectRight(storable(value, "x")), value);
+  }
 });
 
 Deno.test("Table.addIndex: accepts scalar fields and leaves the receiver unchanged", () => {

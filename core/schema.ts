@@ -16,6 +16,9 @@
  * `integer` requires `Number.isSafeInteger`, an `array` with a declared `length` must match it
  * exactly and is validated element-wise, unknown object keys are rejected, and `partial` mode
  * (document patches) skips absent keys instead of validating `undefined`.
+ *
+ * `storable` is the one storage rule layered on top (plan item 31, `docs/adr/0005-text-storage-contract.md`):
+ * text bound for SQLite must not contain U+0000. `validate` itself still accepts it.
  */
 import { Either } from "effect";
 import { SchemaError } from "./errors.ts";
@@ -111,14 +114,30 @@ export function identifier(name: string): Either.Either<string, SchemaError> {
   return Either.right(name);
 }
 
-/** Declares a table. Field names must be identifiers, and `_`-prefixed names are reserved for metadata. */
+/**
+ * Declares a table. Field names must be identifiers, and `_`-prefixed names are reserved for metadata.
+ * An enum member may not contain U+0000: no value of it could be stored (see `storable`).
+ */
 export function defineTable<F extends Fields>(fields: F): Either.Either<Table<F>, SchemaError> {
-  for (const name of Object.keys(fields)) {
+  for (const [name, field] of Object.entries(fields)) {
     const named = identifier(name);
     if (Either.isLeft(named)) return Either.left(named.left);
     if (name.startsWith("_")) {
       return Either.left(
         new SchemaError({ reason: "reserved-field", path: name, expected: "unreserved name" }),
+      );
+    }
+    let node: Node | undefined = field.node;
+    while (node?.kind === "array") node = node.item;
+    const member = node?.values?.find((value) => value.includes(NUL));
+    if (member !== undefined) {
+      return Either.left(
+        new SchemaError({
+          reason: "type-mismatch",
+          path: name,
+          expected: "enum values without U+0000",
+          actual: member,
+        }),
       );
     }
   }
@@ -209,6 +228,49 @@ export function validate(node: Node, value: unknown, path: string): Either.Eithe
     );
   }
   return Either.right(value);
+}
+
+/** U+0000, the one character the text storage contract refuses (`docs/adr/0005-text-storage-contract.md`). */
+export const NUL = "\u0000";
+
+/** The first string inside `value` that holds U+0000, with its path; arrays and objects are walked. */
+function firstNul(value: unknown, path: string): { path: string; text: string } | undefined {
+  if (typeof value === "string") return value.includes(NUL) ? { path, text: value } : undefined;
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      const found = firstNul(value[i], `${path}[${i}]`);
+      if (found) return found;
+    }
+  } else if (value !== null && typeof value === "object") {
+    for (const [key, item] of Object.entries(value)) {
+      const found = firstNul(item, path ? `${path}.${key}` : key);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The text storage contract (`docs/adr/0005-text-storage-contract.md`): text that would be written to
+ * SQLite or compared against it must not hold U+0000, because `node:sqlite` truncates TEXT at the
+ * first NUL on read. Walks strings, arrays and plain objects — a document body (`path` `""`, so its
+ * keys are the paths), an array value, an id or a filter value — and rejects the first such string
+ * with a `type-mismatch` at `validate`'s path (`tags[2]`). Anything else passes unchanged.
+ *
+ * Deliberately separate from `validate`: U+0000 is a valid `string`, so handler arguments and reader
+ * filters accept it. Only the Storage boundary applies this check.
+ */
+export function storable<A>(value: A, path: string): Either.Either<A, SchemaError> {
+  const found = firstNul(value, path);
+  if (found === undefined) return Either.right(value);
+  return Either.left(
+    new SchemaError({
+      reason: "type-mismatch",
+      path: found.path,
+      expected: "text without U+0000",
+      actual: found.text,
+    }),
+  );
 }
 
 /**
