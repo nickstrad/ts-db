@@ -12,7 +12,7 @@ cv = Canvas(width=72, height=48)
 SRV, RDR = 17, 54   # centres of the left (server) and right (reader) columns
 BACKUP = 6          # left-hand routing channel for the backup path
 
-client_bottom = cv.box(2, 3, 30, [
+client_bottom = cv.box(0, 3, 30, [
     "Typed client SDK",
     "[library, caller process]",
     "",
@@ -22,7 +22,7 @@ client_bottom = cv.box(2, 3, 30, [
     "name + X-Trace-Id, no SQL.",
 ], bottom=(14,))
 
-row = cv.down(client_bottom + 1, SRV, "(1)")
+row = cv.down(client_bottom + 1, SRV, "(1)", rows=4)
 
 server_bottom = cv.box(row, 3, 30, [
     "Server process",
@@ -32,7 +32,7 @@ server_bottom = cv.box(row, 3, 30, [
     "HTTP API, auth, mutation",
     "handlers, one SQLite",
     "writer per app, backup",
-    "timer. Never opens DuckDB.",
+    "fiber. No DuckDB.",
 ], bottom=(3, 14), right=(3,))
 reader_bottom = cv.box(row, 40, 30, [
     "Reader process",
@@ -51,7 +51,7 @@ cv.down(reader_bottom + 1, RDR, "(4)", rows=server_bottom - reader_bottom + 2)
 
 sqlite_bottom = cv.box(server_bottom + 3, 10, 60, [
     "App SQLite files     [SQLite 3, WAL mode, STRICT tables]",
-    "data/<appId>.sqlite  (+ -wal, -shm)",
+    "<DATA_DIR>/<appId>.sqlite  (+ -wal, -shm)",
     "",
     "One file per app: tic-tac-toe (columns layout) and",
     "tic-tac-toe-json (one doc TEXT column). The schema",
@@ -60,7 +60,8 @@ sqlite_bottom = cv.box(server_bottom + 3, 10, 60, [
 
 # The backup path leaves the server, passes the SQLite files, and exits the boundary.
 frame_bottom = sqlite_bottom + 2
-cv.frame(0, 0, frame_bottom, 71, "Document DB platform - one host, one local filesystem")
+cv.frame(row - 3, 0, frame_bottom, 71, "Platform host")
+cv.g[row - 3][SRV] = "┬"
 
 cv.put(server_bottom + 1, BACKUP + 2, "(5)")
 cv.channel(server_bottom + 1, frame_bottom, BACKUP)

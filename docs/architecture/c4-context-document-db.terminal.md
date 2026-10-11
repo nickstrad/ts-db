@@ -1,27 +1,26 @@
 # C4 Level 1 — System Context: the Document DB platform
 
-Terminal rendering, for `glow docs/architecture/c4-context-document-db.terminal.md`. The same diagram as
-Mermaid, for GitHub: [`c4-context-document-db.github.md`](c4-context-document-db.github.md).
+Renderings: [GitHub](c4-context-document-db.github.md) · [terminal](c4-context-document-db.terminal.md).
 
 ## What this shows
 
 The platform as a single box, the people who use it, and the systems outside it. Everything inside the box is
-expanded at Level 2 (`c4-container-platform.terminal.md`).
+expanded at [Level 2](c4-container-platform.github.md).
 
-Dashed boxes labelled `planned` do not exist on `main` yet; they come from
-`docs/plans/effect-port-and-observability.md`. Solid boxes are built today.
+The actors and tools shown are available today. Planned k6 analysis tooling is called out in the relationship
+key; it is not part of the running service.
 
 <!-- c4-render: diagrams/c4-context-document-db.py -->
 
 ```text
-┌────────────────────┐  ┌────────────────────┐  ┌┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┐
-│ App developer      │  │ Player             │  ┆ Platform operator  ┆
-│ [Person]           │  │ [Person]           │  ┆ [Person] (planned) ┆
-│                    │  │                    │  ┆                    ┆
-│ declares a schema  │  │ plays tic-tac-toe  │  ┆ triggers backups;  ┆
-│ and the handlers   │  │ via the sample app │  ┆ runs named log     ┆
-│ in app/; runs it   │  │ or the CLI demo    │  ┆ analysis queries   ┆
-└──────────┬─────────┘  └──────────┬─────────┘  └┄┄┄┄┄┄┄┄┄┄┬┄┄┄┄┄┄┄┄┄┘
+┌────────────────────┐  ┌────────────────────┐  ┌────────────────────┐
+│ App developer      │  │ Player             │  │ Platform operator  │
+│ [Person]           │  │ [Person]           │  │ [Person]           │
+│                    │  │                    │  │                    │
+│ declares a schema  │  │ plays tic-tac-toe  │  │ triggers backups;  │
+│ and the handlers   │  │ via the sample app │  │ inspects logs with │
+│ in app/; runs it   │  │ or the CLI demo    │  │ offline SQL tools  │
+└──────────┬─────────┘  └──────────┬─────────┘  └──────────┬─────────┘
            │ (1)                   │ (2)                   │ (3)
            ▼                       ▼                       ▼
 ┌──────────┬───────────────────────┬───────────────────────┬─────────┐
@@ -34,28 +33,26 @@ Dashed boxes labelled `planned` do not exist on `main` yet; they come from
 └──────────┬───────────────────────┬───────────────────────┬─────────┘
            │ (4)                   │ (5)                   ▲ (6)
            ▼                       ▼                       │
-┌──────────┬─────────┐  ┌┄┄┄┄┄┄┄┄┄┄┬┄┄┄┄┄┄┄┄┄┐  ┌──────────┬─────────┐
-│ S3-compatible      │  ┆ DuckDB analytics   ┆  │ k6 load generator  │
-│ object storage     │  ┆ consumer           ┆  │ [External system]  │
-│ [External system]  │  ┆ [External] planned ┆  │                    │
-│                    │  ┆                    ┆  │ k6 v0.56.0; smoke, │
-│ immutable snapshot │  ┆ any DuckDB client  ┆  │ mutation, query,   │
-│ + manifest objects │  ┆ on eventlog.duckdb ┆  │ mixed (03 and 14)  │
-└────────────────────┘  └┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┘  └────────────────────┘
+┌──────────┬─────────┐  ┌──────────┬─────────┐  ┌──────────┬─────────┐
+│ S3-compatible      │  │ DuckDB analytics   │  │ k6 load generator  │
+│ object storage     │  │ consumer           │  │ [External system]  │
+│ [External system]  │  │ [External system]  │  │                    │
+│                    │  │                    │  │ k6 v0.56.0; smoke, │
+│ immutable snapshot │  │ SQL on JSONL;      │  │ mutation, query,   │
+│ + manifest objects │  │ tables post-ingest │  │ mixed (03 and 14)  │
+└────────────────────┘  └────────────────────┘  └────────────────────┘
 ```
 
 ## Relationships
 
-| # | From                        | To                                  | What travels over it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| - | --------------------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 1 | App developer               | Document DB platform                | Declares the schema in `app/schema.ts` and the handlers in `app/functions.ts`, then runs `deno task serve`. Handlers are statically registered modules — there is no code upload path.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| 2 | Player                      | Document DB platform                | `POST /apps/<appId>/<query\|mutation>/<name>` with a JSON argument object and a per-app bearer token. Body cap 64 KiB. Never SQL.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| 3 | Platform operator (planned) | Document DB platform                | `POST /admin/backup/<appId>` with the admin token today; `POST /admin/logs/ingest` and `deno task logs:query <name>` once items 22–23 land.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| 4 | Document DB platform        | S3-compatible object storage        | `VACUUM INTO` snapshot → `PRAGMA quick_check` → SHA-256 → PUT the snapshot, PUT its manifest, and only then PUT `apps/<appId>/latest.json`. `scripts/restore.ts` reads the same objects back.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| 5 | Document DB platform        | DuckDB analytics consumer (planned) | Item 21 landed the idempotent ingest: the reader process materialises the rotating JSONL event log into the persistent DuckDB file named by `EVENTLOG_DUCKDB` (default `<DATA_DIR>/eventlog.duckdb`, fixed by `platform/config.ts` in item 08; the plan's §4.1 layout `logs/duckdb/events.duckdb` was reconciled to it) — `platform/eventlog/ingest.ts` over pure planning in `core/eventlog/offsets.ts` and DDL in `core/eventlog/ddl.ts`. Any DuckDB client can read those append-only tables. The starter `.sql` files in `scripts/duckdb/` are written against that schema; only `log-level-distribution.sql`, which reads the JSONL files directly, runs without the event log. |
-| 6 | k6 load generator           | Document DB platform                | Load scenarios against the same HTTP API. The k6 binary and `perf/smoke.js` landed with plan item 03; the mutation/query/mixed scenarios landed with item 14. The `X-Trace-Id` header is sent per iteration (`${__VU}-${__ITER}-${runId}`, via `perf/lib/api.js`); joining client-side latency to server-side event durations is planned in item 25.                                                                                                                                                                                                                                                                                                                                 |
-
-Edge 6 points **into** the platform, which is why its arrowhead sits against the platform box.
+| # | From                 | To                           | What travels over it                                                                                                                                                                                                                                                                                                                                 |
+| - | -------------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1 | App developer        | Document DB platform         | Declares the schema in `app/schema.ts` and the handlers in `app/functions.ts`, then runs `deno task serve`. Handlers are statically registered modules — there is no code upload path.                                                                                                                                                               |
+| 2 | Player               | Document DB platform         | `POST /apps/<appId>/<query\|mutation>/<name>` with a JSON argument object and a per-app bearer token. Default body cap 64 KiB (configurable). Never SQL.                                                                                                                                                                                             |
+| 3 | Platform operator    | Document DB platform         | `POST /admin/backup/<appId>` with the admin token. The admin ingest and analysis routes exist, but the reader returns `IngestError` (500) and `UnknownAnalysisQuery` (404). The logs CLI and catalog are absent.                                                                                                                                     |
+| 4 | Document DB platform | S3-compatible object storage | `VACUUM INTO` snapshot → `PRAGMA quick_check` → SHA-256 → PUT the snapshot, PUT its manifest, and only then PUT `apps/<appId>/latest.json`. `scripts/restore.ts` reads the same objects back.                                                                                                                                                        |
+| 5 | Document DB platform | DuckDB analytics consumer    | Offline SQL in `scripts/duckdb/`: `log-level-distribution.sql` reads JSONL directly; the other queries need a populated event-log file. Item 21 implements `EventLogIngestLive`, but the running reader does not mount it. `EVENTLOG_DUCKDB` defaults to `<DATA_DIR>/eventlog.duckdb`.                                                               |
+| 6 | k6 load generator    | Document DB platform         | Load scenarios against the same HTTP API. The k6 binary and `perf/smoke.js` landed with plan item 03; the mutation/query/mixed scenarios landed with item 14. The `X-Trace-Id` header is sent per iteration (`${__VU}-${__ITER}-${runId}`, via `perf/lib/api.js`); joining client-side latency to server-side event durations is planned in item 25. |
 
 ## Notes on scope
 

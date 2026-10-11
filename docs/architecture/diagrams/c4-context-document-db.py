@@ -30,12 +30,12 @@ cv.box(0, 24, 22, [
 ], bottom=(11,))
 cv.box(0, 48, 22, [
     "Platform operator",
-    "[Person] (planned)",
+    "[Person]",
     "",
     "triggers backups;",
-    "runs named log",
-    "analysis queries",
-], planned=True, bottom=(11,))
+    "inspects logs with",
+    "offline SQL tools",
+], bottom=(11,))
 
 cv.down(8, C1, "(1)")
 cv.down(8, C2, "(2)")
@@ -66,11 +66,11 @@ cv.box(row, 0, 22, [
 cv.box(row, 24, 22, [
     "DuckDB analytics",
     "consumer",
-    "[External] planned",
+    "[External system]",
     "",
-    "any DuckDB client",
-    "on eventlog.duckdb",
-], planned=True, top=(11,))
+    "SQL on JSONL;",
+    "tables post-ingest",
+], top=(11,))
 cv.box(row, 48, 22, [
     "k6 load generator",
     "[External system]",
