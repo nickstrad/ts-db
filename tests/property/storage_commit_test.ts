@@ -43,7 +43,7 @@ import { StorageLive } from "../../platform/sqlite.ts";
 import { defineFunctions } from "../../sdk/functions.ts";
 import { defineSchema, defineTable, v } from "../../sdk/schema.ts";
 import { IdGenTest, StorageTest } from "../layers/index.ts";
-import { NUM_RUNS, titled } from "./arbitraries.ts";
+import { NUM_RUNS, replayCommand, SEED, titled } from "./arbitraries.ts";
 
 // ---------------------------------------------------------------------------
 // Schema, functions and backends
@@ -396,7 +396,10 @@ for (const name of BACKENDS) {
         );
         // The generators must actually reach every failure mode, or the property proves less than it says.
         for (const kind of ["none", ...Object.keys(EXPECTED_TAG)]) {
-          assert.ok((seen[kind] ?? 0) >= 5, `failure mode ${kind} ran ${seen[kind] ?? 0} times`);
+          assert.ok(
+            (seen[kind] ?? 0) >= 5,
+            `failure mode ${kind} ran ${seen[kind] ?? 0} times\nReplay: ${replayCommand(SEED)}`,
+          );
         }
       });
     },

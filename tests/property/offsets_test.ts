@@ -75,7 +75,7 @@ import {
   eventLogDriver,
   makeEventLogIngest,
 } from "../../platform/eventlog/ingest.ts";
-import { check, NUM_RUNS, titled } from "./arbitraries.ts";
+import { check, NUM_RUNS, replayCommand, SEED, titled } from "./arbitraries.ts";
 
 const FILES = [
   "reader/2026-10-10/events-12-5151-001.jsonl",
@@ -861,7 +861,10 @@ test(
       { numRuns: DUCKDB_RUNS },
     );
     console.log(`ingest fault coverage: ${JSON.stringify(fired)}`);
-    assert.ok(fired.fail >= 5 && fired.interrupt >= 5, JSON.stringify(fired));
+    assert.ok(
+      fired.fail >= 5 && fired.interrupt >= 5,
+      `${JSON.stringify(fired)}\nReplay: ${replayCommand(SEED)}`,
+    );
   },
 );
 
