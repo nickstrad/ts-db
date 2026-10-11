@@ -36,6 +36,7 @@ import type {
 import type { EventRecord, Level as EventLevel, Role } from "../core/events.ts";
 import type { Schema } from "../sdk/schema.ts";
 import type { AnyDefinition, Functions } from "../sdk/functions.ts";
+import type { TenantRegistryService } from "./tenants/registry.ts";
 
 // ===========================================================================
 // Event types owned by core/events.ts, re-exported
@@ -443,6 +444,20 @@ export interface AnalysisService {
 
 /** Live: `AnalysisLive` (reader process, over the event-log DuckDB file). No test double. */
 export class Analysis extends Context.Tag("ts-db/Analysis")<Analysis, AnalysisService>() {}
+
+// ===========================================================================
+// TenantRegistry — MT-03 (`TenantRegistryLive`), test: ephemeral Postgres
+// ===========================================================================
+
+/**
+ * Live: `TenantRegistryLive` (Postgres, over `Config.tenancy.databaseUrl`). Test: the live
+ * layer against ephemeral Postgres (`make up` + `make db-migrate`); pg-mem is explicitly
+ * rejected for registry tests (`docs/haiku-experiments/findings/sq-10.md`).
+ */
+export class TenantRegistry extends Context.Tag("ts-db/TenantRegistry")<
+  TenantRegistry,
+  TenantRegistryService
+>() {}
 
 // ===========================================================================
 // Layer-construction error channels
