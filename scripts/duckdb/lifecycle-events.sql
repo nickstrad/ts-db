@@ -2,7 +2,7 @@
 --
 -- Question: startup/shutdown (and other) phases per role/pid, in order, with the time
 -- spent between consecutive phases of the same process.
--- Table: lifecycle_events (PLANNED SCHEMA — items 21-23 not yet landed).
+-- Table: lifecycle_events (schema v2).
 -- Variables: $start_ts, $end_ts (inclusive TIMESTAMP bounds).
 --
 -- Assumption: `phase` is free-form text (core/events.ts's LifecyclePayload.phase is

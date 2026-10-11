@@ -1,23 +1,21 @@
 -- event-counts-by-type.sql
 --
 -- Question: how many events of each kind/name landed in a time window?
--- Table: platform_events (PLANNED SCHEMA — items 21-23 not yet landed; see docs/plans/
---   effect-port-and-observability.md §4.1).
+-- Table: platform_events (schema v2, core/eventlog/ddl.ts).
 -- Variables: $start_ts, $end_ts (inclusive TIMESTAMP bounds).
 --
--- Assumption: `kind` here is the event-kind discriminant from core/events.ts
--- (http | handler | sql | tx | queue | backup | lifecycle | ingest), and `name` is the
--- per-kind name field (handler/http name). core/events.ts flags that `platform_events.kind`
--- is overloaded with the routed handler's query/mutation distinction for handler events —
--- item 11/23 need to resolve that collision; this query assumes the discriminant sense.
+-- `event_kind` is the record's kind (http | handler | sql | tx | queue | backup | lifecycle |
+-- ingest); `handler_kind` is the routed handler's query/mutation, set for handler/http rows;
+-- `name` is the handler name where there is one.
 
 SELECT
-  kind,
+  event_kind,
+  handler_kind,
   name,
   outcome,
   count(*) AS event_count
 FROM platform_events
 WHERE ts >= $start_ts
   AND ts <  $end_ts
-GROUP BY kind, name, outcome
+GROUP BY event_kind, handler_kind, name, outcome
 ORDER BY event_count DESC;

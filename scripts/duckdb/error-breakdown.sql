@@ -2,7 +2,7 @@
 --
 -- Question: which error_tag values are showing up, how often, and what share of all
 -- errors (and of all events) do they represent in the window?
--- Table: platform_events (PLANNED SCHEMA — items 21-23 not yet landed).
+-- Table: platform_events (schema v2).
 -- Variables: $start_ts, $end_ts (inclusive TIMESTAMP bounds).
 
 WITH windowed AS (

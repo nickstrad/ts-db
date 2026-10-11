@@ -2,7 +2,7 @@
 --
 -- Question: p50/p95/p99 duration_ms by engine, statement kind and table — mirrors the
 -- plan's named `slowest-sql` analysis query (§4.3, item 23).
--- Table: sql_events (PLANNED SCHEMA — items 21-23 not yet landed).
+-- Table: sql_events (schema v2).
 -- Variables: $start_ts, $end_ts (inclusive TIMESTAMP bounds).
 
 SELECT
