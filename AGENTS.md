@@ -49,28 +49,22 @@ Every item, regardless of model, gets the same Opus review pass described above.
 Builders may use `claude --model opus|sonnet|haiku` or `codex exec --model <full-id>`. The short OpenAI names
 below are plan labels; pass the full verified ID to Codex. The top Anthropic tier is **Opus 5.5**.
 
-| Repo tier                                     | Claude CLI alias   | OpenAI label | Codex model ID |
-| --------------------------------------------- | ------------------ | ------------ | -------------- |
-| Top: hard correctness and independent reviews | `opus` (Opus 5.5)  | sol          | `gpt-6.1-sol`  |
-| Middle: bounded mechanical work               | `sonnet`           | luna         | `gpt-6-luna`   |
-| Experiment: fast/cheap dispatch policy        | `haiku`            | astra        | `gpt-6-astra`  |
+| Repo tier                       | Claude CLI alias  | OpenAI label | Codex model ID |
+| ------------------------------- | ----------------- | ------------ | -------------- |
+| Top: hard correctness, reviews  | `opus` (Opus 5.5) | astra        | `gpt-6-astra`  |
+| Middle: bounded mechanical work | `sonnet`          | sol          | `gpt-6.1-sol`  |
+| Fast/cheap, run on high effort  | `haiku`           | luna         | `gpt-6-luna`   |
 
 IDs verified in `/root/.codex/models_cache.json`, fetched 2026-10-11 02:23 UTC (CLI 0.161.0). No OpenAI ID
-deviations were found. This is the repo's standing dispatch correspondence, not a vendor capability or price
-ranking: the cache describes Astra as frontier intelligence and Luna as fast/affordable. The Claude `opus`
-alias selects Opus 5.5, the account's current family version; no immutable Anthropic version ID was verified.
+deviations were found. This is the repo's standing dispatch correspondence.
 
-Match the task's intelligence tier; either family is acceptable within that tier. This section permits sol
+Match the task's intelligence tier; either family is acceptable within that tier. This section permits astra
 where the build protocol or a plan calls for Opus 5.5, including an independent top-tier review (a different
-reviewer from the builder), and luna where it calls for Sonnet. The Haiku experiment restrictions, including
-explicit human approval before landing, also apply to astra when dispatched in the experiment tier.
-
-**Astra self-assignment:** when a plan item lists a top-tier assignment (Opus 5.5/sol), the dispatcher may use
-Astra instead of Sol for tasks where Astra judges itself better suited. This is a dispatch-time judgment call,
-not a fixed mapping — Opus 5.5 remains available for the truly hardest work, so Astra takes top-tier tasks only
-where its own strengths are the better fit. It never applies to independent reviews, which stay top-tier
-(Opus 5.5 or sol). Model names alone never authorize work outside an item's ownership. This orchestration
-policy lives only here; `CLAUDE.md` needs no change.
+reviewer from the builder), and sol where it calls for Sonnet. Luna is the Haiku-tier OpenAI label and always
+runs on high effort; the Haiku experiment restrictions, including explicit human approval before landing, also
+apply to luna when dispatched in the experiment tier. The mapping above is the standing one. Independent
+reviews stay top-tier (Opus 5.5 or astra). Model names alone never authorize work outside an item's ownership.
+This orchestration policy lives only here; `CLAUDE.md` needs no change.
 
 ## Side-quest protocol
 

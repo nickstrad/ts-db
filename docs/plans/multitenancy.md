@@ -153,7 +153,7 @@ exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy a
 #### MT-01 — Postgres in docker-compose + central schema
 
 - **Scoping:** CONCURRENT with MT-02.
-- **Model:** **Sonnet / luna.** Mechanical: one service block following the file's template, one SQL file.
+- **Model:** **Sonnet / sol.** Mechanical: one service block following the file's template, one SQL file.
 - **Owns:** `docker-compose.yml` (additive `postgres` service block + `pg-data` volume),
   `platform/tenants/schema.sql`, `Makefile` (additive `db-shell`, `db-migrate` targets only).
 - **Reads:** `docker-compose.yml` (template block), `Makefile`.
@@ -173,7 +173,7 @@ exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy a
 #### MT-02 — Config options for multitenancy
 
 - **Scoping:** CONCURRENT with MT-01.
-- **Model:** **Sonnet / luna.** Follows the item-08 options-table pattern exactly.
+- **Model:** **Sonnet / sol.** Follows the item-08 options-table pattern exactly.
 - **Owns:** `platform/config.ts` (additive rows only), `README.md` "Configuration" section (additive),
   `tests/unit/config_test.ts` (additive rows only — owned by main-plan item 08; listed here as an allowed
   edit).
@@ -198,7 +198,7 @@ exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy a
 #### MT-03 — TenantRegistry service (Effect)
 
 - **Scoping:** CONCURRENT with MT-04.
-- **Model:** **Opus / sol.** Security boundary: key generation, hashing, uniqueness.
+- **Model:** **Opus / astra.** Security boundary: key generation, hashing, uniqueness.
 - **Owns:** `platform/tenants/registry.ts`, `platform/tenants/store.ts`, `tests/unit/tenants_test.ts`,
   `core/errors.ts` (additive only: `TenantError` tagged union with `MalformedTenantId`, `UnknownTenant`,
   `TenantDeactivated` — no other edits), `platform/services.ts` (additive only: the `TenantRegistry`
@@ -222,7 +222,7 @@ exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy a
 #### MT-04 — Tenant storage routing: interface + local-folder implementation
 
 - **Scoping:** CONCURRENT with MT-03.
-- **Model:** **Opus / sol.** Interface design plus resource lifetimes (one SQLite handle per tenant, bounded
+- **Model:** **Opus / astra.** Interface design plus resource lifetimes (one SQLite handle per tenant, bounded
   cache, idle eviction).
 - **Owns:** `platform/tenants/routing.ts`, `platform/sqlite.ts` (additive),
   `tests/unit/tenant_routing_test.ts`, `platform/services.ts` (additive only: the `TenantStorageRouter`
@@ -267,7 +267,7 @@ exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy a
 #### MT-05 — Admin CRUD HTTP endpoints
 
 - **Scoping:** After MT-03 (needs the registry). MT-06 follows MT-05.
-- **Model:** **Sonnet / luna.** CRUD over the registry behind the existing admin-token pattern.
+- **Model:** **Sonnet / sol.** CRUD over the registry behind the existing admin-token pattern.
 - **Owns:** the admin route surface — `platform/server.ts` `/admin/*` section today, or `platform/http/*` if
   item 22 has landed (builder checks and targets whichever exists; exactly one).
 - **Reads:** `platform/tenants/registry.ts`, `platform/server.ts`.
@@ -282,7 +282,7 @@ exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy a
 #### MT-06 — Admin CLI (`scripts/tenants.ts`)
 
 - **Scoping:** After MT-05 (dogfoods its endpoints).
-- **Model:** **Sonnet / luna.** Small CLI, checkable by running.
+- **Model:** **Sonnet / sol.** Small CLI, checkable by running.
 - **Owns:** `scripts/tenants.ts`.
 - **Reads:** MT-05's routes.
 - **Work:** `deno run -A scripts/tenants.ts create <name> [--slug]`, `list`, `show <id>`, `deactivate <id>`,
@@ -295,7 +295,7 @@ exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy a
 #### MT-07 — Tenant resolution in the request path + TS client tenant config
 
 - **Scoping:** After MT-04 (needs routing). MT-08 follows MT-07.
-- **Model:** **Opus / sol.** Security-critical: the tenant-context seam every request flows through.
+- **Model:** **Opus / astra.** Security-critical: the tenant-context seam every request flows through.
 - **Owns:** `platform/http/auth.ts` (new; or the auth section of `platform/server.ts` if item 22 hasn't landed
   — builder checks), `sdk/client.ts` (docs + `createTenantClient` alias only, no behavior change),
   `platform/layers.ts` (additive only: `PlatformLive` gains the `TenantStorageRouter` and `TenantRegistry`
@@ -318,7 +318,7 @@ exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy a
 #### MT-08 — Better Auth email/password, headless
 
 - **Scoping:** After MT-07 (needs the tenant-context seam). The plan's last item.
-- **Model:** **Opus / sol.** Auth is a security boundary; the spike needs judgment.
+- **Model:** **Opus / astra.** Auth is a security boundary; the spike needs judgment.
 - **Owns:** `platform/auth/*`, `scripts/auth.ts` (admin user commands), `platform/http/auth.ts` (additive:
   session-token branch in MT-07's middleware), `platform/http/router.ts` (additive: `/api/auth/*` mount — or
   `platform/server.ts` if item 22 hasn't landed, builder checks; exactly one), `platform/tenants/schema.sql`
@@ -345,7 +345,7 @@ exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy a
 #### MT-09 — Property tests for tenant routing invariants
 
 - **Scoping:** After MT-03 and MT-04 (needs the registry and `TenantStorageRouter` interfaces). Batch MT-E.
-- **Model:** **Sonnet / luna.** Bounded, mechanical, checked by running.
+- **Model:** **Sonnet / sol.** Bounded, mechanical, checked by running.
 - **Owns:** `tests/property/tenant_routing_props.ts` (new file only — disjoint from MT-04's
   `tests/unit/tenant_routing_test.ts`).
 - **Reads:** `platform/tenants/routing.ts`, `platform/tenants/registry.ts`, `core/errors.ts`,
@@ -400,11 +400,11 @@ exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy a
   `docs/testing.md` describes the real-process test tier and must execute every command it quotes, so the
   suite has to exist (and be green) before 27 documents it; and running it as the platform's final acceptance
   gate means a defect it finds is fixed before 27, 28 and 29 describe the platform as finished.
-- **Model:** **Opus / sol.** The item owns resource lifetimes across three kinds of process — a Docker Compose
-  project, a server per scenario with its reader child, and CLI subprocesses — with teardown that must survive
-  failures and signals, and its core assertions are security properties (cross-tenant reads and writes behave
-  as missing, revocation and deactivation are enforced). Like item 25, diagnosing a red run means reasoning
-  across every layer.
+- **Model:** **Opus / astra.** The item owns resource lifetimes across three kinds of process — a Docker
+  Compose project, a server per scenario with its reader child, and CLI subprocesses — with teardown that must
+  survive failures and signals, and its core assertions are security properties (cross-tenant reads and writes
+  behave as missing, revocation and deactivation are enforced). Like item 25, diagnosing a red run means
+  reasoning across every layer.
 - **Owns:** `package.json` (additive only: a `scripts.e2e` entry — no other key changes, no dependencies),
   `tests/e2e/platform/main.ts`, `tests/e2e/platform/harness.ts`, `tests/e2e/platform/postgres.ts`,
   `tests/e2e/platform/compose.yml`, `tests/e2e/platform/seed.ts`, `tests/e2e/platform/suite_test.ts`, and
