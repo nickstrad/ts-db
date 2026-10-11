@@ -25,16 +25,16 @@ Verified by reading the repo on 2026-10-10.
 ```text
 Postgres (docker-compose, new)          Per-tenant SQLite files
 ┌──────────────────────────┐           ┌─────────────────────────────────┐
-│ tenants(id, slug, name,   │           │ <TENANT_SQLITE_DIR>/            │
-│   status, created_at)     │           │   <tenant-id>.sqlite            │
-│ api_keys(id, tenant_id,   │           │   <tenant-id>.sqlite  (one file │
-│   key_hash, prefix, name, │           │    per tenant, same DDL)        │
-│   revoked_at, created_at) │           └─────────────────────────────────┘
-│ users/session/account/   │                        ▲
-│   (Better Auth tables)   │                        │ Storage routes by
-└──────────────────────────┘                        │ tenant id
-         ▲                                          │
-         │ TenantRegistry (Effect service)          │
+│ tenants(id, slug, name,   │           │ <TENANTS_DIR>/<tenant-id>.db    │
+│   status, created_at)     │           │ (one file per tenant, same DDL) │
+│ api_keys(id, tenant_id,   │           │                                 │
+│   key_hash, prefix, name, │           │ routed via TenantStorageRouter │
+│   revoked_at, created_at) │           │ (local folder now; control-plane│
+│ users/session/account/   │           │  pluggable later)               │
+│   (Better Auth tables)   │           └─────────────────────────────────┘
+└──────────────────────────┘                        ▲
+         ▲                                          │ Storage depends only
+         │ TenantRegistry (Effect service)          │ on the router tag
          │                                          │
 Client ──┼── Authorization: Bearer <api-key> ───────┘
          │         │
@@ -53,7 +53,9 @@ a cross-tenant read must behave exactly like reading a row that does not exist.
 **Tenancy model:** database-per-tenant at the SQLite layer (one file per tenant — the human's
 explicit choice), single shared Postgres for the central registry. This matches the platform's
 existing shape (SQLite files are already the unit of backup/restore in item 19) and keeps tenant
-data physically separable.
+data physically separable. Routing to those files goes through the `TenantStorageRouter`
+interface (MT-04) — never hardcoded paths — so a future control-plane router plugs in as a
+different layer with no changes to `Storage`, the tenant middleware, or the client.
 
 ## 2. Research
 
@@ -143,7 +145,7 @@ Model policy (same as the main plan): **Opus** for security boundaries and resou
 - **Model:** **Sonnet.** Follows the item-08 options-table pattern exactly.
 - **Owns:** `platform/config.ts` (additive rows only), `README.md` "Configuration" section (additive).
 - **Reads:** `platform/config.ts` (options table).
-- **Work:** Add `databaseUrl` (default `postgres://tsdb:tsdb@localhost:5432/tsdb`), `tenantSqliteDir` (default `<dataDir>/tenants`), `betterAuthSecret` (no default — required when auth enabled), `betterAuthUrl` (default `http://localhost:3000`-style platform base URL). Keep the README section in sync (reviewer verifies parity, per the item-08 precedent).
+- **Work:** Add `databaseUrl` (default `postgres://tsdb:tsdb@localhost:5432/tsdb`), `tenantsDir` (default `<dataDir>/tenants`), `tenantRouter` (default `"local"`; validated against the known router kinds — `"local"` today, `"control-plane"` reserved for the future), `betterAuthSecret` (no default — required when auth enabled), `betterAuthUrl` (default `http://localhost:3000`-style platform base URL). Keep the README section in sync (reviewer verifies parity, per the item-08 precedent).
 - **Acceptance criteria:**
   - `ConfigLive` decodes the new options; missing `betterAuthSecret` fails with `ConfigError` only when auth is enabled.
   - Reviewer verifies README lists exactly the new options.
@@ -161,20 +163,26 @@ Model policy (same as the main plan): **Opus** for security boundaries and resou
 - **Acceptance criteria:**
   - `deno task test` passes; tests cover: duplicate slug rejected, key plaintext shown once (second read impossible), revoked key rejected, inactive tenant's keys rejected, `resolveTenantByKeyHash` round-trip.
 
-#### MT-04 — Per-tenant SQLite routing in Storage
+#### MT-04 — Tenant storage routing: interface + local-folder implementation
 
 - **Scoping:** CONCURRENT with MT-03.
-- **Model:** **Opus.** Resource lifetimes: one SQLite handle per tenant, bounded cache, idle eviction.
-- **Owns:** `platform/sqlite.ts` (additive), `platform/tenants/routing.ts`, `tests/unit/tenant_routing_test.ts`.
+- **Model:** **Opus.** Interface design plus resource lifetimes (one SQLite handle per tenant, bounded cache, idle eviction).
+- **Owns:** `platform/tenants/routing.ts`, `platform/sqlite.ts` (additive), `tests/unit/tenant_routing_test.ts`.
 - **Reads:** `platform/sqlite.ts` (item 15), `platform/services.ts`.
 - **Work:**
-  1. `routing.ts`: `tenantDbPath(tenantId)` → `<tenantSqliteDir>/<tenantId>.sqlite`; filename is the validated tenant uuid (no path traversal — assert).
-  2. `sqlite.ts`: `Storage` gains tenant-scoped access — a bounded `Map<tenantId, handle>` with idle eviction; **each tenant file keeps item 15's guarantee** (own `Semaphore(1)` queue, `BEGIN IMMEDIATE`). New tenant files get the same DDL on first open.
-  3. The single-file path remains for the pre-tenancy default (back-compat for existing deployments).
+  1. **Define the interface** in `routing.ts` — `TenantStorageRouter` as a `Context.Tag`, in the `services.ts` style. Routing goes through this interface; paths are never hardcoded in `Storage` or anywhere else:
+     - `resolve(tenantId: TenantId): Effect<StorageLocation, TenantError>` — the contract: map a tenant to *where its data lives*. Performs no storage I/O itself.
+     - `StorageLocation` is a tagged union: `{ _tag: "SqliteFile", path: string }` today; future kinds (e.g. `{ _tag: "ControlPlane", endpoint: string }`) extend the union without touching the interface.
+     - `prepare(location: StorageLocation): Effect<void, TenantError>` — idempotent: ensure the location exists and carries the schema DDL (creates the file on first use for the local implementation).
+     - Contract guarantees: `resolve` is deterministic per tenant id; implementations must reject malformed ids so path traversal is impossible by construction; `Storage` depends **only** on the `TenantStorageRouter` tag — never on paths, env vars, or a concrete router.
+  2. **Local-folder implementation now:** `LocalFolderRouter` — `resolve` returns `{ _tag: "SqliteFile", path: "<tenantsDir>/<tenantId>.db" }`; the tenant id is a validated uuid (assert: no `..`, no separators). Selected via the `tenantRouter: "local"` config value.
+  3. **`sqlite.ts`:** `Storage` gains tenant-scoped access through the router — a bounded `Map<tenantId, handle>` with idle eviction keyed off `resolve`; **each tenant file keeps item 15's guarantee** (own `Semaphore(1)` queue, `BEGIN IMMEDIATE`). The single-file path remains for the pre-tenancy default (back-compat for existing deployments).
+  4. **Document the extension point** in `routing.ts` header comments: a future `ControlPlaneRouter` (central routing service, remote files, whatever comes later) implements `TenantStorageRouter`, is selected via `tenantRouter: "control-plane"` + endpoint config, and plugs in as a different layer — no changes to `Storage`, the tenant middleware, or the client wiring.
 - **Acceptance criteria:**
+  - A test builds `Storage` against a stub `TenantStorageRouter` pointed at a temp dir and proves `Storage` never reads paths or env directly — the router is the only seam.
   - Two tenants write the same document id → fully isolated reads.
   - 50 concurrent writes across 5 tenants → no cross-talk, no lost updates (extends the sq-06 stress approach).
-  - Path-traversal tenant id (`../x`) rejected.
+  - Path-traversal tenant id (`../x`) rejected by `resolve`.
 
 #### MT-05 — Admin CRUD HTTP endpoints
 
