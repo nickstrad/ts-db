@@ -79,6 +79,7 @@ Agent sessions across linked worktrees need one live log without concurrent inde
 [event-log design](../../agent-work/event-log.md) uses Git's common directory for immutable live events and
 tracked `agent-work/events/` for coordinator-batched snapshots. Per-event publication uses an atomic hard
 link; writers never commit. This is coordination infrastructure, separate from the product's event log.
+
 ## 2026-10-11 — MT-08 headless transport and PostgreSQL driver
 
 The mandatory Deno vanilla-client spike passed against Better Auth 1.7.7 and Postgres 17: sign-up, sign-in,

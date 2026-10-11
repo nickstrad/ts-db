@@ -47,6 +47,7 @@
  * closed.
  */
 import { join } from "node:path";
+import { DuckDBInstanceCache } from "@duckdb/node-api";
 import { Cause, Duration, Effect, ExecutionStrategy, Exit, Layer, Option, Scope } from "effect";
 import type { ConfigError, IngestError } from "../core/errors.ts";
 import { compareSourceFiles, parseSourceFile, type SourceFile } from "../core/eventlog/offsets.ts";
@@ -93,6 +94,12 @@ export function ownOpenLogPaths(logDir: string, pid: number): Effect.Effect<read
   });
 }
 
+// Ingest and analysis need separate connections to the same native database instance.
+// Independent instances can retain different catalog/WAL snapshots in one process.
+const eventLogInstances = new DuckDBInstanceCache();
+export const openReaderEventLog = (path: string) =>
+  eventLogInstances.getOrCreateInstance(path, { threads: "2", memory_limit: "256MB" });
+
 export interface ReaderEventLogOptions {
   /** How the event-log file is opened. Tests wrap the real driver to observe or fail it. */
   readonly driver?: EventLogDriver;
@@ -134,7 +141,11 @@ export function makeReaderEventLog(
       );
       const exit = yield* Effect.exit(
         Scope.extend(
-          makeEventLogIngest({ driver: options.driver, batchBytes: options.batchBytes, retention }),
+          makeEventLogIngest({
+            driver: options.driver ?? { open: openReaderEventLog },
+            batchBytes: options.batchBytes,
+            retention,
+          }),
           scope,
         ).pipe(Effect.provide(services)),
       );
