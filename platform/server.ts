@@ -40,13 +40,21 @@
  * ## Event-log ingest and retention
  *
  * This process never opens the event-log DuckDB file (ADR 0004). Every `INGEST_SWEEP_INTERVAL` it
- * sends the reader the existing `ingest` RPC, which the reader answers with item 36's
+ * sends the reader the existing `ingest` RPC. Until item 33 lands the reader answers it with an
+ * `IngestError` ("not available"); item 33 connects the RPC to `EventLogIngestLive`'s
  * ingest-then-sweep coordinator (ADR 0007): ingest, then — only after a committed ingest — the
  * retention sweep. `POST /admin/logs/ingest` sends the same RPC on demand. The first run is one
  * interval after startup, so a restart never queues a long ingest ahead of the first queries.
  *
- * Only a failure to *start* (bad configuration, schema drift, a reader that will not answer, a port
- * in use) reaches stderr, because the event log may not exist yet; the process then exits 1.
+ * The ingest RPC shares the reader connection's per-call deadline (`READER_CALL_TIMEOUT_MS`, sized for
+ * queries). A run that takes longer is logged here as `ingest-sweep-failed` (`IpcError` timeout)
+ * while the reader carries on and commits; its late reply is then a `reader-reply-anomaly`. A
+ * per-call deadline needs a `ReaderClient` change (`platform/ipc.ts`, not this module's).
+ *
+ * Only an abnormal end reaches stderr — a failure to *start* (bad configuration, schema drift, a
+ * reader that will not answer, a port in use), the reader exiting while serving, or the listener
+ * closing on its own — because the event log may not exist yet or may be the thing that broke; the
+ * process then exits 1. A signal is a normal stop: exit 0.
  */
 import {
   Cause,
@@ -71,8 +79,8 @@ import { Config, EventSink, ReaderClient } from "./services.ts";
 
 /**
  * The HTTP listener could not bind (`Deno.serve` threw: the port is taken, the address is not
- * local, …). Like `SinkIoError`, deliberately not in `core/errors.ts`: it only ever fails startup,
- * so it never needs an HTTP status.
+ * local, …), or closed on its own while serving. Like `SinkIoError`, deliberately not in
+ * `core/errors.ts`: it only ever ends the process, so it never needs an HTTP status.
  */
 export class ListenError extends Data.TaggedError("ListenError")<{
   readonly hostname: string;
@@ -133,9 +141,10 @@ function ingestSummary(reply: unknown): Record<string, unknown> {
 
 /**
  * The ingest-then-sweep timer: every `every`, the reader's `ingest` RPC (see the module comment). A
- * run is a plain sequential effect, so two can never overlap from this fiber; the reader serializes
- * it with `POST /admin/logs/ingest` under its ingest lock. A failed run is a `warn` event and the
- * next run still happens.
+ * run is a plain sequential effect, so two can never overlap from this fiber; once item 33 connects
+ * the RPC to `EventLogIngestLive`, its ingest lock serializes it with `POST /admin/logs/ingest`.
+ * Until then every run fails with the reader's `IngestError`. A failed run is a `warn` event and
+ * the next run still happens.
  */
 const ingestSweepTimer = (every: Duration.DurationInput) =>
   Effect.gen(function* () {
@@ -290,6 +299,15 @@ const program = (stop: Deferred.Deferred<string>, options: ServerOptions) =>
         "error",
       );
       return yield* error;
+    }
+    if (ended.reason === "listener-closed") {
+      // Only `server.shutdown()` should close it, and that runs after this program ends.
+      yield* emitServerLifecycle(sink, "stopping", { reason: ended.reason }, "error");
+      return yield* new ListenError({
+        hostname: server.addr.hostname,
+        port: server.addr.port,
+        detail: "the listener closed while the server was serving",
+      });
     }
     yield* emitServerLifecycle(sink, "stopping", { reason: ended.reason });
     return yield* Effect.interrupt;

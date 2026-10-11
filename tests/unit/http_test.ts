@@ -490,7 +490,7 @@ httpTest(
 );
 
 httpTest(
-  "a reader that exited, timed out or broke the protocol → 502; mutations do not need it",
+  "a reader that exited, timed out or broke the protocol → 502 per call; the writer is unaffected",
   Effect.gen(function* () {
     const fault = yield* ReaderFault;
     yield* Ref.set(fault, Option.some<CallError>(new ReaderExitedError({ code: 137, signal: "SIGKILL" })));
@@ -517,7 +517,8 @@ httpTest(
     yield* Ref.set(fault, Option.some<CallError>(new IpcError({ reason: "malformed-frame", detail: "{" })));
     assertError(yield* send("POST", "/admin/logs/ingest", { token: ADMIN }), 502, "IpcError");
 
-    // The writer is in this process: a mutation still commits while the reader is unreachable.
+    // The writer is in this process: a mutation still commits while reader calls fail. (A real child
+    // exit also stops the whole server — `platform/server.ts`, `tests/unit/server_scope_test.ts`.)
     const created = yield* app("mutation", "createGame", { xPlayer: "a", oPlayer: "b" });
     assert.equal(created.status, 200, JSON.stringify(created.body));
   }),

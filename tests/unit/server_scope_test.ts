@@ -8,7 +8,9 @@
  *
  * - a failure injected after **each** startup step releases exactly what was acquired before it;
  * - a real later-app open failure and a real HTTP bind failure (occupied port) do the same;
- * - a stop during startup, a clean stop and the reader child dying while serving all end with the
+ * - a stop with a request held in flight waits for it (the drain), and it commits;
+ * - a stop during startup (right after a step acquires, or while the startup ping waits on a frozen
+ *   reader), a clean stop and the reader child dying while serving all end with the
  *   finalizers in order: HTTP drain → backup fiber → ingest/sweep fiber → reader exit → writers
  *   closed (apps in reverse) → `shutdown` as the log's last line;
  * - the ingest/sweep fiber reaches the reader through its existing `ingest` RPC.
@@ -16,8 +18,8 @@
  * After each run: termination within a bound, no file descriptor left open under `DATA_DIR`
  * (`/proc/self/fd`), and no live reader process (`/proc/<pid>`).
  *
- * As spawned processes (real signals, real exit codes): SIGTERM with mutations in flight, an occupied
- * port and a killed reader child.
+ * As spawned processes (real signals, real exit codes): SIGTERM with a mutation held in flight, an
+ * occupied port and a killed reader child.
  *
  * And statically: the server's runtime module graph never reaches DuckDB, and no module in it reads
  * the environment except `platform/config.ts`.
@@ -421,14 +423,15 @@ test(
 
 for (const step of ["object-store", `storage:${JSON_APP.id}`, "reader"] as const) {
   test(
-    `partial startup: a stop signal while "${step}" is building interrupts startup and releases it`,
+    `partial startup: a stop signal right after "${step}" acquires interrupts startup and releases it`,
     { timeout: 60_000 },
     () =>
       inProcess("stop-startup", async (s) => {
         const c = controls();
         const exit = await runServer({
           stop: Effect.succeed(c.stop),
-          // The stop arrives while this step's layer is still building; nothing after it may start.
+          // The stop arrives once this step has acquired, while the rest of the layer is still
+          // building; nothing after it may start.
           afterStep: (current) =>
             current === step
               ? Effect.zipRight(Effect.sync(() => c.requestStop()), Effect.never)
@@ -440,6 +443,52 @@ for (const step of ["object-store", `storage:${JSON_APP.id}`, "reader"] as const
       }),
   );
 }
+
+test(
+  "partial startup: a stop signal while the startup ping waits for the reader ends startup and releases it",
+  { timeout: 60_000 },
+  () =>
+    inProcess("stop-ping", async (s) => {
+      const c = controls();
+      let frozen!: (pid: number) => void;
+      const readerFrozen = new Promise<number>((resolve) => (frozen = resolve));
+      // Freeze the reader as soon as it is spawned, so the program's ping can never be answered.
+      const run = runServer({
+        stop: Effect.succeed(c.stop),
+        afterStep: (step) =>
+          step === "reader"
+            ? Effect.promise(async () => {
+              const pid = readerPid(await waitForPhase(s.logDir, Deno.pid, "reader-spawned"));
+              assert.ok(pid !== undefined);
+              Deno.kill(pid, "SIGSTOP");
+              frozen(pid);
+            })
+            : Effect.void,
+      });
+      const pid = await readerFrozen;
+      let stopping: LogRecord[];
+      try {
+        // `reader` is the last layer step: the build is done and the program is waiting on the ping.
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        c.requestStop();
+        stopping = await waitForPhase(s.logDir, Deno.pid, "stopping");
+      } finally {
+        // Let the reader see stdin close and exit gracefully, as in any other stop.
+        Deno.kill(pid, "SIGCONT");
+      }
+      // Only the program's ping race logs `stopping` before `ready`; a stop during the build does not.
+      assert.equal(stopping[at(stopping, "stopping")].detail?.reason, "test-stop");
+
+      const exit = await run;
+      assert.ok(Exit.isFailure(exit) && Cause.isInterruptedOnly(exit.cause), String(exit));
+      const records = await assertReleased(s, "interrupted");
+      assert.equal(at(records, "ready"), -1, "never served");
+      for (const phase of ["ingest-sweep-stopped", "backup-timer-stopped", "http-drained"]) {
+        assert.equal(at(records, phase), -1, `${phase}: nothing after the ping may start`);
+      }
+      assertOrder(records, SHUTDOWN_ORDER);
+    }),
+);
 
 // ===========================================================================
 // Serving, then stopping
@@ -457,6 +506,72 @@ async function post(
     headers: { authorization: `Bearer ${token}`, ...(traceId ? { "x-trace-id": traceId } : {}) },
     body: JSON.stringify(body),
   });
+}
+
+/**
+ * A mutation held in flight: its headers are sent and its handler is reading the body, but the body
+ * is incomplete until `finish()`. Nothing can complete it early, so whatever the server does while
+ * it is held (a stop, a drain) happens with this request in flight.
+ */
+function heldMutation(s: Scratch, appId: string, token: string, traceId: string) {
+  const json = JSON.stringify({ xPlayer: "held", oPlayer: "o" });
+  const encoder = new TextEncoder();
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  const body = new ReadableStream<Uint8Array>({
+    start: (c) => {
+      controller = c;
+      c.enqueue(encoder.encode(json.slice(0, 5)));
+    },
+  });
+  const response = fetch(`http://127.0.0.1:${s.port}/apps/${appId}/mutation/createGame`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "x-trace-id": traceId },
+    body,
+  });
+  return {
+    response,
+    finish: () => {
+      controller.enqueue(encoder.encode(json.slice(5)));
+      controller.close();
+    },
+  };
+}
+
+/** Polls the log until a lifecycle `phase` appears; returns the log at that point. */
+async function waitForPhase(logDir: string, pid: number, phase: string): Promise<LogRecord[]> {
+  for (let attempt = 0; attempt < 300; attempt++) {
+    const records = await serverLog(logDir, pid);
+    if (at(records, phase) >= 0) return records;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.fail(`no lifecycle ${phase} event`);
+}
+
+/**
+ * The held request's evidence once the server has gone: it was answered 200, its `http` event lies
+ * between `stopping` and `http-drained` (it finished during the drain, not before the stop), and the
+ * game it created is in the SQLite file.
+ */
+async function assertDrained(
+  records: readonly LogRecord[],
+  answered: Response,
+  traceId: string,
+  file: string,
+): Promise<void> {
+  assert.equal(answered.status, 200);
+  const { gameId } = (await answered.json()).result as { gameId: string };
+  const event = records.findIndex((r) => r.kind === "http" && r.traceId === traceId);
+  assert.ok(event >= 0, "no http event for the held request");
+  assert.equal(records[event].status, 200);
+  assert.ok(at(records, "stopping") < event, "the held request finished before the stop");
+  assert.ok(event < at(records, "http-drained"), "the drain finished before the held request");
+  const db = new DatabaseSync(file, { readOnly: true });
+  try {
+    assert.equal((db.prepare("PRAGMA quick_check").get() as { quick_check: string }).quick_check, "ok");
+    assert.ok(db.prepare("SELECT 1 FROM games WHERE _id = ?").get(gameId), `held game ${gameId} was lost`);
+  } finally {
+    db.close();
+  }
 }
 
 test(
@@ -498,7 +613,7 @@ test(
 );
 
 test(
-  "a stop with mutations in flight: every acknowledged mutation is durable and the drain precedes the reader",
+  "a stop with a mutation in flight: the drain waits for it, it commits, then fibers, reader, writers close",
   { timeout: 60_000 },
   () =>
     inProcess("inflight", async (s) => {
@@ -508,34 +623,26 @@ test(
         afterStep: (step) => step === "http" ? Effect.sync(c.serving) : Effect.void,
       });
       await c.ready;
-      const burst = Array.from({ length: 100 }, (_, i) =>
-        post(s, `/apps/${COLUMNS.id}/mutation/createGame`, COLUMNS.token, { xPlayer: `x${i}`, oPlayer: "o" })
-          .then(
-            async (response) =>
-              response.ok ? (await response.json()).result.gameId as string : undefined,
-            () => undefined,
-          ));
-      await Promise.race(burst);
+      const held = heldMutation(s, COLUMNS.id, COLUMNS.token, "scope-held");
+      // Let the server accept the connection and enter the handler (it is now reading the body).
+      await new Promise((resolve) => setTimeout(resolve, 300));
       c.requestStop();
-      const acknowledged = (await Promise.all(burst)).filter((id): id is string =>
-        id !== undefined
-      );
+      const stopping = await waitForPhase(s.logDir, Deno.pid, "stopping");
+      assert.equal(at(stopping, "http-drained"), -1, "drained with a request still in flight");
+      // Still held: nothing past the drain has started.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const during = await serverLog(s.logDir, Deno.pid);
+      for (const phase of ["http-drained", "backup-timer-stopped", "reader-exited", "storage-closed"]) {
+        assert.equal(at(during, phase), -1, `${phase} while a request was in flight`);
+      }
+      held.finish();
+      const answered = await held.response;
+
       const exit = await run;
       assert.ok(Exit.isFailure(exit) && Cause.isInterruptedOnly(exit.cause), String(exit));
       const records = await assertReleased(s, "interrupted");
       assertOrder(records, SHUTDOWN_ORDER);
-
-      const db = new DatabaseSync(join(s.dataDir, `${COLUMNS.id}.sqlite`), { readOnly: true });
-      try {
-        assert.equal((db.prepare("PRAGMA quick_check").get() as { quick_check: string }).quick_check, "ok");
-        const ids = new Set(
-          (db.prepare("SELECT _id FROM games").all() as { _id: string }[]).map((r) => r._id),
-        );
-        assert.ok(acknowledged.length > 0);
-        for (const id of acknowledged) assert.ok(ids.has(id), `acknowledged game ${id} was lost`);
-      } finally {
-        db.close();
-      }
+      await assertDrained(records, answered, "scope-held", join(s.dataDir, `${COLUMNS.id}.sqlite`));
     }),
 );
 
@@ -600,6 +707,8 @@ test(
           assert.equal(typeof record.detail?.filesScanned, "number", JSON.stringify(record.detail));
         }
       }
+      // A runtime spot check only: until item 33 hosts the coordinator, nothing opens the event-log
+      // file at all. The import-graph test below is the guard that the server cannot load DuckDB.
       const duckdb = (await openFilesUnder(s.root)).filter((path) => path.includes(".duckdb"));
       assert.deepEqual(duckdb, [], "the server process opened an event-log DuckDB file");
 
@@ -678,12 +787,16 @@ async function spawnedRun(prefix: string, body: (s: Scratch, spawned: Spawned) =
   }
 }
 
-/** The process's log: shutdown last, reader gone, finalizers in order. */
+/**
+ * The process's log: shutdown last, reader gone, finalizers present and in order. `assertOrder`
+ * skips missing phases, so presence is checked first: both fibers always stop, and the listener
+ * drains iff it was acquired (`served`).
+ */
 async function assertProcessReleased(
   s: Scratch,
   spawned: Spawned,
   exit: string,
-  childExit = false,
+  { childExit = false, served = true }: { childExit?: boolean; served?: boolean } = {},
 ): Promise<LogRecord[]> {
   const records = await serverLog(s.logDir, spawned.child.pid);
   const pid = readerPid(records);
@@ -691,46 +804,39 @@ async function assertProcessReleased(
   await assertGone(pid);
   assert.equal(records.at(-1)?.phase, "shutdown", JSON.stringify(records.at(-1)));
   assert.equal(records.at(-1)?.detail?.exit, exit);
+  const phases = lifecycle(records).map((r) => r.phase).join(", ");
+  for (const phase of ["backup-timer-stopped", "ingest-sweep-stopped"]) {
+    assert.ok(at(records, phase) >= 0, `no ${phase} event: ${phases}`);
+  }
+  assert.equal(
+    at(records, "http-drained") >= 0,
+    served,
+    `http-drained iff the listener was acquired: ${phases}`,
+  );
   if (childExit) assertChildExitOrder(records);
   else assertOrder(records, SHUTDOWN_ORDER);
   return records;
 }
 
 test(
-  "process: SIGTERM with mutations in flight exits 0 within the bound, finalizers in order",
+  "process: SIGTERM with a mutation in flight drains it, then exits 0 within the bound, finalizers in order",
   { timeout: 120_000 },
   () =>
     spawnedRun("sigterm", async (s, spawned) => {
       await waitReady(s, spawned);
-      const burst = Array.from({ length: 100 }, (_, i) =>
-        post(s, `/apps/${JSON_APP.id}/mutation/createGame`, JSON_APP.token, {
-          xPlayer: `x${i}`,
-          oPlayer: "o",
-        })
-          .then(async (response) =>
-            response.ok ? (await response.json()).result.gameId : undefined, () =>
-            undefined));
-      await Promise.race(burst);
+      const held = heldMutation(s, JSON_APP.id, JSON_APP.token, "process-held");
+      await new Promise((resolve) => setTimeout(resolve, 300));
       spawned.child.kill("SIGTERM");
-      const acknowledged = (await Promise.all(burst)).filter((id): id is string =>
-        id !== undefined
-      );
+      const stopping = await waitForPhase(s.logDir, spawned.child.pid, "stopping");
+      assert.equal(stopping[at(stopping, "stopping")].detail?.reason, "SIGTERM");
+      assert.equal(at(stopping, "http-drained"), -1, "drained with a request still in flight");
+      held.finish();
+      const answered = await held.response;
       const status = await exitWithin(spawned, 15_000);
       assert.equal(status.code, 0, await spawned.stderr);
 
       const records = await assertProcessReleased(s, spawned, "interrupted");
-      assert.equal(records[at(records, "stopping")].detail?.reason, "SIGTERM");
-      const db = new DatabaseSync(join(s.dataDir, `${JSON_APP.id}.sqlite`), { readOnly: true });
-      try {
-        const ids = new Set(
-          (db.prepare("SELECT _id FROM games").all() as { _id: string }[]).map((r) =>
-            r._id
-          ),
-        );
-        for (const id of acknowledged) assert.ok(ids.has(id), `acknowledged game ${id} was lost`);
-      } finally {
-        db.close();
-      }
+      await assertDrained(records, answered, "process-held", join(s.dataDir, `${JSON_APP.id}.sqlite`));
     }),
 );
 
@@ -747,7 +853,7 @@ test(
       const stderr = await spawned.stderr;
       assert.match(stderr, /ts-db server failed: ListenError/);
       assert.match(stderr, /AddrInUse/);
-      await assertProcessReleased(s, spawned, "failure");
+      await assertProcessReleased(s, spawned, "failure", { served: false });
     } finally {
       holder.close();
       try {
@@ -775,7 +881,7 @@ test(
       const status = await exitWithin(spawned, 15_000);
       assert.equal(status.code, 1);
       assert.match(await spawned.stderr, /ts-db server failed: ReaderExitedError/);
-      const records = await assertProcessReleased(s, spawned, "failure", true);
+      const records = await assertProcessReleased(s, spawned, "failure", { childExit: true });
       assert.equal(records[at(records, "stopping")].detail?.reason, "reader-exited");
     }),
 );
