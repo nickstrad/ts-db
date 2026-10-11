@@ -36,6 +36,9 @@ const _acceptsThePlatformUnion: (error: E.PlatformError) => number = E.toHttpSta
  * concern for item 22's tests.
  */
 const statusByTag: Record<E.PlatformError["_tag"], number> = {
+  MalformedTenantId: 400,
+  UnknownTenant: 404,
+  TenantDeactivated: 403,
   SchemaError: 400,
   CompileError: 400,
   RuleError: 400,
@@ -76,6 +79,9 @@ type _StatusTableIsExact = Expect<Equals<keyof typeof statusByTag, E.PlatformErr
  * changing this list is a compile error, so the taxonomy cannot grow by accident.
  */
 type FrozenPlatformTags =
+  | "MalformedTenantId"
+  | "UnknownTenant"
+  | "TenantDeactivated"
   | "SchemaError"
   | "CompileError"
   | "DecodeError"

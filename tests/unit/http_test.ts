@@ -8,6 +8,7 @@
  * composition can show (partial startup, SIGTERM, the reader child, finalizer order) is in
  * `tests/unit/server_scope_test.ts` and `tests/unit/server_process_test.ts`.
  */
+import { UnusedTenantRegistry } from "../layers/tenant_registry_test_layer.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
@@ -196,6 +197,7 @@ const TestStack = PlatformTest.pipe(
   Layer.provideMerge(
     Layer.mergeAll(
       ConfigTest(TEST_CONFIG),
+      UnusedTenantRegistry,
       IdGenTest,
       EventSinkTest,
       ObjectStoreTest(),
@@ -668,7 +670,7 @@ test("the server's LoggingLive writes one http event per request, and defect log
   const dir = await Deno.makeTempDir({ prefix: "ts-db-http-jsonl-" });
   try {
     const JsonlStack = PlatformTest.pipe(
-      Layer.provideMerge(Layer.mergeAll(LoggingLive, IdGenTest, ObjectStoreTest())),
+      Layer.provideMerge(Layer.mergeAll(LoggingLive, IdGenTest, ObjectStoreTest(), UnusedTenantRegistry)),
       Layer.provideMerge(ConfigTest({ ...TEST_CONFIG, logging: { dir, eventFlushMs: 10 } })),
     );
     const statuses = await Effect.runPromise(

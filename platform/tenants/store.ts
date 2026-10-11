@@ -22,7 +22,7 @@
  */
 import postgres from "npm:postgres@3.4.9";
 import type { Sql } from "npm:postgres@3.4.9";
-import { Effect, Layer } from "effect";
+import { Context, Effect, Layer, Scope } from "effect";
 import { Config, TenantRegistry } from "../services.ts";
 import { ConflictError, StorageError, TenantDeactivated, UnknownTenant } from "../../core/errors.ts";
 import type { TenantError } from "../../core/errors.ts";
@@ -225,10 +225,11 @@ export const makeTenantRegistry = (sql: Sql): TenantRegistryService => {
       return issued;
     });
 
-  const revokeApiKey: TenantRegistryService["revokeApiKey"] = (keyId) =>
+  const revokeApiKey: TenantRegistryService["revokeApiKey"] = (keyId, tenantId) =>
     Effect.asVoid(
       statement(sql, "update", "api_keys", (client) =>
-        client`UPDATE api_keys SET revoked_at = now() WHERE id = ${keyId} AND revoked_at IS NULL`),
+        client`UPDATE api_keys SET revoked_at = now() WHERE id = ${keyId} AND revoked_at IS NULL
+                AND (${tenantId ?? null}::uuid IS NULL OR tenant_id = ${tenantId ?? null}::uuid)`),
     );
 
   const resolveTenantByKeyHash: TenantRegistryService["resolveTenantByKeyHash"] = (hash) =>
@@ -275,13 +276,51 @@ export const TenantRegistryLive: Layer.Layer<TenantRegistry, StorageError, Confi
       Effect.tryPromise({
         try: async () => {
           const client = postgres(tenancy.databaseUrl);
-          await client`SELECT 1`;
-          return client;
+          try {
+            await client`SELECT 1`;
+            return client;
+          } catch (cause) {
+            await client.end();
+            throw cause;
+          }
         },
         catch: (cause) => new StorageError({ operation: "open", detail: "postgres connect", cause }),
       }),
       (client) => Effect.promise(() => client.end()),
     );
     return makeTenantRegistry(sql);
+  }),
+);
+
+/**
+ * Share one live registry for the server scope, acquired only on the first admin tenant call.
+ * Default (tenancy-off) app traffic and startup therefore do not require Postgres.
+ */
+export const TenantRegistryLazy = Layer.scoped(
+  TenantRegistry,
+  Effect.gen(function* () {
+    const config = yield* Config;
+    const scope = yield* Scope.Scope;
+    const lock = yield* Effect.makeSemaphore(1);
+    const live = TenantRegistryLive.pipe(Layer.provide(Layer.succeed(Config, config)));
+    let acquired: TenantRegistryService | undefined;
+    const acquire = lock.withPermits(1)(Effect.gen(function* () {
+      if (acquired !== undefined) return acquired;
+      const context = yield* Layer.buildWithScope(live, scope);
+      acquired = Context.get(context, TenantRegistry);
+      return acquired;
+    }));
+    const call = <A, E>(f: (registry: TenantRegistryService) => Effect.Effect<A, E>) =>
+      Effect.flatMap(acquire, f);
+    return {
+      createTenant: (input) => call((registry) => registry.createTenant(input)),
+      getTenant: (id) => call((registry) => registry.getTenant(id)),
+      listTenants: () => call((registry) => registry.listTenants()),
+      updateTenant: (id, patch) => call((registry) => registry.updateTenant(id, patch)),
+      deactivateTenant: (id) => call((registry) => registry.deactivateTenant(id)),
+      issueApiKey: (id, name) => call((registry) => registry.issueApiKey(id, name)),
+      revokeApiKey: (id, tenantId) => call((registry) => registry.revokeApiKey(id, tenantId)),
+      resolveTenantByKeyHash: (hash) => call((registry) => registry.resolveTenantByKeyHash(hash)),
+    } satisfies TenantRegistryService;
   }),
 );

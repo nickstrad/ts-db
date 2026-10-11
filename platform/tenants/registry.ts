@@ -120,8 +120,8 @@ export interface TenantRegistryService {
     tenantId: TenantId,
     name: string,
   ): Effect.Effect<IssuedApiKey, TenantError | StorageError>;
-  /** Revoke a key. Idempotent: unknown or already-revoked ids succeed silently. */
-  revokeApiKey(keyId: ApiKeyId): Effect.Effect<void, StorageError>;
+  /** Revoke a key, optionally restricted to its owning tenant. Idempotent: unknown or already-revoked ids succeed silently. */
+  revokeApiKey(keyId: ApiKeyId, tenantId?: TenantId): Effect.Effect<void, StorageError>;
   /**
    * Resolve a tenant from the SHA-256 hex of a presented API key. Joins `api_keys` →
    * `tenants`; revoked keys and inactive tenants are rejected. Deliberately one error

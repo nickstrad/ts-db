@@ -398,12 +398,7 @@ export class TenantDeactivated extends Data.TaggedError("TenantDeactivated")<{
   readonly tenantId: string;
 }> {}
 
-/**
- * The tenant domain's failures (MT-03). Deliberately NOT in `PlatformError` yet: no HTTP
- * surface serves these until MT-05/MT-07 land, and the frozen tag inventory in
- * `tests/errors_exhaustiveness.ts` (item 02) must stay green until the item that adds the
- * surface promotes them with their `toHttpStatus` cases.
- */
+/** Tenant domain failures, served by the admin HTTP surface (MT-05). */
 export type TenantError = MalformedTenantId | UnknownTenant | TenantDeactivated;
 
 // ---------------------------------------------------------------------------
@@ -479,6 +474,7 @@ export type RemoteReaderError =
 
 /** Everything that can reach an HTTP response, and therefore needs a status. */
 export type PlatformError =
+  | TenantError
   | DbError
   | RouteNotFound
   | UnknownAppError
@@ -507,7 +503,7 @@ export type CliError = RestoreError;
 export type ClientError = RemoteError;
 
 /** Every error this repo defines. Useful for `core/events.ts`'s `error_tag` column. */
-export type AnyError = PlatformError | StartupError | CliError | ClientError | TenantError;
+export type AnyError = PlatformError | StartupError | CliError | ClientError;
 
 // ---------------------------------------------------------------------------
 // HTTP status mapping
@@ -525,6 +521,7 @@ export type AnyError = PlatformError | StartupError | CliError | ClientError | T
 export function toHttpStatus(error: PlatformError): number {
   switch (error._tag) {
     // 400 — the request itself is wrong.
+    case "MalformedTenantId":
     case "SchemaError":
     case "CompileError":
     case "RuleError":
@@ -535,7 +532,11 @@ export function toHttpStatus(error: PlatformError): number {
     case "AuthError":
       return 401;
 
+    case "TenantDeactivated":
+      return 403;
+
     // 404 — nothing is addressed by this request.
+    case "UnknownTenant":
     case "RouteNotFound":
     case "UnknownAppError":
     case "UnknownHandlerError":

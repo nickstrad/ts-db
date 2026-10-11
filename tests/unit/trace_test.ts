@@ -1,3 +1,4 @@
+import { UnusedTenantRegistry } from "../layers/tenant_registry_test_layer.ts";
 /**
  * Trace context in the server process (plan item 34), in process: the HTTP ingress contract
  * (`platform/http/trace.ts`), the router held to it, the handler span, and what the real SQLite
@@ -220,6 +221,7 @@ const traceStack = (dir: string) =>
         apps: [APP],
         logging: { includeBindValues: true, traceSql: true },
       }),
+      UnusedTenantRegistry,
       IdGenTest,
       EventSinkTest,
     )),

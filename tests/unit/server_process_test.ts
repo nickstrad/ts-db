@@ -56,6 +56,8 @@ test(
       EVENT_FLUSH_MS: "50",
       PORT: String(port),
       ADMIN_TOKEN: ADMIN,
+      TENANCY: "off",
+      DATABASE_URL: "postgres://tsdb:tsdb@127.0.0.1:1/unavailable?connect_timeout=1",
       COLUMN_APP_TOKEN: COLUMNS.token,
       JSON_APP_TOKEN: JSON_APP.token,
       S3_BASE_URL: "",
@@ -80,6 +82,16 @@ test(
         if (!ready) await new Promise((resolve) => setTimeout(resolve, 100));
       }
       assert.ok(ready, "server never became ready");
+
+      // MT-05: off-mode startup and ordinary app traffic do not depend on Postgres.
+      const unauthorized = await fetch(`${base}/admin/tenants`);
+      assert.equal(unauthorized.status, 401);
+      await unauthorized.body?.cancel();
+      const unavailable = await fetch(`${base}/admin/tenants`, {
+        headers: { authorization: `Bearer ${ADMIN}` },
+      });
+      assert.equal(unavailable.status, 500);
+      assert.equal((await unavailable.json()).error.tag, "StorageError");
 
       const post = (name: string, body: unknown, traceId: string) =>
         fetch(`${base}/apps/${COLUMNS.id}/mutation/${name}`, {
