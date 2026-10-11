@@ -15,6 +15,8 @@
  * transfer is one event that says how many tries it took, never several. A put's event is a transfer
  * record (`emitter: "object-store"`), distinct from the phase records `Backups` writes, and carries the
  * backup run it served (`runId`, read from the `backupRunId` log annotation) when there is one (ADR 0006).
+ * The event is emitted on interruption too (`errorTag: "Interrupted"`, attempts so far); an interrupted
+ * put's `errorDetail` is `{ written: "unknown" }`, because the object may or may not have been stored.
  * This module reads no environment variables; `platform/config.ts` is the only reader.
  */
 import { dirname, resolve, sep } from "node:path";
@@ -100,11 +102,28 @@ function annotation(annotations: HashMap.HashMap<string, unknown>, ...keys: stri
 }
 
 /**
- * Runs `operation`, then emits exactly one event describing it. The event is emitted whatever the
- * outcome and cannot fail (`EventSink.emit` is `Effect<void>`), so it never alters the result.
+ * `errorTag`/`errorDetail` for a failed operation. An interrupted put cannot say whether the object was
+ * written: the interrupt may land before the request, during it, or after the backend stored the bytes
+ * (a local write already under way runs to completion), so its detail says `written: "unknown"`.
+ */
+function failureColumns(
+  op: ObjectOperation,
+  cause: Cause.Cause<OperationError>,
+): { errorTag?: string; errorDetail?: unknown } {
+  if (Cause.isInterruptedOnly(cause)) {
+    return { errorTag: "Interrupted", errorDetail: op === "put" ? { written: "unknown" } : undefined };
+  }
+  const error = Option.getOrUndefined(Cause.failureOption(cause));
+  return error === undefined ? {} : fromPlatformError(error);
+}
+
+/**
+ * Runs `operation` and emits exactly one event describing it. The event is emitted from a finalizer,
+ * so it is written whatever the exit — interruption included — and cannot fail (`EventSink.emit` is
+ * `Effect<void>`), so it never alters the result.
  *
  * `run` receives `sent`, which it runs once per request it sends to the backend (each retry included);
- * the event's `attempts` is how many times it ran.
+ * the event's `attempts` is how many times it ran before the operation ended.
  */
 function instrument<A>(
   deps: Instrumentation,
@@ -118,45 +137,38 @@ function instrument<A>(
     let attempts = 0;
     const sent = Effect.sync(() => void (attempts += 1));
     const startedAt = yield* Clock.currentTimeMillis;
-    const exit = yield* Effect.exit(run(sent));
-    const finishedAt = yield* Clock.currentTimeMillis;
-    const annotations = yield* Effect.logAnnotations;
-    const fiber = FiberId.threadName(yield* Effect.fiberId);
-    const eventId = yield* deps.ids.next;
-    const ok = Exit.isSuccess(exit);
-    const error = ok ? undefined : Option.getOrUndefined(Cause.failureOption(exit.cause));
-    const columns = error === undefined ? undefined : fromPlatformError(error);
-    const bytes = ok ? bytesOf(exit.value) : bytesIn;
-    const envelope: EventEnvelope = {
-      eventId,
-      ts: new Date(finishedAt).toISOString(),
-      level: ok ? "info" : "error",
-      role: deps.role,
-      pid: Deno.pid,
-      traceId: annotation(annotations, "traceId", "trace_id") ?? fiber,
-      spanId: annotation(annotations, "spanId", "span_id"),
-      appId: annotation(annotations, "appId", "app_id"),
-    };
-    const durationMs = finishedAt - startedAt;
-    const outcome = ok ? "ok" : "error";
-    const event: EventRecord = op === "put"
-      ? backupEvent({
-        ...envelope,
-        phase: "put-object",
-        emitter: "object-store",
-        runId: annotation(annotations, BACKUP_RUN_ANNOTATION),
-        key,
-        bytes,
-        attempts,
-        durationMs,
-        outcome,
-        errorTag: columns?.errorTag,
-        errorDetail: columns?.errorDetail,
-      })
-      : lifecycleEvent({
-        ...envelope,
-        phase: "object-get",
-        detail: {
+    // `onExit` finalizers run uninterruptibly, so an interrupted operation still records its transfer.
+    return yield* Effect.onExit(run(sent), (exit) => emitFor(exit, startedAt, attempts));
+  });
+
+  function emitFor(exit: Exit.Exit<A, OperationError>, startedAt: number, attempts: number) {
+    return Effect.gen(function* () {
+      const finishedAt = yield* Clock.currentTimeMillis;
+      const annotations = yield* Effect.logAnnotations;
+      const fiber = FiberId.threadName(yield* Effect.fiberId);
+      const eventId = yield* deps.ids.next;
+      const ok = Exit.isSuccess(exit);
+      const columns = Exit.isFailure(exit) ? failureColumns(op, exit.cause) : undefined;
+      const interrupted = columns?.errorTag === "Interrupted";
+      const bytes = ok ? bytesOf(exit.value) : bytesIn;
+      const envelope: EventEnvelope = {
+        eventId,
+        ts: new Date(finishedAt).toISOString(),
+        level: ok ? "info" : interrupted ? "warn" : "error",
+        role: deps.role,
+        pid: Deno.pid,
+        traceId: annotation(annotations, "traceId", "trace_id") ?? fiber,
+        spanId: annotation(annotations, "spanId", "span_id"),
+        appId: annotation(annotations, "appId", "app_id"),
+      };
+      const durationMs = finishedAt - startedAt;
+      const outcome = ok ? "ok" : "error";
+      const event: EventRecord = op === "put"
+        ? backupEvent({
+          ...envelope,
+          phase: "put-object",
+          emitter: "object-store",
+          runId: annotation(annotations, BACKUP_RUN_ANNOTATION),
           key,
           bytes,
           attempts,
@@ -164,12 +176,23 @@ function instrument<A>(
           outcome,
           errorTag: columns?.errorTag,
           errorDetail: columns?.errorDetail,
-        },
-      });
-    yield* deps.sink.emit(event);
-    // A defect (not a typed failure) is re-raised as-is; typed failures keep their channel.
-    return yield* exit;
-  });
+        })
+        : lifecycleEvent({
+          ...envelope,
+          phase: "object-get",
+          detail: {
+            key,
+            bytes,
+            attempts,
+            durationMs,
+            outcome,
+            errorTag: columns?.errorTag,
+            errorDetail: columns?.errorDetail,
+          },
+        });
+      yield* deps.sink.emit(event);
+    });
+  }
 }
 
 // ===========================================================================

@@ -500,7 +500,7 @@ test("interrupting take mid-upload releases the per-app guard and removes the te
   assert.equal(manifest.appId, "app");
 });
 
-test("interrupted upload over the real ObjectStoreLocal records exactly one put-object event", async () => {
+test("interrupted upload over the real ObjectStoreLocal records the phase and one interrupted transfer", async () => {
   const dir = mkdtempSync(join(tmpdir(), "ts-db-backup-interrupt-"));
   const writeGate = Promise.withResolvers<void>();
   try {
@@ -526,9 +526,21 @@ test("interrupted upload over the real ObjectStoreLocal records exactly one put-
       }).pipe(Effect.provide(Layer.mergeAll(store, run.deps))),
     );
     const puts = backupEvents(run.events).filter((e) => e.phase === "put-object");
-    assert.equal(puts.length, 1, "the store emits no transfer on interrupt; Backups records the one phase");
-    assert.equal(puts[0].emitter, "backups");
-    assert.equal(puts[0].errorTag, "Interrupted");
+    assert.equal(puts.length, 2, "one phase record from Backups and one transfer record from the store");
+    const phase = puts.find((e) => e.emitter === "backups");
+    const transfer = puts.find((e) => e.emitter === "object-store");
+    assert.ok(phase && transfer);
+    assert.equal(phase.errorTag, "Interrupted");
+    assert.equal(phase.errorDetail, undefined);
+    // The store's transfer record is written from a finalizer: it says the put was interrupted after
+    // one request, and that the object may or may not have been written.
+    assert.equal(transfer.outcome, "error");
+    assert.equal(transfer.errorTag, "Interrupted");
+    assert.equal(transfer.level, "warn");
+    assert.equal(transfer.attempts, 1);
+    assert.deepEqual(transfer.errorDetail, { written: "unknown" });
+    assert.equal(transfer.runId, phase.runId);
+    assert.equal(transfer.key, phase.key);
     assert.ok(!existsSync(join(dir, "apps/app/latest.json")));
   } finally {
     writeGate.resolve();

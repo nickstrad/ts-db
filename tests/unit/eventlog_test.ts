@@ -1011,6 +1011,58 @@ test("every typed row joins exactly one canonical row on event_id; ts and trace_
   });
 });
 
+test("a record of an unknown kind, or with no kind, lands in platform_events raw with no typed row", async () => {
+  await withWorld(async (world) => {
+    const raw = (id: string, kind?: string) =>
+      JSON.stringify({ ...envelope(id, "server", 42), ...(kind === undefined ? {} : { kind }), value: 7 }) +
+      "\n";
+    await writeSource(
+      world,
+      SERVER_FILE,
+      lines(serverFixture()) + raw("m-metrics", "metrics") + raw("m-bare"),
+    );
+    await writeSource(world, READER_FILE, lines(readerFixture()));
+    const report = await ingest(world, T0);
+    assert.equal(report.linesRejected, 0, "an unknown or missing kind is not a reject");
+
+    // The envelope lands; nothing kind-specific (`name`) is guessed.
+    const landed = await query(
+      world,
+      `SELECT event_id, event_kind, handler_kind, role, trace_id, name, outcome FROM platform_events
+       WHERE event_id IN ('m-metrics', 'm-bare') ORDER BY event_id`,
+    );
+    assert.deepEqual(landed, [
+      {
+        event_id: "m-bare",
+        event_kind: null,
+        handler_kind: null,
+        role: "server",
+        trace_id: "trace-1",
+        name: null,
+        outcome: null,
+      },
+      {
+        event_id: "m-metrics",
+        event_kind: "metrics",
+        handler_kind: null,
+        role: "server",
+        trace_id: "trace-1",
+        name: null,
+        outcome: null,
+      },
+    ]);
+    for (const table of Object.keys(TYPED_EVENT_TABLES)) {
+      const [row] = await query(
+        world,
+        `SELECT count(*) AS n FROM ${table} WHERE event_id IN ('m-metrics', 'm-bare')`,
+      );
+      assert.equal(row.n, 0n, table);
+    }
+    // The typed kinds still join exactly.
+    assert.equal((await assertExactJoins(world)).sql_events, 2);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Item 35: event_kind / handler_kind taxonomy and outcomes
 // ---------------------------------------------------------------------------
@@ -1500,6 +1552,25 @@ test("upgrade rebuilds v1 through the real ingest, proves it complete, switches,
     const again = await upgradeEither(world, T0 + 3000);
     assert.ok(Either.isRight(again));
     assert.deepEqual(again.right, { status: "current", version: EVENTLOG_SCHEMA_VERSION });
+  });
+});
+
+test("an upgrade killed before its switch leaves no timestamped orphan; the next attempt clears its scratch", async () => {
+  await withWorld(async (world) => {
+    await writeV1World(world, V1_SOURCES());
+    const original = await fileSha(world.dbPath);
+    // What a process killed mid-copy and mid-rebuild leaves: a torn pending copy and a partial rebuild.
+    const v1Bytes = await Deno.readFile(world.dbPath);
+    await Deno.writeFile(`${world.dbPath}.v1-pending.duckdb`, v1Bytes.slice(0, v1Bytes.length >> 1));
+    await Deno.writeTextFile(`${world.dbPath}.v2-rebuild.duckdb`, "torn");
+    await Deno.writeTextFile(`${world.dbPath}.v2-rebuild.duckdb.wal`, "torn");
+
+    const result = await upgradeEither(world, T0);
+    assert.ok(Either.isRight(result) && result.right.status === "upgraded", JSON.stringify(result));
+    const backupName = "events.duckdb.v1-2026-10-10T13-00-00.000Z.duckdb";
+    assert.deepEqual(await dbDirectory(world), ["events.duckdb", backupName]);
+    assert.equal(await fileSha(join(world.dbPath, "..", backupName)), original);
+    assert.equal(await schemaStatus(world), "current");
   });
 });
 

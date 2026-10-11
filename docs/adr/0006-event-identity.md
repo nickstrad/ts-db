@@ -49,7 +49,12 @@ Duplicates follow the offset model (ADR 0004):
   `SELECT event_id FROM platform_events GROUP BY 1 HAVING count(*) > 1` finds them.
 
 `k6_points` is not a projection of an event record. Item 25 fills it from k6's own output, so it gets no
-`event_id`.
+`event_id`. **Item 25 handoff:** if `perf:ingest` creates the event-log file itself, holding only `k6_points`,
+it must stamp it by running `EVENTLOG_DDL`, which writes the `(2, …, 'create')` row. An unstamped file with
+event-log tables looks like v1 to `UNVERSIONED_GUARD`, so the next ingest would refuse it.
+
+A record whose `kind` is unknown (say `metrics`) or absent is not rejected. It lands in `platform_events` with
+`event_kind` set to that kind (or `NULL`) and no per-kind `name`, and no typed table gets a row.
 
 ### 2. `event_kind` and `handler_kind` replace the overloaded `kind`
 
@@ -66,14 +71,14 @@ under the new mapping. A line shaped after §4.1's original field list, a handle
 `platform_events.outcome` keeps each kind's own vocabulary, so item 23 can tell failures apart rather than
 fold them into one value:
 
-| `event_kind`                            | `outcome`                                         |
-| --------------------------------------- | ------------------------------------------------- |
-| `handler`, `sql`, `backup`              | `ok` / `error`                                    |
-| `tx`                                    | `commit` / `rollback` / `interrupted`             |
-| `http` (no outcome field in the record) | `error` when `errorTag` is set, else `ok`         |
-| `queue`                                 | the signal: `high-water` / `rejected` / `dropped` |
-| `ingest`                                | `status`                                          |
-| `lifecycle`                             | `NULL`                                            |
+| `event_kind`                            | `outcome`                                                    |
+| --------------------------------------- | ------------------------------------------------------------ |
+| `handler`, `sql`, `backup`              | `ok` / `error`                                               |
+| `tx`                                    | `commit` / `rollback` / `interrupted`                        |
+| `http` (no outcome field in the record) | `error` when `errorTag` is set or `status` is 5xx, else `ok` |
+| `queue`                                 | the signal: `high-water` / `rejected` / `dropped`            |
+| `ingest`                                | `status`                                                     |
+| `lifecycle`                             | `NULL`                                                       |
 
 For item 23's catalog, a failure is `outcome IN ('error', 'rollback', 'interrupted')`; `error_tag` names it.
 
@@ -102,9 +107,15 @@ A transfer links to the phase that issued it by `(run_id, key)`. Accounting ther
 | transfers                 | `emitter = 'object-store'`                                            |
 | retries                   | `sum(attempts - 1)` over `emitter = 'object-store'`                   |
 
-The interrupted-upload race is gone. `Backups` always records its `put-object` phase, and the store's transfer
-record says whether the object was written. The `errorDetail: { written: "unknown" }` marker is therefore no
-longer written.
+The interrupted-upload race is gone. `Backups` always records its `put-object` phase, with no `errorDetail`.
+The store's transfer record is the one that speaks for the object. An earlier draft of this item claimed the
+store already wrote that record on interruption. It did not: the record was emitted after the PUT returned, so
+an interrupted transfer left none, and nothing said whether the object might exist. The store now emits its
+record from a finalizer, so an interrupted PUT still writes one `object-store` record
+(`errorTag:
+Interrupted`, `attempts` so far, `errorDetail: { written: "unknown" }`). The interrupt can land
+before the request, during it or after the backend stored the bytes, so `unknown` is the honest answer. The
+marker moved from `Backups`' phase record to the store's transfer record.
 
 Records written before this change have no `emitter`. Ingest infers it from what each producer wrote then:
 
@@ -141,7 +152,10 @@ handler kind for `http` rows is likewise unrecoverable from v1 alone. The JSONL 
    refuses rather than copy a half-checkpointed file. Opening it once, even via a refused ingest, checkpoints
    it. The schema is read through a `READ_ONLY` attach, which also fails explicitly if another process holds
    the file.
-2. **Preserve the original.** The upgrade copies the v1 file byte-for-byte to `<file>.v1-<instant>.duckdb`.
+2. **Preserve the original.** The upgrade copies the v1 file byte-for-byte to `<file>.v1-pending.duckdb` and
+   fsyncs it. The copy takes its kept name, `<file>.v1-<instant>.duckdb`, only after step 5's switch. So an
+   attempt killed earlier (OOM, power loss) leaves no timestamped orphan. Its pending copy is a copy of a v1
+   file still in place, and the next attempt discards it along with the side files.
 3. **Rebuild through the existing ingest entry.** `makeEventLogIngest` ingests the whole retained JSONL tree,
    from offset 0, into `<file>.v2-rebuild.duckdb`.
 4. **Prove completeness against the copy.** Every v1 `platform_events` `event_id` must be in the rebuild.
@@ -150,8 +164,11 @@ handler kind for `http` rows is likewise unrecoverable from v1 alone. The JSONL 
    may differ, since that is the new mapping, but no row may be missing. v1 `k6_points` rows have no JSONL
    source and an unchanged DDL, so they are copied over verbatim. The rebuild records its evidence in a
    `(2, …, 'rebuild-from-v1', detail)` row.
-5. **Switch** by renaming the rebuilt file over the original. The rename is atomic, so the path always names a
-   whole v1 file or a whole v2 file. The copy is kept.
+5. **Switch** by fsyncing the rebuilt file and renaming it over the original. The rename is atomic, so the
+   path always names a whole v1 file or a whole v2 file. The copy is then renamed to its kept name, and the
+   directory is fsynced so that both renames survive a crash. A process killed between the two renames leaves
+   a v2 file beside `<file>.v1-pending.duckdb`, which then holds the only v1 original. The upgrade never
+   removes a pending copy while the live file is v2. The operator renames it.
 
 If step 3 or 4 fails, the upgrade fails with `IngestError` (`phase: "plan"` when sources are missing). It
 removes the side file and the copy and emits a `lifecycle` `eventlog-schema-upgrade-refused` event. The v1
@@ -168,6 +185,10 @@ The normal ingest event tables stay append-only. The upgrade creates a new file 
 - **Item 36** owns ingest startup. The guard needs no wiring, because it is in `EVENTLOG_DDL`. Whether ingest
   startup should call `upgradeEventLog` automatically on a v1 file, or leave it as an operator step, is item
   36's call. `inspectEventLogSchema` reports `absent` / `current` / `v1` without opening the file for writing.
+  **Item 36 handoff:** the `READ_ONLY` attach in step 1 refuses a file another process holds, but DuckDB's
+  file lock is a per-process POSIX lock. It may not protect if `upgradeEventLog` is called from inside the
+  reader while the reader's own ingest connection has the file open. Wiring it into startup must close that
+  connection first, or serialize the call with ingest.
 - **Item 23** writes its catalog against v2: `event_kind` / `handler_kind`, `event_id` joins, the outcome
   vocabularies above, and `emitter` / `run_id` / `attempts` for `backup-history`. Its `trace` query can now
   join typed tables exactly instead of dropping them.
@@ -175,9 +196,14 @@ The normal ingest event tables stay append-only. The upgrade creates a new file 
   requires. A new typed table needs a `TYPED_EVENT_TABLES` entry, and the typed mapping in `tables.ts` is
   keyed by the same names, so neither can be added without the other.
 - **`scripts/duckdb/*.sql`** (outside this item) still use v1's `platform_events.kind` and `http_events.kind`:
-  `event-counts-by-type.sql`, `recent-errors.sql`, `trace-timeline.sql`. `backup-durations.sql`'s stated
-  assumptions (no `trace_id`, no run) are now answered by `run_id`. These scripts fail against a v2 file until
-  item 23 replaces them or item 37 reconciles them.
+  `event-counts-by-type.sql`, `recent-errors.sql`, `trace-timeline.sql`. These fail with a binder error
+  against a v2 file until item 23 replaces them or item 37 reconciles them.
+- **`backup-durations.sql` is worse: against v2 it runs and gives wrong answers.** Every column it reads still
+  exists, so nothing fails. It has no `emitter` filter, so its `put-object` row mixes `Backups`' one phase
+  record per run with the store's one transfer record per PUT (snapshot, manifest and `latest.json`). That
+  inflates `phase_count`, and the `failure_count`, durations and `total_bytes` of the two record kinds get
+  summed together. Its stated assumptions (no `trace_id`, no run) are now answered by `run_id`. Until item 23
+  or 37 replaces it, do not trust its `put-object` row.
 - **A rebuild re-quarantines** every historical rejected line: like any first ingest, it appends a second copy
   to `rejected.jsonl`. That is a duplicate in a diagnostic file, which is ingest's documented safe failure.
 - **A rebuild re-reads** every retained `.jsonl`. That is the same cost as a first ingest, paid once.

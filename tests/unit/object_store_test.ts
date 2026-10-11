@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { Cause, Effect, Exit, Layer, Option } from "effect";
+import { Cause, Effect, Exit, Fiber, Layer, Option } from "effect";
 import type { KeyFailure } from "../../core/errors.ts";
 import { ConfigError, InvalidKeyError, ObjectStoreError } from "../../core/errors.ts";
 import type { EventRecord } from "../../core/events.ts";
@@ -480,6 +480,38 @@ test("s3: a retried put is one transfer record whose attempts count every reques
   const [failed] = exhausted.events;
   assert.ok(failed.kind === "backup");
   assert.deepEqual([failed.attempts, failed.outcome], [4, "error"]);
+});
+
+test("s3: an interrupted put still writes its transfer record, with the attempts so far", async () => {
+  let calls = 0;
+  const second = Promise.withResolvers<void>();
+  // First request: a transient 503. Second: hangs until aborted, signalling that it was sent.
+  const hanging = ((_input: Request | URL | string, init?: RequestInit) => {
+    calls += 1;
+    if (calls === 1) return Promise.resolve(new Response("SlowDown", { status: 503 }));
+    second.resolve();
+    return new Promise<Response>((_, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+    });
+  }) as typeof fetch;
+  const h = harness(S3, makeObjectStoreS3, s3Options(hanging));
+  const exit = await exec(
+    h,
+    Effect.gen(function* () {
+      const fiber = yield* Effect.fork(put("a.bin", enc.encode("abc")));
+      yield* Effect.promise(() => second.promise);
+      return yield* Fiber.interrupt(fiber);
+    }),
+  );
+  assert.ok(Exit.isSuccess(exit) && Exit.isFailure(exit.value) && Cause.isInterruptedOnly(exit.value.cause));
+  assert.equal(h.events.length, 1);
+  const [event] = h.events;
+  assert.ok(event.kind === "backup");
+  assert.deepEqual(
+    [event.emitter, event.outcome, event.errorTag, event.level, event.attempts, event.bytes],
+    ["object-store", "error", "Interrupted", "warn", 2, 3],
+  );
+  assert.deepEqual(event.errorDetail, { written: "unknown" });
 });
 
 test("s3: a network error surfaces without a status and keeps its cause", async () => {

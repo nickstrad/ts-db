@@ -43,7 +43,8 @@
  *   `statementKind` (sql), `queue` (queue), `phase` (backup, lifecycle), `sourceFile` (ingest).
  * - `platform_events.outcome` keeps each kind's own vocabulary, so item 23 can tell failures apart:
  *   `outcome` (`ok`/`error`; for `tx`, `commit`/`rollback`/`interrupted`), `event` (queue), `status`
- *   (ingest), and for `http` — which has no outcome field — `error` when `errorTag` is set, else `ok`.
+ *   (ingest), and for `http` — which has no outcome field — `error` when `errorTag` is set or `status`
+ *   is 5xx, else `ok` (a 5xx answered without a tagged error is still a server failure).
  * - **Backups.** `backup_events.emitter` is `emitter` (`backups` or `object-store`), `run_id` is
  *   `runId`, `attempts` is `attempts`. A record written before item 35 has no `emitter`; it is inferred
  *   from what each producer wrote then: `put-object` came from the object store, except the record
@@ -79,6 +80,7 @@
  * producers are JavaScript, so a `number` past 2^53 has lost precision *before* it is written —
  * DuckDB stores exactly what the line says, which is the most this side can promise.
  */
+import { dirname } from "node:path";
 import { Clock, Effect, Exit } from "effect";
 import { IngestError } from "../../core/errors.ts";
 import { lifecycleEvent, type Role } from "../../core/events.ts";
@@ -353,7 +355,8 @@ const PLATFORM_EVENTS: TableInsert = {
     [
       "outcome",
       `CASE ${EVENT_KIND} WHEN 'queue' THEN ${textOf("event")} WHEN 'ingest' THEN ${textOf("status")} ` +
-      `WHEN 'http' THEN CASE WHEN ${hasValue("errorTag")} THEN 'error' ELSE 'ok' END ` +
+      `WHEN 'http' THEN CASE WHEN ${hasValue("errorTag")} OR ${intOf("status", "INTEGER")} >= 500 ` +
+      `THEN 'error' ELSE 'ok' END ` +
       `ELSE ${textOf("outcome")} END`,
     ],
     ["error_tag", textOf("errorTag")],
@@ -513,6 +516,16 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
+/** Flushes `path` — a file's bytes, or a directory's entries — to stable storage. */
+async function fsync(path: string): Promise<void> {
+  const handle = await Deno.open(path, { read: true });
+  try {
+    await handle.sync();
+  } finally {
+    handle.close();
+  }
+}
+
 /** Removes a scratch file of the upgrade's own making; a file already gone is fine. */
 function discard(path: string): Effect.Effect<void> {
   return Effect.promise(() => Deno.remove(path).catch(() => undefined));
@@ -633,8 +646,9 @@ interface Verified {
 
 /**
  * Proves the rebuilt file (the connection's own database) holds every event of the v1 copy at
- * `backupPath`, then carries over `k6_points` and records the rebuild in `_eventlog_schema`. Fails —
- * having changed only the side file — when any v1 event is missing.
+ * `copyPath`, then carries over `k6_points` and records the rebuild in `_eventlog_schema`, naming
+ * `backupPath`, where the copy is kept once the switch is made. Fails — having changed only the side
+ * file — when any v1 event is missing.
  *
  * "Holds every event" means: every v1 `platform_events` row's `event_id` is in the rebuilt
  * `platform_events`; every v1 typed table has exactly as many rows as v1 `platform_events` has of its
@@ -644,11 +658,12 @@ interface Verified {
 function verifyAndCarry(
   connection: EventLogConnection,
   dbPath: string,
+  copyPath: string,
   backupPath: string,
   at: string,
 ): Effect.Effect<Verified, IngestError> {
   return Effect.gen(function* () {
-    yield* attemptIo("plan", () => connection.run(`ATTACH ${sqlString(backupPath)} AS v1 (READ_ONLY)`));
+    yield* attemptIo("plan", () => connection.run(`ATTACH ${sqlString(copyPath)} AS v1 (READ_ONLY)`));
     const v1Tables = yield* tablesOf(connection, "v1");
     const problems: string[] = [];
     let eventsVerified = 0;
@@ -741,7 +756,10 @@ function verifyAndCarry(
  *    the upgrade refuses rather than copy a half-checkpointed file. (Opening the file once — even the
  *    refused v2 ingest connection does — checkpoints it.) The schema is read through a `READ_ONLY`
  *    attach, which also fails if another process holds the file.
- * 2. **Preserve the original.** The v1 file is copied byte-for-byte to `<file>.v1-<instant>.duckdb`.
+ * 2. **Preserve the original.** The v1 file is copied byte-for-byte to `<file>.v1-pending.duckdb` and
+ *    fsynced. The copy takes its kept name, `<file>.v1-<instant>.duckdb`, only after the switch, so an
+ *    attempt killed before then (OOM, power loss) leaves no timestamped orphan: its pending copy is a
+ *    copy of a v1 file still in place, and the next attempt discards it with the other scratch files.
  * 3. **Rebuild through the real ingest.** `makeEventLogIngest` — the same entry, DDL and mappings every
  *    run uses — ingests the whole retained JSONL tree into `<file>.v2-rebuild.duckdb`, from offset 0.
  *    Like any first ingest it quarantines rejected lines and emits its anomalies, so a rebuild appends
@@ -750,11 +768,17 @@ function verifyAndCarry(
  *    is, fail `IngestError({ phase: "plan" })`: the side file and the copy are removed and the v1 file,
  *    with its `_ingest_state` offsets, is exactly as it was. A source that retention gzipped or deleted
  *    is the usual cause; this never discards the v1 rows that only it still holds.
- * 5. **Switch** by renaming the rebuilt file over the original — atomic, so the path always names a
- *    whole v1 or a whole v2 file — and keep the copy.
+ * 5. **Switch** by fsyncing the rebuilt file and renaming it over the original — atomic, so the path
+ *    always names a whole v1 or a whole v2 file — then rename the copy to its kept name and fsync the
+ *    directory so both renames survive a crash. A process killed between the two renames leaves a v2
+ *    file and `<file>.v1-pending.duckdb` holding the only v1 original; nothing removes a pending copy
+ *    while the live file is v2, and the operator renames it.
  *
  * Run it while nothing else has the event log open (the reader's ingest is refused on a v1 file anyway).
- * Item 36 owns calling it from ingest startup; until then it is an explicit operator step.
+ * Item 36 owns calling it from ingest startup; until then it is an explicit operator step. The `READ_ONLY`
+ * attach in step 1 refuses a file another *process* holds, but DuckDB's file lock is a per-process POSIX
+ * lock, so it may not refuse a call from inside the reader while the reader's own ingest connection has
+ * the file open. Item 36 must close that connection first, or serialize the call with ingest.
  */
 export function upgradeEventLog(
   options: EventLogUpgradeOptions = {},
@@ -781,8 +805,9 @@ export function upgradeEventLog(
 
     const at = new Date(yield* Clock.currentTimeMillis).toISOString();
     const backupPath = `${dbPath}.v1-${at.replaceAll(":", "-")}.duckdb`;
+    const copyPath = `${dbPath}.v1-pending.duckdb`;
     const rebuildPath = `${dbPath}.v2-rebuild.duckdb`;
-    const scratch = [rebuildPath, `${rebuildPath}.wal`];
+    const scratch = [rebuildPath, `${rebuildPath}.wal`, copyPath];
 
     const emit = (level: "info" | "error", phase: string, detail: unknown) =>
       Effect.flatMap(Clock.currentTimeMillis, (millis) =>
@@ -798,9 +823,13 @@ export function upgradeEventLog(
         })));
 
     const upgrade = Effect.gen(function* () {
-      // Leftovers of an earlier, failed attempt are derived data of the upgrade's own making.
+      // Leftovers of an earlier, failed or killed attempt are derived data of the upgrade's own making:
+      // the live file is still v1, so a pending copy is a copy of it.
       yield* Effect.forEach(scratch, discard, { discard: true });
-      yield* attemptIo("inventory", () => Deno.copyFile(dbPath, backupPath));
+      yield* attemptIo("inventory", async () => {
+        await Deno.copyFile(dbPath, copyPath);
+        await fsync(copyPath);
+      });
       const rebuild = yield* Effect.scoped(
         Effect.flatMap(ingest.makeEventLogIngest({ driver, role }), (service) => service.ingest),
       ).pipe(
@@ -812,20 +841,21 @@ export function upgradeEventLog(
       const verified = yield* withConnection(
         driver,
         rebuildPath,
-        (connection) => verifyAndCarry(connection, dbPath, backupPath, at),
+        (connection) => verifyAndCarry(connection, dbPath, copyPath, backupPath, at),
       );
       if (yield* attemptIo("commit", () => exists(`${rebuildPath}.wal`))) {
         return yield* Effect.fail(failure("commit", `${rebuildPath} did not checkpoint on close`));
       }
-      yield* attemptIo("commit", () => Deno.rename(rebuildPath, dbPath));
+      yield* attemptIo("commit", async () => {
+        await fsync(rebuildPath);
+        await Deno.rename(rebuildPath, dbPath);
+      });
       return { status: "upgraded", fromVersion: 1, version, backupPath, ...verified, rebuild } as const;
     });
 
     const report = yield* upgrade.pipe(
       Effect.onExit((exit) =>
-        Exit.isSuccess(exit)
-          ? Effect.void
-          : Effect.forEach([...scratch, backupPath], discard, { discard: true })
+        Exit.isSuccess(exit) ? Effect.void : Effect.forEach(scratch, discard, { discard: true })
       ),
       Effect.tapError((error) =>
         emit("error", "eventlog-schema-upgrade-refused", {
@@ -838,6 +868,11 @@ export function upgradeEventLog(
         })
       ),
     );
+    // Past the switch: the pending copy is now the only v1 original, so a failure here keeps it.
+    yield* attemptIo("commit", async () => {
+      await Deno.rename(copyPath, backupPath);
+      await fsync(dirname(dbPath));
+    });
     yield* emit("info", "eventlog-schema-upgraded", {
       dbPath,
       fromVersion: 1,
