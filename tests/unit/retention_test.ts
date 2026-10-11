@@ -1,7 +1,12 @@
 /**
- * Unit tests for the retention sweeper (plan item 24), run directly against
+ * Unit tests for the retention sweeper (plan items 24 and 36), run directly against
  * `platform/logging/retention.ts` — not through the `logs:sweep` CLI, which needs item 23's
  * `scripts/logs.ts`.
+ *
+ * Since item 36 a sweep needs an ingest ledger. These tests are about the file contract, so most of
+ * them use `diskLedger`, which vouches that everything on disk is fully ingested; the gate itself,
+ * against a real ingest, is `tests/unit/retention_ingest_test.ts`. The cases here that are about the
+ * gate use hand-built ledgers that stop short.
  *
  * Every test builds a synthetic `LOG_DIR` in a fresh temp directory and asserts on what is actually
  * left on disk, because the contract is a file contract: exactly these files gzipped, exactly these
@@ -18,18 +23,27 @@ import { createHash } from "node:crypto";
 import { dirname, join, relative } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { Cause, Duration, Effect, Exit, Fiber, Option, TestClock } from "effect";
-import { currentPath, plan as rotationPlan, type RotationPolicy } from "../../core/logging/rotation.ts";
+import {
+  type CommittedWatermark,
+  currentPath,
+  plan as rotationPlan,
+  recordOffsets,
+  type RotationPolicy,
+} from "../../core/logging/rotation.ts";
 import type { EventRecord } from "../../core/events.ts";
 import { ConfigTest } from "../../platform/config.ts";
 import {
   applyPlan,
   applySafetyRails,
+  type IngestLedger,
   inventory,
   RetentionPathError,
   startRetentionSweeper,
   sweep,
+  type SweepOptions,
   syncDir,
   validatePlan,
+  type VerifiedSource,
 } from "../../platform/logging/retention.ts";
 import { events } from "../layers/index.ts";
 import { runEffect } from "../helpers/run.ts";
@@ -75,6 +89,56 @@ async function put(path: string, content: string | Uint8Array): Promise<void> {
   await Deno.writeFile(path, typeof content === "string" ? new TextEncoder().encode(content) : content);
 }
 
+/** `put`, with the mtime a file opened `age` days ago at `hour` would have: settled, as old files are. */
+async function putAged(path: string, content: string | Uint8Array, age: number, hour = 12): Promise<void> {
+  await put(path, content);
+  const stamp = daysAgo(age, hour);
+  await Deno.utime(path, stamp, stamp);
+}
+
+const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+
+/** A file's content as ingest saw it: decompressed for a `.gz`. */
+async function contentOf(path: string): Promise<Uint8Array> {
+  const raw = await Deno.readFile(path);
+  return path.endsWith(".gz") ? new Uint8Array(gunzipSync(raw)) : raw;
+}
+
+/**
+ * A ledger that vouches every event file under `root` is fully ingested, every record accepted —
+ * read from disk when the sweep asks, so files that appear later are covered too. For a source
+ * present both plain and as `.gz`, the plain file is what was ingested.
+ */
+function diskLedger(root: string): Effect.Effect<IngestLedger> {
+  return Effect.promise(async () => {
+    const watermarks = new Map<string, CommittedWatermark>();
+    const accepted = new Map<string, ReadonlySet<number>>();
+    const files = (await listFiles(root)).filter((p) => /\/events-[^/]+\.jsonl(\.gz)?$/.test(p)).sort();
+    for (const file of files) {
+      const source = file.replace(/\.gz$/, "");
+      if (watermarks.has(source)) continue;
+      const content = await contentOf(join(root, file));
+      watermarks.set(source, { bytesIngested: content.length, prefixSha256: sha256(content), dedupe: false });
+      accepted.set(source, new Set(recordOffsets(content)));
+    }
+    return {
+      watermarks,
+      acceptedOffsets: (sources: readonly string[]) =>
+        Effect.succeed(new Map(sources.map((s) => [s, accepted.get(s) ?? new Set<number>()]))),
+    };
+  });
+}
+
+/** What the gate would have proved about `paths`, for tests that call `applyPlan` directly. */
+async function verifiedFor(paths: readonly string[]): Promise<Map<string, VerifiedSource>> {
+  const out = new Map<string, VerifiedSource>();
+  for (const path of paths) {
+    const content = await contentOf(path);
+    out.set(path, { sha256: sha256(content), bytes: content.length });
+  }
+  return out;
+}
+
 /**
  * Three event files per day for 30 days (today = age 0): two from the server, one from the reader.
  * Plus a pre-compressed file at age 5 and age 20, and files outside any role tree that a sweep must
@@ -82,8 +146,8 @@ async function put(path: string, content: string | Uint8Array): Promise<void> {
  */
 async function writeTree(root: string): Promise<Fixture[]> {
   const fixtures: Fixture[] = [];
-  const add = async (path: string, age: number, content: string) => {
-    await put(path, content);
+  const add = async (path: string, age: number, content: string, hour: number) => {
+    await putAged(path, content, age, hour);
     fixtures.push({ path, age, content });
   };
   for (let age = 0; age < 30; age++) {
@@ -94,12 +158,13 @@ async function writeTree(root: string): Promise<Fixture[]> {
         eventPath(root, role, age, hour, pid, 1),
         age,
         `${JSON.stringify({ age, role, hour })}\n`.repeat(20),
+        hour,
       );
     }
   }
   for (const age of [5, 20]) {
     const path = `${eventPath(root, "server", age, 3, 100, 1)}.gz`;
-    await put(path, gzipSync("already compressed\n"));
+    await putAged(path, gzipSync("already compressed\n"), age, 3);
     fixtures.push({ path, age, content: "already compressed\n" });
   }
   await put(join(root, "k6", "run-1", "raw.json"), "{}");
@@ -188,7 +253,7 @@ function lifecycleEvents(all: readonly EventRecord[]) {
 }
 
 /** Runs `sweep` under the test stack with the clock at `NOW`; returns the exit and every event. */
-function runSweep(options: Parameters<typeof sweep>[0]) {
+function runSweep(options: SweepOptions) {
   return runEffect(Effect.gen(function* () {
     yield* TestClock.setTime(NOW.getTime());
     const exit = yield* Effect.exit(sweep(options));
@@ -196,8 +261,8 @@ function runSweep(options: Parameters<typeof sweep>[0]) {
   }));
 }
 
-function sweepOptions(root: string, overrides: Partial<Parameters<typeof sweep>[0]> = {}) {
-  return { logDir: root, policy: POLICY, role: "cli" as const, ...overrides };
+function sweepOptions(root: string, overrides: Partial<SweepOptions> = {}): SweepOptions {
+  return { logDir: root, policy: POLICY, role: "cli" as const, ledger: diskLedger(root), ...overrides };
 }
 
 function succeeded<A, E>(exit: Exit.Exit<A, E>): A {
@@ -365,6 +430,7 @@ test("a dry run that fails still emits its error event, with counts, and changes
         root,
         inventory: inv,
         plan: { gzip: [], delete: ["/etc/passwd"], keep: [] },
+        verified: new Map(),
         today: TODAY,
         role: "cli",
         dryRun: true,
@@ -474,6 +540,7 @@ test("a planned path outside LOG_DIR refuses the whole plan and emits an error e
     await put(sibling, "not yours\n");
     const inv = await Effect.runPromise(inventory(root));
     const legit = eventPath(root, "server", 20, 9, 100, 1);
+    const verified = await verifiedFor([legit]);
     const before = await snapshot(base);
 
     const crafted: Array<[string, string]> = [
@@ -485,6 +552,8 @@ test("a planned path outside LOG_DIR refuses the whole plan and emits an error e
       ["unexpected-shape", join(root, "server", "notes.txt")],
       ["not-inventoried", eventPath(root, "server", 25, 4, 7, 1)],
       ["today-or-future", eventPath(root, "server", 0, 9, 100, 1)],
+      // Inventoried, well shaped, old enough — but the gate never passed it.
+      ["unverified", eventPath(root, "server", 21, 9, 100, 1)],
     ];
     for (const [reason, path] of crafted) {
       const { exit, emitted } = await runEffect(Effect.gen(function* () {
@@ -494,6 +563,7 @@ test("a planned path outside LOG_DIR refuses the whole plan and emits an error e
           root,
           inventory: inv,
           plan: { gzip: [], delete: [legit, path], keep: [] },
+          verified,
           today: TODAY,
           role: "cli",
         }));
@@ -562,6 +632,7 @@ test("a `link/..` path acts on the resolved path only, never on what the OS woul
     const victimsBefore = await snapshot(join(base, "2026-09-01"));
     const victimsBefore2 = await snapshot(join(base, "2026-09-02"));
     const inv = await Effect.runPromise(inventory(root));
+    const verified = await verifiedFor(mine);
     // `join` would collapse the `..`; the whole point is that the string keeps it.
     const rawDelete = `${root}/server/link/../2026-09-01/${deleteName}`;
     const rawGzip = `${root}/server/link/../2026-09-02/${gzipName}`;
@@ -572,6 +643,7 @@ test("a `link/..` path acts on the resolved path only, never on what the OS woul
         root,
         inventory: inv,
         plan: { gzip: [rawGzip], delete: [rawDelete], keep: [] },
+        verified,
         today: TODAY,
         role: "cli",
       }));
@@ -659,6 +731,7 @@ test("a file that changed between inventory and apply is skipped, not touched", 
     const grew = eventPath(root, "server", 5, 9, 100, 1);
     const stable = eventPath(root, "server", 20, 9, 100, 1);
     const inv = await Effect.runPromise(inventory(root));
+    const verified = await verifiedFor([grew, stable]);
     const original = await Deno.readTextFile(grew);
     await Deno.writeTextFile(grew, "one more line\n", { append: true });
 
@@ -668,6 +741,7 @@ test("a file that changed between inventory and apply is skipped, not touched", 
         root,
         inventory: inv,
         plan: { gzip: [grew], delete: [stable], keep: [] },
+        verified,
         today: TODAY,
         role: "cli",
       }));
@@ -706,6 +780,7 @@ test("gzip rechecks the parent directory just before removing the source", async
     const source = join(root, "server", "2026-09-01", "events-09-100-001.jsonl");
     await putRandom(source, 32);
     const inv = await Effect.runPromise(inventory(root));
+    const verified = await verifiedFor([source]);
     const moved = join(root, "server", "2026-09-01.moved");
 
     const exit = await runEffect(Effect.gen(function* () {
@@ -714,6 +789,7 @@ test("gzip rechecks the parent directory just before removing the source", async
         root,
         inventory: inv,
         plan: { gzip: [source], delete: [], keep: [] },
+        verified,
         today: TODAY,
         role: "cli",
       })));
@@ -743,6 +819,7 @@ test("an interrupted sweep emits an audit event with the state it reached", asyn
     const big = join(root, "server", "2026-09-01", "events-09-100-001.jsonl");
     await putRandom(big, 32);
     const inv = await Effect.runPromise(inventory(root));
+    const verified = await verifiedFor([big, ...small]);
 
     const { emitted } = await runEffect(Effect.gen(function* () {
       yield* TestClock.setTime(NOW.getTime());
@@ -750,6 +827,7 @@ test("an interrupted sweep emits an audit event with the state it reached", asyn
         root,
         inventory: inv,
         plan: { gzip: [big], delete: small, keep: [] },
+        verified,
         today: TODAY,
         role: "server",
       }));
@@ -806,6 +884,110 @@ test("applySafetyRails keeps open and quarantine paths, resolving them first", (
     "/l/server/e/open2.jsonl",
     "/l/server/f/c.jsonl",
   ]);
+});
+
+// ---------------------------------------------------------------------------
+// The ingest gate (item 36), against hand-built ledgers
+// ---------------------------------------------------------------------------
+
+/** `diskLedger`, then `edit` applied to its watermarks. */
+function editedLedger(
+  root: string,
+  edit: (watermarks: Map<string, CommittedWatermark>) => void,
+): Effect.Effect<IngestLedger> {
+  return Effect.map(diskLedger(root), (ledger) => {
+    const watermarks = new Map(ledger.watermarks);
+    edit(watermarks);
+    return { ...ledger, watermarks };
+  });
+}
+
+test("without committed watermarks nothing is gzipped or deleted, and all of it is reported", async () => {
+  await withTempDir(async (root) => {
+    await writeTree(root);
+    const before = await snapshot(root);
+    const empty: IngestLedger = { watermarks: new Map(), acceptedOffsets: () => Effect.succeed(new Map()) };
+
+    const { exit, emitted } = await runSweep(sweepOptions(root, { ledger: Effect.succeed(empty) }));
+    const report = succeeded(exit);
+
+    assert.deepEqual(await snapshot(root), before);
+    assert.deepEqual([report.gzipped, report.deleted, report.removedDirs], [[], [], []]);
+    // Every event file the policy wanted acted on is backlog; quarantine-free days hold only events.
+    assert.equal(report.blocked.length, 12 * 3 + 16 * 3 + 1);
+    assert.ok(report.blocked.every((b) => b.reason === "no-watermark"));
+    assert.equal(report.blockedBytes, report.blocked.reduce((sum, b) => sum + b.bytes, 0));
+    const [event] = lifecycleEvents(emitted);
+    assert.equal(event.level, "warn");
+    assert.equal((event.detail as Record<string, unknown>).blockedCount, report.blocked.length);
+  });
+});
+
+test("a short watermark pins its file; the cap then prunes the next directory instead", async () => {
+  await withTempDir(async (root) => {
+    await writeTree(root);
+    const policy = { ...POLICY, keepDays: 100, gzipAfterDays: 100, maxTotalBytes: 30_000 };
+    const oldest = eventPath(root, "server", 29, 9, 100, 1);
+    const unpinned = rotationPlan((await Effect.runPromise(inventory(root))).entries, NOW, policy);
+    const ledger = editedLedger(root, (w) => {
+      const key = rel(root, oldest);
+      const row = w.get(key)!;
+      // Ingest stopped one line short: the last line is unread.
+      w.set(key, { ...row, bytesIngested: row.bytesIngested - 10 });
+    });
+
+    const report = succeeded((await runSweep(sweepOptions(root, { policy, ledger }))).exit);
+
+    assert.equal(await exists(oldest), true, "unread bytes are never deleted");
+    assert.deepEqual(report.blocked, [
+      {
+        path: rel(root, oldest),
+        action: "delete",
+        reason: "unread-tail",
+        bytes: (await Deno.stat(oldest)).size,
+      },
+    ]);
+    // Its bytes still count, so the cap had to reach a date bucket the unpinned plan left alone.
+    assert.ok(report.deleted.every((p) => p !== rel(root, oldest)));
+    const extra = report.deleted.filter((p) => !unpinned.delete.includes(join(root, p)));
+    assert.ok(extra.length > 0, "the cap moved on to a newer directory");
+  });
+});
+
+test("a rejected.jsonl stays as long as a source beside it does", async () => {
+  await withTempDir(async (root) => {
+    await writeTree(root);
+    const blockedSource = eventPath(root, "server", 20, 9, 100, 1);
+    const quarantine = join(dirname(blockedSource), "rejected.jsonl");
+    await putAged(quarantine, "{}\n", 20);
+    const ledger = editedLedger(root, (w) => w.delete(rel(root, blockedSource)));
+
+    const report = succeeded((await runSweep(sweepOptions(root, { ledger }))).exit);
+
+    assert.equal(await exists(blockedSource), true);
+    assert.equal(await exists(quarantine), true);
+    const reasons = Object.fromEntries(report.blocked.map((b) => [b.path, b.reason]));
+    assert.equal(reasons[rel(root, blockedSource)], "no-watermark");
+    assert.equal(reasons[rel(root, quarantine)], "quarantine-evidence");
+    // The other files of that day went; the directory stays for the two that could not.
+    assert.equal(await exists(eventPath(root, "server", 20, 15, 100, 1)), false);
+  });
+});
+
+test("a file modified within settleMs is not yet closed, whatever ingest says", async () => {
+  await withTempDir(async (root) => {
+    await writeTree(root);
+    const recent = eventPath(root, "server", 20, 9, 100, 1);
+    const touched = new Date(NOW.getTime() - 60_000);
+    await Deno.utime(recent, touched, touched);
+
+    const report = succeeded((await runSweep(sweepOptions(root, { settleMs: 5 * 60_000 }))).exit);
+
+    assert.equal(await exists(recent), true);
+    assert.deepEqual(report.blocked.map((b) => [b.path, b.reason]), [[rel(root, recent), "unsettled"]]);
+    const settled = succeeded((await runSweep(sweepOptions(root, { settleMs: 30_000 }))).exit);
+    assert.deepEqual(settled.deleted, [rel(root, recent)]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -898,14 +1080,14 @@ test("the sweeper fiber sweeps at startup, then once a day, from Config", async 
     await runEffect(
       Effect.gen(function* () {
         yield* TestClock.setTime(NOW.getTime());
-        yield* startRetentionSweeper({ role: "server" });
+        yield* startRetentionSweeper({ role: "server", ledger: diskLedger(root) });
 
         const first = yield* waitForEvents(1);
         assert.equal(first.length, 1);
         assert.deepEqual(yield* Effect.promise(() => listFiles(root)), expectedAfterSweep(root, fixtures));
 
         // New garbage appears; the next sweep is a day away, so it survives a 23-hour wait.
-        yield* Effect.promise(() => put(late, "late\n"));
+        yield* Effect.promise(() => putAged(late, "late\n", 20, 4));
         yield* realPause(50);
         yield* TestClock.adjust(Duration.hours(23));
         yield* realPause(100);
@@ -929,7 +1111,7 @@ test("a failing sweep is an error event and does not stop tomorrow's sweep", asy
   await runEffect(
     Effect.gen(function* () {
       yield* TestClock.setTime(NOW.getTime());
-      yield* startRetentionSweeper({ role: "server" });
+      yield* startRetentionSweeper({ role: "server", ledger: diskLedger("/") });
 
       yield* waitForEvents(1);
       yield* realPause(50);
