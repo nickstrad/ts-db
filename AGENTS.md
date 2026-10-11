@@ -114,9 +114,11 @@ A reflection pass is a dedicated architectural review of the whole platform at i
 trajectory inflection points (e.g. before starting a new plan or plan phase) — not after every item. Four
 phases, in order:
 
-1. **Diagrams**: verify every C4 diagram in `docs/architecture/` matches the actually-landed architecture —
-   both the `*.github.md` (Mermaid) and `*.terminal.md` (box-drawing) versions; `render.py --check` must pass.
-   Fix any drift found.
+1. **Diagrams & usage docs**: verify every C4 diagram in `docs/architecture/` matches the actually-landed
+   architecture — both the `*.github.md` (Mermaid) and `*.terminal.md` (box-drawing) versions;
+   `render.py --check` must pass. Fix any drift found. Update the usage docs alongside the diagrams — root
+   `docs.md`, the README’s Configuration/usage sections, and any other user-facing docs — so they describe the
+   landed behavior, not the plan.
 2. **Tests**: run the full test suite; report the results (counts, failures).
 3. **Queries**: run the DuckDB analysis queries in `scripts/duckdb/` (and the item-23 analysis catalog)
    against real ingested data. Add new queries or adjust stale ones so they reflect the latest architecture.
