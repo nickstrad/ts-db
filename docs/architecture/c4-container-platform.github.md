@@ -62,7 +62,7 @@ Two invariants follow, and the plan's item 26 adds a test that greps for violati
 - the server process never imports `@duckdb/node-api`;
 - the reader process never imports `node:sqlite`.
 
-This is also why the planned DuckDB event log is ingested by the _reader_ process (see the observability
+This is also why the DuckDB event log is ingested by the _reader_ process (item 21, see the observability
 diagram) rather than written directly by the server.
 
 ## Containers deliberately left out

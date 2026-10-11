@@ -113,11 +113,11 @@ cv.up(config_bottom + 1, RC, "(8)")
 core_bottom = cv.box(row, L, 59, [
     "core/ + platform/services.ts   (items 02, 04-09, 21)",
     "",
-    "landed (items 02, 04-09): errors.ts  schema.ts  plan.ts",
-    "events.ts  compile/{dialect,ddl,select,write,decode}.ts",
-    "logging/rotation.ts  ipc/framing.ts; services.ts tags",
-    "planned (item 21): eventlog/{ddl,offsets}.ts",
-    "No Deno.*, no node:*, no npm:*, no platform/ or sdk/.",
+    "landed (02, 04-09, 21): errors.ts schema.ts plan.ts",
+    "events.ts compile/{dialect,ddl,select,write,decode}.ts",
+    "logging/rotation.ts ipc/framing.ts; services.ts tags;",
+    "eventlog/{ddl,offsets}.ts; no Deno.*, node:* or npm:*;",
+    "no platform/ or sdk/ imports.",
 ], top=(12, 45))
 
 cv.frame(0, 0, core_bottom + 2, 71,

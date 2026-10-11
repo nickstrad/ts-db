@@ -66,7 +66,7 @@ duck_bottom = cv.box(row, 40, 30, [
     "append-only tables plus",
     "_ingest_state offsets;",
     "INSERT only",
-], planned=True, top=(14,), bottom=(14,))
+], top=(14,), bottom=(14,))
 cv.right(row + 4, 33, 39, "(4)")
 
 row = cv.up(duck_bottom + 1, RDR, "(5)")

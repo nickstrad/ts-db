@@ -12,9 +12,9 @@ other. Read it bottom-up: `core/` is pure, `Config` is the only thing that touch
 tier above is provided by the tiers below it. `platform/layers.ts` composes the whole stack as `PlatformLive`.
 
 **The bottom three tiers are built, plus Storage (item 15), ObjectStore (item 18), ReaderClient (item 17) and
-Backups (item 19); only the HTTP API and AppRegistry above the kernel tier are still planned.** Items 02 and
-04–09 landed the pure kernel (`core/errors.ts`, `schema.ts`, `plan.ts`, `events.ts`, `compile/*`,
-`logging/rotation.ts`, `ipc/framing.ts`) and the `platform/services.ts` `Context.Tag` declarations; item 08
+Backups (item 19); only the HTTP API and AppRegistry above the kernel tier are still planned.** Items 02, 04–09 and 21 landed the pure kernel (`core/errors.ts`, `schema.ts`, `plan.ts`, `events.ts`,
+`compile/*`, `logging/rotation.ts`, `ipc/framing.ts`, `eventlog/{ddl,offsets}.ts`) and the
+`platform/services.ts` `Context.Tag` declarations; item 08
 landed `ConfigLive`/`ConfigTest`; item 11 landed the `EventSink` service and the JSONL `Logger` layer, which
 is the first live layer to consume `Config`; item 18 landed the `ObjectStore` scoped service – the
 `ObjectStoreLocal` and `ObjectStoreS3` live layers in `platform/object_store.ts`, with an aws4fetch-signed S3
@@ -103,11 +103,11 @@ by their unit tests. The pre-port code does already call into `core/` — `platf
 ╎         ┌───────────┬────────────────────────────────┬────────────┐  ╎
 ╎         │ core/ + platform/services.ts   (items 02, 04-09, 21)    │  ╎
 ╎         │                                                         │  ╎
-╎         │ landed (items 02, 04-09): errors.ts  schema.ts  plan.ts │  ╎
-╎         │ events.ts  compile/{dialect,ddl,select,write,decode}.ts │  ╎
-╎         │ logging/rotation.ts  ipc/framing.ts; services.ts tags   │  ╎
-╎         │ planned (item 21): eventlog/{ddl,offsets}.ts            │  ╎
-╎         │ No Deno.*, no node:*, no npm:*, no platform/ or sdk/.   │  ╎
+╎         │ landed (02, 04-09, 21): errors.ts schema.ts plan.ts     │  ╎
+╎         │ events.ts compile/{dialect,ddl,select,write,decode}.ts  │  ╎
+╎         │ logging/rotation.ts ipc/framing.ts; services.ts tags;   │  ╎
+╎         │ eventlog/{ddl,offsets}.ts; no Deno.*, node:* or npm:*;  │  ╎
+╎         │ no platform/ or sdk/ imports.                           │  ╎
 ╎         └─────────────────────────────────────────────────────────┘  ╎
 ╎                                                                      ╎
 ╰╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╯
