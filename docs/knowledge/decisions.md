@@ -1,0 +1,67 @@
+# Architectural decisions
+
+Dated decisions with rationale. Plans carry the _what_; this page carries the _why_. Newest first.
+
+## 2026-10-11 — Knowledge lives in plain markdown, no `kb` CLI
+
+Human decision: `docs/knowledge/` is markdown with `index.md`, deliberately not the nickstrad/kb full-text
+store that `vm-agent` and `perpetual` use. Rationale: zero tooling means any agent (or the human in a text
+editor) can read and update entries; nothing to build, index, or reindex.
+
+## 2026-10-11 — Model tier mapping (dual-company)
+
+Sessions run only on Claude or Codex, so every plan item pairs one model per company under a fixed
+correspondence: Opus 5.5 ↔ Astra (`gpt-6-astra`) for the difficult items and all reviews; Sonnet ↔ Sol
+(`gpt-6.1-sol`) for the middle tier; Haiku ↔ Luna (`gpt-6-luna`, high effort) for the fast tier.
+`claude
+--model haiku` resolves to `claude-haiku-5-5` (verified 2026-10-11); Haiku ≤4.5 must never be used —
+the 4.5 experiment showed it drops safety-critical details and rates itself 5/5 regardless. Canonical source:
+repo `AGENTS.md`.
+
+## 2026-10-11 — Multitenancy: Postgres registry, per-tenant SQLite, router interface
+
+`docs/plans/multitenancy.md` (MT-01–MT-10): Postgres is the central tenant registry; each tenant gets its own
+SQLite file. Routing is a `TenantStorageRouter` Effect interface the Storage service depends on — never paths
+or env vars. `LocalFolderRouter` maps UUID-validated tenants to `TENANTS_DIR/<tenant-id>.db`; a future
+`ControlPlaneRouter` must be swappable with zero Storage/client changes. Rationale: grow from local folder to
+control plane without rewriting the storage layer.
+
+## 2026-10-11 — Better Auth is not punted
+
+The multitenancy plan opens its auth item (MT-08) with a headless session-token go/no-go spike instead of
+deferring auth. Side quest sq-09 proved it viable (better-auth 1.7.7 on Deno 2.9.5 against scratch Postgres:
+signup → signin → authenticated 200). Open design point from Opus review: decide token transport before MT-08
+builds — `bearer()` plugin if middleware takes `Authorization: Bearer`, else forward the cookie.
+
+## 2026-10-10 — `PROP_SEED` seed-replay convention
+
+Property tests print their failing seed; re-run exactly with `PROP_SEED=<n>`. Coverage assertions and
+correctness assertions are reported separately so a coverage miss is never triaged as an invariant break
+(lesson from sq-11: every lx-01 "flake" was a coverage assertion, zero invariant defects).
+
+## 2026-10-10 — `work-scripts/` library
+
+The human wants work scripts kept: anything an agent writes to investigate, measure, or verify goes in
+`work-scripts/` (`deno/` for larger work, `bash/` for bash-oriented things), committed and indexed in
+`work-scripts/INDEX.md` (one row per script: purpose, usage, notes). Rationale, proven 2026-10-11: every
+side-quest review verdict could be independently re-run in minutes _because_ the scripts, raw data, and index
+rows were on the branches.
+
+## 2026-10-10 — Effect port as the architecture
+
+Item 22: the entire server composes as a scoped Effect layer — partial-startup release, shutdown ordering,
+ingest-then-sweep RPC triggering. Storage (item 15), DuckDB reader (item 16), object store (item 18), backups
+(item 19) are all Effect services. Rationale: typed errors, supervised fibers, and composition replace ad-hoc
+lifecycle code.
+
+## 2026-10-10 — SQLite storage, DuckDB analytics, Deno runtime
+
+The MVP's core shape survived the Effect port: SQLite for document storage, DuckDB for the query/analytics
+plane, Deno as the runtime. The reflection pass (Astra, 2026-10-11) confirmed the core architecture sound
+while sending back data-semantics fixes (items 30–37).
+
+## Standing — Review and landing protocol
+
+Every real plan item gets an independent top-tier review (Opus 5.5 or Astra, a different agent from the
+builder) before landing. Nothing merges without Opus review **and** human approval. Landings are reported as
+"item N landed and it now gives ability to do \<capability\>".
