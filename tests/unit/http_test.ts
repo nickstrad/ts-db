@@ -271,6 +271,15 @@ test("matchRoute keeps the pre-port route shapes and adds the admin log routes",
   assert.equal(name("POST", "/admin/logs/ingest"), "admin.logs.ingest");
   assert.equal(name("POST", "/admin/logs/analysis/errorsByTag"), "admin.logs.analysis.errorsByTag");
   assert.equal(name("POST", "/admin/logs/analysis/x;DROP"), undefined);
+  assert.equal(name("POST", "/admin/logs/analysis/slowest-sql"), "admin.logs.analysis.slowest-sql");
+  assert.equal(
+    name("POST", "/admin/logs/analysis/error-rate-by-handler"),
+    "admin.logs.analysis.error-rate-by-handler",
+  );
+  assert.equal(name("POST", "/admin/logs/analysis/k6-vs-platform"), "admin.logs.analysis.k6-vs-platform");
+  assert.equal(name("POST", "/admin/logs/analysis/-leading"), undefined);
+  assert.equal(name("POST", "/admin/logs/analysis/a..b"), undefined);
+  assert.equal(name("POST", "/admin/logs/analysis/a/b"), undefined);
 });
 
 httpTest(

@@ -263,14 +263,15 @@ ORDER BY error_count DESC;`,
   {
     name: "starter:event-counts-by-type.sql",
     sql: `SELECT
-  kind,
+  event_kind,
+  handler_kind,
   name,
   outcome,
   count(*) AS event_count
 FROM platform_events
 WHERE ts >= $start_ts
   AND ts <  $end_ts
-GROUP BY kind, name, outcome
+GROUP BY event_kind, handler_kind, name, outcome
 ORDER BY event_count DESC;`,
   },
   {
@@ -304,7 +305,8 @@ ORDER BY event_count DESC;`,
   trace_id,
   role,
   app_id,
-  kind,
+  event_kind,
+  handler_kind,
   name,
   error_tag,
   attrs
@@ -333,7 +335,8 @@ ORDER BY p95_ms DESC;`,
   },
   {
     name: "starter:trace-timeline.sql",
-    sql: `SELECT ts, 'platform' AS source, kind, name, outcome, error_tag, duration_ms, NULL AS extra
+    sql:
+      `SELECT ts, 'platform' AS source, event_kind AS kind, name, outcome, error_tag, duration_ms, NULL AS extra
 FROM platform_events
 WHERE trace_id = $trace_id
 
@@ -353,7 +356,7 @@ WHERE trace_id = $trace_id
 
 UNION ALL
 
-SELECT ts, 'http' AS source, kind, name, CASE WHEN error_tag IS NULL THEN 'ok' ELSE 'error' END,
+SELECT ts, 'http' AS source, handler_kind AS kind, name, CASE WHEN error_tag IS NULL THEN 'ok' ELSE 'error' END,
        error_tag, duration_ms, path AS extra
 FROM http_events
 WHERE trace_id = $trace_id
@@ -361,7 +364,7 @@ WHERE trace_id = $trace_id
 UNION ALL
 
 SELECT ts, 'k6' AS source, metric AS kind, scenario AS name, status AS outcome,
-       NULL AS error_tag, value AS duration_ms, tags AS extra
+       NULL AS error_tag, value AS duration_ms, CAST(tags AS VARCHAR) AS extra
 FROM k6_points
 WHERE trace_id = $trace_id
 

@@ -45,7 +45,7 @@ import {
 } from "../../platform/services.ts";
 import { makeStorage, StorageLive, WRITER_QUEUE_CAP } from "../../platform/sqlite.ts";
 import { defineFunctions } from "../../sdk/functions.ts";
-import { v } from "../../sdk/schema.ts";
+import { defineSchema, defineTable, v } from "../../sdk/schema.ts";
 import { schema } from "../../app/schema.ts";
 import { functions } from "../../app/functions.ts";
 
@@ -693,4 +693,61 @@ test("a read of pre-existing U+0000 text fails StorageError via a second, guarde
       assert.equal(counted.sql.length, 1);
     })
   );
+});
+
+// ---------------------------------------------------------------------------
+// sq-06 regression: the writer queue's Semaphore(1) exclusivity
+// ---------------------------------------------------------------------------
+
+test("sq-06: 50 concurrent read-modify-write increments commit 50/50 with zero lost updates", async () => {
+  const counterSchema = defineSchema({
+    counters: defineTable({ name: v.string(), value: v.integer() }),
+  });
+  const counterApp = defineFunctions(counterSchema);
+  const seed = counterApp.mutation({
+    args: {},
+    handler: ({ db }) => db.insert("counters", { name: "hits", value: 0 }),
+  });
+  const read = counterApp.mutation({
+    args: { id: v.string() },
+    handler: ({ db }, { id }) => db.get("counters", id),
+  });
+  // Read-modify-write inside one mutation. The yieldNow between read and write is the widest
+  // window a handler has: without the writer queue's Semaphore(1) serialization these 50
+  // concurrent increments would race and lose updates.
+  const increment = counterApp.mutation({
+    args: { id: v.string() },
+    handler: ({ db }, { id }) =>
+      Effect.gen(function* () {
+        const doc = (yield* db.get("counters", id)) as { value: number };
+        yield* Effect.yieldNow();
+        yield* db.patch("counters", id, { value: doc.value + 1 });
+      }),
+  });
+
+  const h = harness();
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const storage = yield* Storage;
+        const id = (yield* storage.mutation(seed, {})) as string;
+        const exits = yield* Effect.forEach(
+          Array.from({ length: 50 }),
+          () => Effect.exit(storage.mutation(increment, { id })),
+          { concurrency: "unbounded" },
+        );
+        assert.ok(exits.every(Exit.isSuccess), "every increment committed");
+        const final = (yield* storage.mutation(read, { id })) as { value: number };
+        assert.equal(final.value, 50, "no lost updates: 50 increments, final value 50");
+      }).pipe(
+        Effect.provide(
+          StorageLive({ file: h.file, schema: counterSchema, appId: "test-app" }).pipe(
+            Layer.provide(h.deps),
+          ),
+        ),
+      ),
+    );
+  } finally {
+    h.cleanup();
+  }
 });

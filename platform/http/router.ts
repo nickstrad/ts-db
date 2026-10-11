@@ -12,7 +12,7 @@
  * POST /apps/:appId/(query|mutation)/:name           handlers.invoke      name: [A-Za-z][A-Za-z0-9_]*
  * POST /admin/backup/:appId                          handlers.backup
  * POST /admin/logs/ingest                            handlers.ingestLogs
- * POST /admin/logs/analysis/:name                    handlers.analysis    name: [A-Za-z][A-Za-z0-9_]*
+ * POST /admin/logs/analysis/:name                    handlers.analysis    name: [A-Za-z][A-Za-z0-9_-]*
  * anything else                                      RouteNotFound (404)
  * ```
  *
@@ -66,7 +66,7 @@ export const TRACE_HEADER = "x-trace-id";
 const TRACE_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const APP_ROUTE = /^\/apps\/([^/]+)\/(query|mutation)\/([A-Za-z][A-Za-z0-9_]*)$/;
 const BACKUP_ROUTE = /^\/admin\/backup\/([^/]+)$/;
-const ANALYSIS_ROUTE = /^\/admin\/logs\/analysis\/([A-Za-z][A-Za-z0-9_]*)$/;
+const ANALYSIS_ROUTE = /^\/admin\/logs\/analysis\/([A-Za-z][A-Za-z0-9_-]*)$/;
 
 /** One matched route: what to run, and how the `http` event names it. */
 export interface Route {
