@@ -155,3 +155,4 @@ $RECYCLE.BIN/
 # ---------------------------------------------------------------------------
 .claude/settings.local.json
 .codex/
+agent-work/
