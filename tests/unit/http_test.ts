@@ -3,8 +3,10 @@
  * — `StorageTest` + `ReaderTest` (one shared in-memory store per app), `ObjectStoreTest`,
  * `EventSinkTest`, `IdGenTest`, and a `ReaderClient` that answers in this process instead of a child.
  * **No subprocess and no DuckDB**; every request is a real `Request` and every answer a real
- * `Response`. What only a process can show (SIGTERM, the reader child, the log file) is in
- * `tests/unit/server_process_test.ts`.
+ * `Response`. The one exception to the doubles is the last section, which swaps `EventSinkTest`
+ * for the real server `LoggingLive` to show the events reach the JSONL file. What only the real
+ * composition can show (partial startup, SIGTERM, the reader child, finalizer order) is in
+ * `tests/unit/server_scope_test.ts` and `tests/unit/server_process_test.ts`.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -14,6 +16,8 @@ import { Context, Deferred, Effect, Exit, Fiber, Layer, Option, Ref, type Scope,
 import {
   HandlerKindMismatch,
   IngestError,
+  IpcError,
+  ReaderExitedError,
   UnknownAnalysisQuery,
   UnknownAppError,
   UnknownHandlerError,
@@ -22,6 +26,8 @@ import type { HttpEventRecord } from "../../core/events.ts";
 import { BackupsLive } from "../../platform/backup.ts";
 import { ConfigTest } from "../../platform/config.ts";
 import { handle, matchRoute, type RouterRequirements } from "../../platform/http/router.ts";
+import type { CallError } from "../../platform/ipc.ts";
+import { LoggingLive } from "../../platform/logging/logger.ts";
 import {
   AppServices,
   appsFromConfig,
@@ -73,6 +79,10 @@ class Gate extends Context.Tag("test/http/Gate")<Gate, SnapshotGate>() {}
 class ReaderCalls
   extends Context.Tag("test/http/ReaderCalls")<ReaderCalls, Ref.Ref<readonly ReaderRequest[]>>() {}
 
+/** While `Some`, every reader call fails with it: the child exited, timed out, or broke the protocol. */
+class ReaderFault
+  extends Context.Tag("test/http/ReaderFault")<ReaderFault, Ref.Ref<Option.Option<CallError>>>() {}
+
 /** A real SQLite file, so `BackupsLive`'s `quick_check` has something to check. */
 function writeValidSnapshot(path: string): void {
   const db = new DatabaseSync(path);
@@ -86,12 +96,14 @@ function writeValidSnapshot(path: string): void {
 /**
  * The reader process, in this process: the same lookups and failures `platform/reader.ts` answers
  * with, over each app's `ReaderTest`. `ingest` and `analysis` are canned — they belong to the
- * reader, and here only their routing is under test.
+ * reader, and here only their routing is under test. The analysis name `boom` dies (a defect, not a
+ * typed failure), and an armed `ReaderFault` fails every call as `ReaderClientLive` would.
  */
 function readerClientTest(
   apps: readonly App[],
   readers: ReadonlyMap<string, ReaderService>,
   calls: Ref.Ref<readonly ReaderRequest[]>,
+  fault: Ref.Ref<Option.Option<CallError>>,
 ): ReaderClientService {
   const answer = (request: ReaderRequest): ReturnType<ReaderClientService["call"]> => {
     switch (request.kind) {
@@ -119,13 +131,20 @@ function readerClientTest(
       case "ingest":
         return Effect.fail(new IngestError({ phase: "read", detail: "/srv/secret/logs unreadable" }));
       case "analysis":
+        if (request.name === "boom") return Effect.die(new Error("analysis handler blew up"));
         return request.name === "errorsByTag"
           ? Effect.succeed([{ error_tag: "ConflictError", n: 1, params: request.params }])
           : Effect.fail(new UnknownAnalysisQuery({ name: request.name, known: ["errorsByTag"] }));
     }
   };
   return {
-    call: (request) => Effect.zipRight(Ref.update(calls, (all) => [...all, request]), answer(request)),
+    call: (request) =>
+      Effect.gen(function* () {
+        yield* Ref.update(calls, (all) => [...all, request]);
+        const failure = yield* Ref.get(fault);
+        if (Option.isSome(failure)) return yield* Effect.fail(failure.value);
+        return yield* answer(request);
+      }),
   };
 }
 
@@ -160,19 +179,23 @@ const PlatformTest = Layer.scopedContext(
       readers.set(app.id, Context.get(context, Reader));
     }
     const calls = yield* Ref.make<readonly ReaderRequest[]>([]);
+    const fault = yield* Ref.make(Option.none<CallError>());
     return Context.make(AppRegistry, makeAppRegistry(apps)).pipe(
       Context.add(AppServices, makeAppServices(stacks)),
-      Context.add(ReaderClient, readerClientTest(apps, readers, calls)),
+      Context.add(ReaderClient, readerClientTest(apps, readers, calls, fault)),
       Context.add(ReaderCalls, calls),
+      Context.add(ReaderFault, fault),
       Context.add(Gate, gate),
     );
   }),
 );
 
+const TEST_CONFIG = { server: { adminToken: ADMIN }, apps: [COLUMNS, JSON_APP] };
+
 const TestStack = PlatformTest.pipe(
   Layer.provideMerge(
     Layer.mergeAll(
-      ConfigTest({ server: { adminToken: ADMIN }, apps: [COLUMNS, JSON_APP] }),
+      ConfigTest(TEST_CONFIG),
       IdGenTest,
       EventSinkTest,
       ObjectStoreTest(),
@@ -466,6 +489,57 @@ httpTest(
   }),
 );
 
+httpTest(
+  "a reader that exited, timed out or broke the protocol → 502; mutations do not need it",
+  Effect.gen(function* () {
+    const fault = yield* ReaderFault;
+    yield* Ref.set(fault, Option.some<CallError>(new ReaderExitedError({ code: 137, signal: "SIGKILL" })));
+    assertError(yield* send("GET", "/health"), 502, "ReaderExitedError");
+    assertError(yield* app("query", "getGame", { gameId: "g" }), 502, "ReaderExitedError");
+
+    yield* Ref.set(
+      fault,
+      Option.some<CallError>(new IpcError({ reason: "timeout", detail: "no reply to query after 30s" })),
+    );
+    const timedOut = yield* send("POST", `/apps/${COLUMNS.id}/query/getGame`, {
+      token: COLUMNS.token,
+      body: { gameId: "g" },
+      headers: { "x-trace-id": "t-502" },
+    });
+    assertError(timedOut, 502, "IpcError");
+    assert.ok(!timedOut.body.error!.message.includes("no reply"), timedOut.body.error!.message);
+    const event = yield* lastHttpEvent;
+    assert.equal(event.traceId, "t-502");
+    assert.equal(event.errorTag, "IpcError");
+    assert.equal((event.errorDetail as { reason?: string }).reason, "timeout");
+    assert.equal(event.level, "error");
+
+    yield* Ref.set(fault, Option.some<CallError>(new IpcError({ reason: "malformed-frame", detail: "{" })));
+    assertError(yield* send("POST", "/admin/logs/ingest", { token: ADMIN }), 502, "IpcError");
+
+    // The writer is in this process: a mutation still commits while the reader is unreachable.
+    const created = yield* app("mutation", "createGame", { xPlayer: "a", oPlayer: "b" });
+    assert.equal(created.status, 200, JSON.stringify(created.body));
+  }),
+);
+
+httpTest(
+  "a handler defect → 500 Defect with the trace id; the cause is logged under that trace",
+  Effect.gen(function* () {
+    const sent = yield* send("POST", "/admin/logs/analysis/boom", {
+      token: ADMIN,
+      headers: { "x-trace-id": "t-defect" },
+    });
+    assertError(sent, 500, "Defect");
+    assert.match(sent.body.error!.message, /t-defect/);
+    assert.ok(!sent.body.error!.message.includes("blew up"), sent.body.error!.message);
+    const event = yield* lastHttpEvent;
+    assert.equal(event.status, 500);
+    assert.equal(event.errorTag, "Defect");
+    assert.equal(event.traceId, "t-defect");
+  }),
+);
+
 // ===========================================================================
 // Admin routes
 // ===========================================================================
@@ -557,3 +631,79 @@ httpTest(
     assert.equal((yield* eventsOfKind("http")).length, 4);
   }),
 );
+
+// ===========================================================================
+// The server JSONL file
+// ===========================================================================
+
+/** All records in the server role's JSONL files under `dir`. */
+async function serverJsonl(dir: string): Promise<Record<string, unknown>[]> {
+  const records: Record<string, unknown>[] = [];
+  const walk = async (at: string): Promise<void> => {
+    for await (const entry of Deno.readDir(at)) {
+      const path = join(at, entry.name);
+      if (entry.isDirectory) await walk(path);
+      else if (entry.name.endsWith(".jsonl")) {
+        for (const line of (await Deno.readTextFile(path)).split("\n")) {
+          if (line !== "") records.push(JSON.parse(line));
+        }
+      }
+    }
+  };
+  await walk(join(dir, "server"));
+  return records;
+}
+
+test("the server's LoggingLive writes one http event per request, and defect logs, to its JSONL file", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "ts-db-http-jsonl-" });
+  try {
+    const JsonlStack = PlatformTest.pipe(
+      Layer.provideMerge(Layer.mergeAll(LoggingLive, IdGenTest, ObjectStoreTest())),
+      Layer.provideMerge(ConfigTest({ ...TEST_CONFIG, logging: { dir, eventFlushMs: 10 } })),
+    );
+    const statuses = await Effect.runPromise(
+      Effect.gen(function* () {
+        const headers = (traceId: string) => ({ "x-trace-id": traceId });
+        const out = [
+          (yield* send("GET", "/health", { headers: headers("jsonl-200") })).status,
+          (yield* send("GET", "/nope", { headers: headers("jsonl-404") })).status,
+          (yield* send("POST", "/admin/logs/analysis/boom", { token: ADMIN, headers: headers("jsonl-500") }))
+            .status,
+        ];
+        yield* Ref.set(yield* ReaderFault, Option.some<CallError>(new ReaderExitedError({ code: 1 })));
+        out.push((yield* send("GET", "/health", { headers: headers("jsonl-502") })).status);
+        return out;
+      }).pipe(Effect.scoped, Effect.provide(JsonlStack)),
+    );
+    assert.deepEqual(statuses, [200, 404, 500, 502]);
+
+    // The scope has closed, so the sink has drained and closed the file.
+    const records = await serverJsonl(dir);
+    const http = records.filter((record) => record.kind === "http");
+    assert.deepEqual(
+      http.map((record) => [record.traceId, record.status, record.role]),
+      [
+        ["jsonl-200", 200, "server"],
+        ["jsonl-404", 404, "server"],
+        ["jsonl-500", 500, "server"],
+        ["jsonl-502", 502, "server"],
+      ],
+    );
+    assert.deepEqual(http.map((record) => record.errorTag ?? null), [
+      null,
+      "RouteNotFound",
+      "Defect",
+      "ReaderExitedError",
+    ]);
+    const defect = records.find((record) =>
+      record.kind === "lifecycle" &&
+      (record.detail as { message?: string } | undefined)?.message === "request handler defect"
+    );
+    assert.ok(defect, "the defect's Effect.logError line is in the file");
+    assert.equal(defect.traceId, "jsonl-500");
+    assert.equal(defect.level, "error");
+    assert.match(String((defect.detail as { cause?: unknown }).cause), /analysis handler blew up/);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});

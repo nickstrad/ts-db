@@ -1,17 +1,17 @@
 /**
- * The server (writer) process entrypoint (plan item 22, works 5, 6 and 8): `PlatformLive`, one HTTP
- * listener over `platform/http/router.ts`, the backup timer, and shutdown.
+ * The server (writer) process entrypoint (plan items 22 and 32): `PlatformLive`, one HTTP listener
+ * over `platform/http/router.ts`, the ingest-then-sweep and backup timers, and shutdown.
  *
  * Everything runs in one root fiber over one `Scope`. Resources are acquired in the order below, so
  * closing the scope releases them in exactly the reverse order:
  *
  * ```text
- * main          signal listeners
+ * main          stop signal (SIGINT/SIGTERM listeners)
  * PlatformLive  Config → logging → shutdown marker → IdGen → ObjectStore, AppRegistry
  *               → per-app Storage + Backups → ReaderClient (child process)      (platform/layers.ts)
- * program       backup fiber → HTTP listener
+ * program       reader ping → ingest-then-sweep fiber → backup fiber → HTTP listener
  *
- * shutdown:     HTTP drain → backup fiber → reader child → DB handles
+ * shutdown:     HTTP drain → backup fiber → ingest-then-sweep fiber → reader child → DB handles
  *               → `lifecycle` shutdown event → log drain + close → signal listeners
  * ```
  *
@@ -27,38 +27,130 @@
  *   builds or while the startup ping waits interrupts startup at once (releasing whatever was
  *   acquired, log included). They are removed last, so a second signal during shutdown cannot kill
  *   the process half-way.
+ * - **Partial startup releases everything.** Every step from the first SQLite handle onward is
+ *   scoped, so a failure at any later step — a second app's file, the reader's ping, the HTTP bind
+ *   (`ListenError`, e.g. a port in use) — closes what was acquired before it, in reverse, and the
+ *   process exits 1 with no child and no handle left behind.
+ * - **The reader child is load-bearing.** If it exits while the server is serving, every query
+ *   would answer 502 from then on; the server instead logs `stopping` (reason `reader-exited`),
+ *   shuts down in the order above, and exits 1, so a supervisor restarts both processes together.
  * - **The log flushes last.** The `lifecycle` `shutdown` event is emitted by a finalizer that sits
  *   directly above the logging layer, so it is the final line of the server's log file.
  *
- * Only a failure to *start* (bad configuration, schema drift, a reader that will not answer) reaches
- * stderr, because the event log may not exist yet; the process then exits 1.
+ * ## Event-log ingest and retention
+ *
+ * This process never opens the event-log DuckDB file (ADR 0004). Every `INGEST_SWEEP_INTERVAL` it
+ * sends the reader the existing `ingest` RPC, which the reader answers with item 36's
+ * ingest-then-sweep coordinator (ADR 0007): ingest, then — only after a committed ingest — the
+ * retention sweep. `POST /admin/logs/ingest` sends the same RPC on demand. The first run is one
+ * interval after startup, so a restart never queues a long ingest ahead of the first queries.
+ *
+ * Only a failure to *start* (bad configuration, schema drift, a reader that will not answer, a port
+ * in use) reaches stderr, because the event log may not exist yet; the process then exits 1.
  */
-import { Cause, Deferred, Duration, Effect, Exit, Layer, Option, Runtime, Schedule } from "effect";
-import type { AnyError } from "../core/errors.ts";
+import {
+  Cause,
+  Data,
+  Deferred,
+  Duration,
+  Effect,
+  Exit,
+  Layer,
+  Option,
+  Runtime,
+  Schedule,
+  type Scope,
+} from "effect";
+import { type AnyError, ReaderExitedError } from "../core/errors.ts";
 import { fromPlatformError } from "../core/events.ts";
 import { devTokensInUse } from "./http/auth.ts";
 import { handle, type RouterRequirements } from "./http/router.ts";
-import { emitServerLifecycle, PlatformLive } from "./layers.ts";
+import { type AfterStep, emitServerLifecycle, makePlatformLive, ReaderProcess } from "./layers.ts";
 import { AppServices } from "./registry.ts";
 import { Config, EventSink, ReaderClient } from "./services.ts";
 
+/**
+ * The HTTP listener could not bind (`Deno.serve` threw: the port is taken, the address is not
+ * local, …). Like `SinkIoError`, deliberately not in `core/errors.ts`: it only ever fails startup,
+ * so it never needs an HTTP status.
+ */
+export class ListenError extends Data.TaggedError("ListenError")<{
+  readonly hostname: string;
+  readonly port: number;
+  readonly detail: string;
+  readonly cause?: unknown;
+}> {}
+
+/** How often the server asks the reader to ingest the event log and then sweep it. */
+export const INGEST_SWEEP_INTERVAL: Duration.Duration = Duration.hours(1);
+
 const SIGNALS = ["SIGINT", "SIGTERM"] as const;
 
-/** Installs the signal listeners for the life of the scope; `received` completes on the first signal. */
-const signalHandlers = Effect.acquireRelease(
-  Effect.gen(function* () {
-    const received = yield* Deferred.make<Deno.Signal>();
-    const listeners = SIGNALS.map((signal) =>
-      [signal, () => void Deferred.unsafeDone(received, Effect.succeed(signal))] as const
-    );
-    for (const [signal, listener] of listeners) Deno.addSignalListener(signal, listener);
-    return { received, listeners };
-  }),
-  ({ listeners }) =>
-    Effect.sync(() => {
-      for (const [signal, listener] of listeners) Deno.removeSignalListener(signal, listener);
+/**
+ * Installs the signal listeners for the life of the scope; the `Deferred` completes with the first
+ * signal's name. This is the production stop source; `ServerOptions.stop` replaces it in tests.
+ */
+export const signalHandlers: Effect.Effect<Deferred.Deferred<string>, never, Scope.Scope> = Effect
+  .acquireRelease(
+    Effect.gen(function* () {
+      const received = yield* Deferred.make<string>();
+      const listeners = SIGNALS.map((signal) =>
+        [signal, () => void Deferred.unsafeDone(received, Effect.succeed(signal))] as const
+      );
+      for (const [signal, listener] of listeners) Deno.addSignalListener(signal, listener);
+      return { received, listeners };
     }),
-);
+    ({ listeners }) =>
+      Effect.sync(() => {
+        for (const [signal, listener] of listeners) Deno.removeSignalListener(signal, listener);
+      }),
+  ).pipe(Effect.map(({ received }) => received));
+
+/**
+ * Forks `loop` into the scope, and emits `<name>-stopped` once the scope has interrupted it, so the
+ * shutdown order of the timers is visible in the log. The event is a scope finalizer registered
+ * before the fork, so it runs after the fork's own finalizer (interrupt and await the fiber) — even
+ * when the fiber is interrupted before it ever ran.
+ */
+const forkTimer = <R>(name: string, loop: Effect.Effect<unknown, never, R>) =>
+  Effect.gen(function* () {
+    const sink = yield* EventSink;
+    yield* Effect.addFinalizer(() => emitServerLifecycle(sink, `${name}-stopped`));
+    yield* Effect.forkScoped(loop);
+  });
+
+/** The numeric counters of an ingest reply, and its retention status: small enough for one event. */
+function ingestSummary(reply: unknown): Record<string, unknown> {
+  const summary: Record<string, unknown> = {};
+  if (reply === null || typeof reply !== "object") return summary;
+  for (const [key, value] of Object.entries(reply)) {
+    if (typeof value === "number") summary[key] = value;
+  }
+  const retention = (reply as { retention?: { status?: unknown } }).retention;
+  if (typeof retention?.status === "string") summary.retention = retention.status;
+  return summary;
+}
+
+/**
+ * The ingest-then-sweep timer: every `every`, the reader's `ingest` RPC (see the module comment). A
+ * run is a plain sequential effect, so two can never overlap from this fiber; the reader serializes
+ * it with `POST /admin/logs/ingest` under its ingest lock. A failed run is a `warn` event and the
+ * next run still happens.
+ */
+const ingestSweepTimer = (every: Duration.DurationInput) =>
+  Effect.gen(function* () {
+    const sink = yield* EventSink;
+    const reader = yield* ReaderClient;
+    const once = reader.call({ kind: "ingest" }).pipe(
+      Effect.matchEffect({
+        onSuccess: (reply) => emitServerLifecycle(sink, "ingest-sweep", ingestSummary(reply)),
+        onFailure: (error) =>
+          emitServerLifecycle(sink, "ingest-sweep-failed", fromPlatformError(error), "warn"),
+      }),
+      Effect.catchAllCause((cause) => Effect.logError("ingest-sweep defect", cause)),
+    );
+    yield* forkTimer("ingest-sweep", Effect.schedule(once, Schedule.spaced(every)));
+  });
 
 /**
  * The backup timer: when `BACKUP_INTERVAL_MS` is non-zero, one scoped fiber sweeps every app's
@@ -81,13 +173,14 @@ const backupTimer = Effect.gen(function* () {
       ),
     { discard: true },
   );
-  yield* Effect.forkScoped(Effect.schedule(sweep, Schedule.spaced(Duration.millis(intervalMs))));
+  yield* forkTimer("backup-timer", Effect.schedule(sweep, Schedule.spaced(Duration.millis(intervalMs))));
 });
 
 /**
  * `Deno.serve` under `Effect.acquireRelease`. Each request runs `handle` on this fiber's runtime, so
- * it sees every service in `PlatformLive`. Release is `server.shutdown()`: stop accepting, then wait
- * for every in-flight request to finish.
+ * it sees every service in `PlatformLive`. A bind failure is a typed `ListenError` (the listener was
+ * never acquired, so only what came before it is released). Release is `server.shutdown()`: stop
+ * accepting, then wait for every in-flight request to finish.
  */
 const listen = Effect.gen(function* () {
   const { server: settings } = yield* Config;
@@ -95,29 +188,47 @@ const listen = Effect.gen(function* () {
   const run = Runtime.runPromise(yield* Effect.runtime<RouterRequirements>());
   const internalError = () =>
     Response.json({ error: { tag: "Defect", message: "internal error" } }, { status: 500 });
-  const server = yield* Effect.acquireRelease(
-    Effect.sync(() =>
-      Deno.serve({
-        hostname: settings.hostname,
-        port: settings.port,
-        // Both defaults write to the console; startup is reported as a `lifecycle` event instead.
-        onListen: () => {},
-        onError: internalError,
-      }, (request) => run(handle(request)).catch(internalError))
-    ),
+  return yield* Effect.acquireRelease(
+    Effect.try({
+      try: () =>
+        Deno.serve({
+          hostname: settings.hostname,
+          port: settings.port,
+          // Both defaults write to the console; startup is reported as a `lifecycle` event instead.
+          onListen: () => {},
+          onError: internalError,
+        }, (request) => run(handle(request)).catch(internalError)),
+      catch: (cause) =>
+        new ListenError({
+          hostname: settings.hostname,
+          port: settings.port,
+          detail: cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause),
+          cause,
+        }),
+    }),
     (server) =>
       Effect.zipRight(
         Effect.promise(() => server.shutdown()),
         emitServerLifecycle(sink, "http-drained"),
       ),
   );
-  return server;
 });
 
-const program = (signal: Deferred.Deferred<Deno.Signal>) =>
+export interface ServerOptions {
+  /** What stops the server. Default: `signalHandlers` (SIGINT/SIGTERM). */
+  readonly stop?: Effect.Effect<Deferred.Deferred<string>, never, Scope.Scope>;
+  /** Runs after each startup step acquires; see `AfterStep` in `platform/layers.ts`. */
+  readonly afterStep?: AfterStep;
+  /** Default `INGEST_SWEEP_INTERVAL`. */
+  readonly ingestSweepEvery?: Duration.DurationInput;
+}
+
+const program = (stop: Deferred.Deferred<string>, options: ServerOptions) =>
   Effect.gen(function* () {
     const sink = yield* EventSink;
     const config = yield* Config;
+    const reader = yield* ReaderProcess;
+    const afterStep = options.afterStep ?? (() => Effect.void);
 
     const devTokens = devTokensInUse(config);
     if (devTokens.length > 0) {
@@ -128,48 +239,81 @@ const program = (signal: Deferred.Deferred<Deno.Signal>) =>
       }, "warn");
     }
 
-    // The reader must answer before the server takes traffic, as before the port. A signal while it
-    // has not yet answered stops startup instead of waiting out the call timeout.
+    // The reader must answer before the server takes traffic, as before the port. A stop while it
+    // has not yet answered ends startup instead of waiting out the call timeout; a child that dies
+    // first fails the ping with `ReaderExitedError`.
     yield* Effect.raceFirst(
       (yield* ReaderClient).call({ kind: "ping" }),
-      Effect.flatMap(Deferred.await(signal), (reason) =>
+      Effect.flatMap(Deferred.await(stop), (reason) =>
         Effect.zipRight(emitServerLifecycle(sink, "stopping", { reason }), Effect.interrupt)),
     );
+    yield* afterStep("reader-ready");
+    yield* ingestSweepTimer(options.ingestSweepEvery ?? INGEST_SWEEP_INTERVAL);
+    yield* afterStep("ingest-sweep");
     yield* backupTimer;
+    yield* afterStep("backup-timer");
     const server = yield* listen;
+    yield* afterStep("http");
     yield* emitServerLifecycle(sink, "ready", {
       hostname: server.addr.hostname,
       port: server.addr.port,
       apps: (yield* AppServices).all.map((stack) =>
         stack.app.id
       ),
+      readerPid: reader.pid,
       backupIntervalMs: config.backup.intervalMs,
+      ingestSweepEveryMs: Duration.toMillis(options.ingestSweepEvery ?? INGEST_SWEEP_INTERVAL),
     });
 
-    const reason = yield* Effect.raceFirst(
-      Deferred.await(signal),
-      Effect.as(Effect.promise(() => server.finished), "listener-closed"),
+    type Ended =
+      | { readonly reason: "reader-exited"; readonly status: Deno.CommandStatus }
+      | { readonly reason: string; readonly status?: undefined };
+    const stopped: Effect.Effect<Ended> = Effect.map(Deferred.await(stop), (reason) => ({ reason }));
+    const closed: Effect.Effect<Ended> = Effect.as(Effect.promise(() => server.finished), {
+      reason: "listener-closed",
+    });
+    const exited: Effect.Effect<Ended> = Effect.map(
+      reader.exited,
+      (status) => ({ reason: "reader-exited", status }),
     );
-    yield* emitServerLifecycle(sink, "stopping", { reason });
+    const ended = yield* Effect.raceAll([stopped, closed, exited]);
+    if (ended.status !== undefined) {
+      const error = new ReaderExitedError(
+        ended.status.signal
+          ? { code: ended.status.code, signal: ended.status.signal }
+          : { code: ended.status.code },
+      );
+      yield* emitServerLifecycle(
+        sink,
+        "stopping",
+        { reason: ended.reason, code: error.code, signal: error.signal },
+        "error",
+      );
+      return yield* error;
+    }
+    yield* emitServerLifecycle(sink, "stopping", { reason: ended.reason });
     return yield* Effect.interrupt;
   });
 
 /**
- * The root: signal listeners first, then `PlatformLive` and the program, all in one scope. A signal
- * during the layer build interrupts it; the build's finalizers are already in the scope, so what was
- * acquired is released in order and the log drains.
+ * The whole server: the stop source first, then `PlatformLive` and the program, all in one scope.
+ * A stop during the layer build interrupts it; the build's finalizers are already in the scope, so
+ * what was acquired is released in order and the log drains. Succeeds never: it ends interrupted
+ * (a stop) or failed (startup, or the reader exiting).
  */
-const main = Effect.scoped(Effect.gen(function* () {
-  const { received } = yield* signalHandlers;
-  const context = yield* Effect.raceFirst(
-    Layer.build(PlatformLive),
-    Effect.zipRight(Deferred.await(received), Effect.interrupt),
-  );
-  return yield* Effect.provide(program(received), context);
-}));
+export function makeServer(options: ServerOptions = {}) {
+  return Effect.scoped(Effect.gen(function* () {
+    const stop = yield* (options.stop ?? signalHandlers);
+    const context = yield* Effect.raceFirst(
+      Layer.build(makePlatformLive({ afterStep: options.afterStep })),
+      Effect.zipRight(Deferred.await(stop), Effect.interrupt),
+    );
+    return yield* Effect.provide(program(stop, options), context);
+  }));
+}
 
 /** A startup failure as one line: the tag and its payload, or the rendered cause. */
-function describeFailure(cause: Cause.Cause<unknown>): string {
+export function describeFailure(cause: Cause.Cause<unknown>): string {
   const failure = Option.getOrUndefined(Cause.failureOption(cause));
   if (failure !== undefined && failure !== null && typeof failure === "object" && "_tag" in failure) {
     const { errorTag, errorDetail } = fromPlatformError(failure as AnyError);
@@ -183,7 +327,7 @@ function describeFailure(cause: Cause.Cause<unknown>): string {
 }
 
 if (import.meta.main) {
-  const exit = await Effect.runPromiseExit(main);
+  const exit = await Effect.runPromiseExit(makeServer());
   if (Exit.isFailure(exit) && !Cause.isInterruptedOnly(exit.cause)) {
     Deno.stderr.writeSync(new TextEncoder().encode(`ts-db server failed: ${describeFailure(exit.cause)}\n`));
     Deno.exit(1);

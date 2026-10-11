@@ -1,5 +1,5 @@
 /**
- * The composition roots (plan item 22, work 7): every live layer, wired once.
+ * The composition roots (plan items 22 and 32): every live layer, wired once.
  *
  * ## `PlatformLive` — the server (writer) process
  *
@@ -18,18 +18,34 @@
  *
  * ```text
  * acquire:  Config → Logging (sink + Logger) → shutdown marker → IdGen → ObjectStore, AppRegistry
- *           → AppServices (per-app Storage + Backups) → ReaderClient (child process)
- * release:  ReaderClient → AppServices → … → shutdown marker → Logging (drain, close) → Config
+ *           → AppServices (Storage + Backups, per app, in registry order) → ReaderClient (child)
+ * release:  ReaderClient → AppServices (apps in reverse) → … → shutdown marker → Logging → Config
  * ```
  *
- * `platform/server.ts` acquires the backup fiber and then the HTTP listener inside this context, so
- * the full shutdown sequence is HTTP drain → backup fiber → reader child → DB handles → final
- * `lifecycle` event → log flush. The "shutdown marker" is a finalizer-only layer that emits the
- * `lifecycle` `shutdown` event after everything that could still log has closed and before the sink
- * drains, so it is the last line of the server's log file.
+ * `platform/server.ts` acquires the ingest/sweep and backup fibers and then the HTTP listener inside
+ * this context, so the full shutdown sequence is HTTP drain → backup and ingest/sweep fibers → reader
+ * child → DB handles → final `lifecycle` event → log flush. The "shutdown marker" is a finalizer-only
+ * layer that emits the `lifecycle` `shutdown` event after everything that could still log has closed
+ * and before the sink drains, so it is the last line of the server's log file.
+ *
+ * ## Partial startup (item 32)
+ *
+ * Every resource is acquired by a scoped layer, from the first SQLite handle onward, so a failure at
+ * any later step — a second app's file that will not open, a reader that will not answer, a port that
+ * is taken — closes everything acquired before it, in reverse, and still flushes the log. Nothing is
+ * opened outside a scope, so there is no window in which a handle exists that no finalizer owns.
+ *
+ * The resource steps leave evidence in the log: `storage-opened`/`storage-closed` per app (emitted
+ * here; `storage-closed` only after that app's handle and writer queue have closed, and only if it
+ * opened), `reader-spawned`/`reader-exited` (`platform/ipc.ts`). `makePlatformLive`'s `afterStep`
+ * hook runs after each step acquires; tests use it to inject a failure or an interruption at exactly
+ * that point (`tests/unit/server_scope_test.ts`). It is a no-op in production.
  *
  * Memoization: within one build, Effect memoizes layers by reference, so `ConfigLive` and the
  * logging layer — required by nearly every other layer — are each built exactly once and shared.
+ * The per-app stacks are built with their own `Layer.build`, but every service they need besides
+ * `Storage` (`Config`, `EventSink`, `IdGen`, `ObjectStore`) comes from this chain's context, not
+ * from a layer, so nothing below them is built twice: one sink, one object store, one child.
  * `Layer.memoize` (which shares a layer across *separate* builds) has no second build to serve in
  * this process, so it is not used.
  *
@@ -42,7 +58,10 @@
  * module would load `node:sqlite` into the reader. What is fixed here is its *shape*:
  * `ReaderProcessServices` = `Config` + the reader's `EventSink` (`LoggingReaderLive`) +
  * `EventLogIngest`, with per-app `ReaderLive` instances opened lazily by `makeReaderPool`
- * (`platform/duckdb.ts`) inside the reader's program scope. `platform/reader.ts` composes it.
+ * (`platform/duckdb.ts`) inside the reader's program scope. `platform/reader.ts` composes it
+ * (item 33). The server reaches the event log only through the reader's `ingest` RPC, which item 36's
+ * ingest-then-sweep coordinator answers there (ADR 0007); this process never opens the event-log
+ * DuckDB file.
  *
  * The event-log modules are imported below **as types only**: `deno task check` type-checks
  * `platform/eventlog/*` through this file, and nothing of theirs is loaded at runtime.
@@ -63,7 +82,7 @@ import { ConfigLive } from "./config.ts";
 // Type-only, on purpose: see "The reader process root" above.
 import type { EventLogIngestLive } from "./eventlog/ingest.ts";
 import type { StagedLine } from "./eventlog/tables.ts";
-import { ReaderClientLive } from "./ipc.ts";
+import { makeReaderConnection } from "./ipc.ts";
 import { LoggingLive } from "./logging/logger.ts";
 import { ObjectStoreLive } from "./object_store.ts";
 import { AppRegistryLive, AppServices, type AppStack, makeAppServices } from "./registry.ts";
@@ -74,7 +93,7 @@ import {
   Config,
   EventSink,
   type EventSinkService,
-  type ReaderClient,
+  ReaderClient,
   Storage,
 } from "./services.ts";
 
@@ -104,40 +123,123 @@ export function emitServerLifecycle(
   );
 }
 
+// ===========================================================================
+// Startup steps
+// ===========================================================================
+
+/**
+ * The points in server startup at which a resource has just been acquired: the layer steps here,
+ * then `platform/server.ts`'s program steps. `storage:<appId>` is one per app, in registry order.
+ */
+export type StartupStep =
+  | "logging"
+  | "object-store"
+  | `storage:${string}`
+  | "reader"
+  | "reader-ready"
+  | "ingest-sweep"
+  | "backup-timer"
+  | "http";
+
+/**
+ * Runs right after `step` acquires. A defect or an interruption here fails startup at exactly that
+ * point, so a test can prove everything acquired before it is released. Production passes none.
+ */
+export type AfterStep = (step: StartupStep) => Effect.Effect<void>;
+
+const noStep: AfterStep = () => Effect.void;
+
+/** A layer that only runs the hook for `step`, placed in the chain right after that step's layer. */
+const stepDone = (afterStep: AfterStep, step: StartupStep): Layer.Layer<never> =>
+  Layer.effectDiscard(afterStep(step));
+
+// ===========================================================================
+// Per-app stacks
+// ===========================================================================
+
 /**
  * One `StorageLive` + `BackupsLive` per registered app, built into this layer's scope in registry
  * order (and so closed in reverse). Each app's data directory is created first, as before the port.
+ *
+ * Each app gets a `storage-opened` event once its handle is open and a `storage-closed` event once
+ * it has closed again (the writer queue drained, then `DatabaseSync.close`). The closing event's
+ * finalizer is registered *before* the stack is built, so it runs *after* the stack's own release.
  */
-export const AppServicesLive = Layer.scoped(
-  AppServices,
-  Effect.gen(function* () {
-    const apps = yield* (yield* AppRegistry).all;
-    const stacks: AppStack[] = [];
-    for (const app of apps) {
-      yield* Effect.tryPromise({
-        try: () => Deno.mkdir(dirname(app.file), { recursive: true }),
-        catch: (cause) =>
-          new StorageError({ operation: "open", detail: `cannot create ${dirname(app.file)}`, cause }),
-      });
-      const stack = BackupsLive.pipe(
-        Layer.provideMerge(StorageLive({ file: app.file, schema: app.schema, appId: app.id })),
-      );
-      const context = yield* Layer.build(stack);
-      stacks.push({ app, storage: Context.get(context, Storage), backups: Context.get(context, Backups) });
-    }
-    return makeAppServices(stacks);
-  }),
-);
+export function makeAppServicesLive(afterStep: AfterStep = noStep) {
+  return Layer.scoped(
+    AppServices,
+    Effect.gen(function* () {
+      const sink = yield* EventSink;
+      const apps = yield* (yield* AppRegistry).all;
+      const stacks: AppStack[] = [];
+      for (const app of apps) {
+        yield* Effect.tryPromise({
+          try: () => Deno.mkdir(dirname(app.file), { recursive: true }),
+          catch: (cause) =>
+            new StorageError({ operation: "open", detail: `cannot create ${dirname(app.file)}`, cause }),
+        });
+        let opened = false;
+        yield* Effect.addFinalizer(() =>
+          opened ? emitServerLifecycle(sink, "storage-closed", { appId: app.id }) : Effect.void
+        );
+        const stack = BackupsLive.pipe(
+          Layer.provideMerge(StorageLive({ file: app.file, schema: app.schema, appId: app.id })),
+        );
+        const context = yield* Layer.build(stack);
+        opened = true;
+        stacks.push({ app, storage: Context.get(context, Storage), backups: Context.get(context, Backups) });
+        yield* emitServerLifecycle(sink, "storage-opened", { appId: app.id, file: app.file });
+        yield* afterStep(`storage:${app.id}`);
+      }
+      return makeAppServices(stacks);
+    }),
+  );
+}
 
-/** `ReaderClientLive` over the reader module, with the per-call deadline from `READER_CALL_TIMEOUT_MS`. */
-export const ReaderClientConfigured: Layer.Layer<ReaderClient, never, Config | EventSink> = Layer
-  .unwrapEffect(
-    Effect.map(Config, (config) =>
-      ReaderClientLive({
+/** The live per-app stacks, with no startup hook. */
+export const AppServicesLive = makeAppServicesLive();
+
+// ===========================================================================
+// The reader child
+// ===========================================================================
+
+/** The reader child as a process: what the server watches besides the calls it makes. */
+export interface ReaderProcessService {
+  readonly pid: number;
+  /**
+   * Completes when the child exits, for any reason — its own death, a kill, or this scope's
+   * shutdown. The server treats an exit while it is serving as fatal (`platform/server.ts`).
+   */
+  readonly exited: Effect.Effect<Deno.CommandStatus>;
+}
+
+export class ReaderProcess
+  extends Context.Tag("ts-db/ReaderProcess")<ReaderProcess, ReaderProcessService>() {}
+
+/**
+ * `ReaderClient` over one scoped child running the reader module, with the per-call deadline from
+ * `READER_CALL_TIMEOUT_MS`, plus `ReaderProcess` for the same child. The child inherits this
+ * process's environment, which `ConfigLive` has already decoded, so both processes read one
+ * configuration.
+ */
+export const ReaderClientConfigured: Layer.Layer<ReaderClient | ReaderProcess, never, Config | EventSink> =
+  Layer.scopedContext(
+    Effect.gen(function* () {
+      const config = yield* Config;
+      const connection = yield* makeReaderConnection({
         module: READER_MODULE,
         callTimeout: Duration.millis(config.reader.callTimeoutMs),
-      })),
+      });
+      const { child } = connection;
+      return Context.make(ReaderClient, { call: connection.call }).pipe(
+        Context.add(ReaderProcess, { pid: child.pid, exited: Effect.promise(() => child.status) }),
+      );
+    }),
   );
+
+// ===========================================================================
+// The chain
+// ===========================================================================
 
 /**
  * Finalizer only: emits the `lifecycle` `shutdown` event when the platform's scope closes. Placed
@@ -156,18 +258,35 @@ export const ShutdownEventLive: Layer.Layer<never, never, EventSink> = Layer.sco
     )),
 );
 
-/** Everything the server process serves with. See the module comment for the order. */
-export const PlatformLive = ReaderClientConfigured.pipe(
-  Layer.provideMerge(AppServicesLive),
-  Layer.provideMerge(Layer.mergeAll(ObjectStoreLive, AppRegistryLive)),
-  Layer.provideMerge(IdGenLive),
-  Layer.provideMerge(ShutdownEventLive),
-  Layer.provideMerge(LoggingLive),
-  Layer.provideMerge(ConfigLive),
-);
+export interface PlatformOptions {
+  /** See `AfterStep`. Default: none. */
+  readonly afterStep?: AfterStep;
+}
+
+/** Everything the server process serves with, in the order of the module comment. */
+export function makePlatformLive(options: PlatformOptions = {}) {
+  const afterStep = options.afterStep ?? noStep;
+  return stepDone(afterStep, "reader").pipe(
+    Layer.provideMerge(ReaderClientConfigured),
+    Layer.provideMerge(makeAppServicesLive(afterStep)),
+    Layer.provideMerge(stepDone(afterStep, "object-store")),
+    Layer.provideMerge(Layer.mergeAll(ObjectStoreLive, AppRegistryLive)),
+    Layer.provideMerge(IdGenLive),
+    Layer.provideMerge(stepDone(afterStep, "logging")),
+    Layer.provideMerge(ShutdownEventLive),
+    Layer.provideMerge(LoggingLive),
+    Layer.provideMerge(ConfigLive),
+  );
+}
+
+/** The production composition: `makePlatformLive` with no startup hook. */
+export const PlatformLive = makePlatformLive();
 
 /** What `PlatformLive` provides. */
 export type PlatformServices = Layer.Layer.Success<typeof PlatformLive>;
+
+/** What building `PlatformLive` can fail with (configuration, schema drift, a driver open). */
+export type PlatformBuildError = Layer.Layer.Error<typeof PlatformLive>;
 
 /**
  * What the reader process's root provides (`ConfigLive` + `LoggingReaderLive` +
