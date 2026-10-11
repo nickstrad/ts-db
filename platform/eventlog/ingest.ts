@@ -74,6 +74,7 @@ import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { DuckDBInstance } from "@duckdb/node-api";
 import { Clock, Effect, Exit, Layer, type Scope } from "effect";
+import { drainDuckDB } from "../duckdb.ts";
 import { IngestError, type IngestPhase } from "../../core/errors.ts";
 import {
   fromPlatformError,
@@ -448,6 +449,9 @@ export function makeEventLogIngest(
     const db = { connection: yield* connect, broken: false };
     // Added after the instance's finalizer, so it runs first (LIFO): connection, then instance.
     yield* Effect.addFinalizer(() => close("connection", db.connection));
+    // Drain pending chunk finalizers while the handles are still open (LIFO: runs before the
+    // connection close above).
+    yield* Effect.addFinalizer(() => drainDuckDB());
 
     const reconnectIfBroken: Effect.Effect<void, IngestError> = Effect.suspend(() => {
       if (!db.broken) return Effect.void;

@@ -31,9 +31,12 @@
  *   scoped, so a failure at any later step — a second app's file, the reader's ping, the HTTP bind
  *   (`ListenError`, e.g. a port in use) — closes what was acquired before it, in reverse, and the
  *   process exits 1 with no child and no handle left behind.
- * - **The reader child is load-bearing.** If it exits while the server is serving, every query
- *   would answer 502 from then on; the server instead logs `stopping` (reason `reader-exited`),
- *   shuts down in the order above, and exits 1, so a supervisor restarts both processes together.
+ * - **The reader child is supervised, not load-bearing.** If it exits unexpectedly while the
+ *   server is serving, a supervisor respawns it with backoff (`reader-restarting` /
+ *   `reader-restarted` lifecycle events); queries answer 502 only during the restart window and
+ *   resume on the new child. Only if the supervisor gives up (more than 5 restarts within 10
+ *   minutes) does the server log `stopping` (reason `reader-exited`), shut down in the order
+ *   above, and exit 1, so a supervisor restarts both processes together.
  * - **The log flushes last.** The `lifecycle` `shutdown` event is emitted by a finalizer that sits
  *   directly above the logging layer, so it is the final line of the server's log file.
  *

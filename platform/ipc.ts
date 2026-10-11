@@ -300,7 +300,9 @@ export function makeReaderConnection(
     const { child, stdin, stdout } = yield* Effect.acquireRelease(
       Effect.sync((): Resources => {
         const child = new Deno.Command(Deno.execPath(), {
-          args: ["run", "-A", options.module, ...(options.args ?? [])],
+          // `--v8-flags=--expose-gc` exposes `gc()` for `drainDuckDB()` (segfault mitigation):
+          // pending DuckDB chunk finalizers are drained before the handles close.
+          args: ["run", "-A", "--v8-flags=--expose-gc", options.module, ...(options.args ?? [])],
           stdin: "piped",
           stdout: "piped",
           stderr: "inherit",

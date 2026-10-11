@@ -214,3 +214,126 @@ test("server process: its runtime module graph never loads DuckDB", async () => 
   const duckdb = [...reached].filter((specifier) => /duckdb/i.test(specifier));
   assert.deepEqual(duckdb, [], `server reaches DuckDB: ${duckdb.join(", ")}`);
 });
+
+// ===========================================================================
+// Supervised reader restart (segfault mitigation): kill the reader, expect
+// 502s during the restart window, then recovery with no server restart
+// ===========================================================================
+
+test(
+  "server process (spawned): killing the reader child 502s queries, then the supervisor restarts it",
+  { timeout: 180_000 },
+  async () => {
+    const root = await Deno.makeTempDir({ prefix: "ts-db-reader-restart-" });
+    const port = freePort();
+    const base = `http://127.0.0.1:${port}`;
+    const env = {
+      DATA_DIR: join(root, "data"),
+      LOCAL_OBJECT_DIR: join(root, "objects"),
+      LOG_DIR: join(root, "logs"),
+      EVENT_FLUSH_MS: "50",
+      PORT: String(port),
+      ADMIN_TOKEN: ADMIN,
+      TENANCY: "off",
+      DATABASE_URL: "postgres://tsdb:tsdb@127.0.0.1:1/unavailable?connect_timeout=1",
+      COLUMN_APP_TOKEN: COLUMNS.token,
+      JSON_APP_TOKEN: JSON_APP.token,
+      S3_BASE_URL: "",
+      BACKUP_INTERVAL_MS: "0",
+    };
+    const child = new Deno.Command(Deno.execPath(), {
+      args: ["run", "-A", "platform/server.ts"],
+      cwd: repoRoot,
+      env,
+      stdout: "null",
+      stderr: "piped",
+    }).spawn();
+    const stderr = new Response(child.stderr).text();
+    const serverPid = child.pid;
+    try {
+      let ready = false;
+      for (let attempt = 0; attempt < 600 && !ready; attempt++) {
+        try {
+          const response = await fetch(`${base}/health`, { signal: AbortSignal.timeout(500) });
+          await response.body?.cancel();
+          ready = response.ok;
+        } catch { /* starting */ }
+        if (!ready) await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      assert.ok(ready, "server never became ready");
+
+      const query = () =>
+        fetch(`${base}/apps/${COLUMNS.id}/query/getGame`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${COLUMNS.token}` },
+          body: JSON.stringify({ gameId: "no-such-game" }),
+        });
+
+      // Baseline: the query path works through the reader.
+      const before = await query();
+      assert.equal(before.status, 200, "query did not work before the kill");
+      await before.body?.cancel();
+
+      // Find the reader child's pid from the server's `ready` lifecycle event.
+      const logDir = join(env.LOG_DIR, "server");
+      let readerPid = 0;
+      for (let attempt = 0; attempt < 50 && readerPid === 0; attempt++) {
+        for (const file of await jsonlUnder(logDir)) {
+          for (const line of (await Deno.readTextFile(file)).split("\n")) {
+            if (line === "") continue;
+            const record = JSON.parse(line);
+            if (record.kind === "lifecycle" && record.phase === "ready" && record.detail?.readerPid) {
+              readerPid = record.detail.readerPid;
+            }
+          }
+        }
+        if (readerPid === 0) await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      assert.ok(readerPid > 0, "no readerPid in the server log");
+      assert.notEqual(readerPid, serverPid);
+
+      // Kill the reader child. The server must stay up.
+      Deno.kill(readerPid, "SIGKILL");
+
+      // During the restart window, queries fail with 502 (reader down), not 500 and not a hang.
+      let saw502 = false;
+      const windowEnd = Date.now() + 1500;
+      while (Date.now() < windowEnd && !saw502) {
+        try {
+          const response = await query();
+          await response.body?.cancel();
+          if (response.status === 502) saw502 = true;
+        } catch { /* connection reset is also a down reader */ }
+      }
+      assert.ok(saw502, "no 502 during the reader restart window");
+
+      // The supervisor respawns the child: queries recover with no server restart.
+      let recovered = false;
+      for (let attempt = 0; attempt < 300 && !recovered; attempt++) {
+        try {
+          const response = await query();
+          await response.body?.cancel();
+          recovered = response.status === 200;
+        } catch { /* still restarting */ }
+        if (!recovered) await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      assert.ok(recovered, "queries never recovered after the reader was killed");
+      assert.equal(child.pid, serverPid, "server process changed");
+
+      // The log shows the supervision, not a shutdown.
+      const records = (await Promise.all(
+        (await jsonlUnder(logDir)).map((file) => Deno.readTextFile(file)),
+      ))
+        .flatMap((text) => text.split("\n").filter((line) => line !== ""))
+        .map((line) => JSON.parse(line));
+      const phases = records.filter((r) => r.kind === "lifecycle").map((r) => r.phase);
+      assert.ok(phases.includes("reader-restarting"), `no reader-restarting event: ${phases.join(", ")}`);
+      assert.ok(phases.includes("reader-restarted"), `no reader-restarted event: ${phases.join(", ")}`);
+      assert.ok(!phases.includes("stopping"), `server stopped instead of restarting: ${phases.join(", ")}`);
+    } finally {
+      child.kill("SIGTERM");
+      await child.status;
+      await stderr;
+    }
+  },
+);
