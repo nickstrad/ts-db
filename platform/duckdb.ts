@@ -180,20 +180,26 @@ function close(what: "connection" | "instance", handle: { closeSync(): void }): 
 
 /**
  * One `lifecycle` event, stamped from the Effect `Clock` like every other reader event so tests can
- * drive it with `TestClock`. Used by the reader process for `ready` / `stopping` / `failed`.
+ * drive it with `TestClock`. Used by the reader process for `ready` / `stopping` / `failed`, and by
+ * `platform/reader_layers.ts` for the event-log handle's `eventlog-*` phases.
  */
-export function emitLifecycle(sink: EventSinkService, phase: string, detail?: unknown): Effect.Effect<void> {
+export function emitLifecycle(
+  sink: EventSinkService,
+  phase: string,
+  detail?: unknown,
+  level: "info" | "warn" | "error" = "info",
+): Effect.Effect<void> {
   return Effect.gen(function* () {
     const ts = new Date(yield* Clock.currentTimeMillis).toISOString();
     yield* sink.emit(lifecycleEvent({
       eventId: crypto.randomUUID(),
       ts,
-      level: "info",
+      level,
       role: "reader",
       pid: Deno.pid,
       traceId: "reader-lifecycle",
       phase,
-      detail,
+      ...(detail === undefined ? {} : { detail }),
     }));
   });
 }
