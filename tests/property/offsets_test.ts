@@ -34,6 +34,23 @@
  * An append-only property states the strongest form for the normal case: with no truncation or
  * rewrite, every complete line — valid or malformed — is consumed exactly once, and no rewrite is
  * ever reported.
+ *
+ * ## The ingest transaction (real DuckDB)
+ *
+ * Two more properties drive the real `EventLogIngestLive` service (`makeEventLogIngest`) over a
+ * scratch log tree and event-log file, through a driver that wraps the real one:
+ *
+ * 7. **A failed batch commits nothing.** Rounds of appends, each followed by an ingest run with a
+ *    fault injected at a random statement of a random batch (or its `COMMIT`): the statement fails,
+ *    or parks while the run's fiber is interrupted. After every run, each source's rows in
+ *    `platform_events` are exactly the events inside the bytes its `_ingest_state` row covers, and no
+ *    event is in twice. With one batch per run a faulted run leaves the tables and `_ingest_state`
+ *    exactly as they were; with one batch per file, every file is either untouched or wholly
+ *    ingested. A clean run afterwards ingests every event exactly once.
+ * 8. **Concurrent runs neither duplicate nor lose.** Ingest runs started without waiting, overlapping
+ *    each other and the appends between them, all succeed; afterwards every event is in exactly once,
+ *    and the runs' reported `linesIngested` add up to the number of events written. The runs share
+ *    one service, as in the reader process, which owns the only connection to the file.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -46,7 +63,19 @@ import {
   parseSourceFile,
   planFile,
 } from "../../core/eventlog/offsets.ts";
-import { check, titled } from "./arbitraries.ts";
+import { dirname, join } from "node:path";
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Option, type Scope } from "effect";
+import type { IngestError } from "../../core/errors.ts";
+import { lifecycleEvent, toJsonLine } from "../../core/events.ts";
+import { ConfigTest } from "../../platform/config.ts";
+import { type EventLogIngestService, EventSink, type IngestReport } from "../../platform/services.ts";
+import {
+  type EventLogConnection,
+  type EventLogDriver,
+  eventLogDriver,
+  makeEventLogIngest,
+} from "../../platform/eventlog/ingest.ts";
+import { check, NUM_RUNS, titled } from "./arbitraries.ts";
 
 const FILES = [
   "reader/2026-10-10/events-12-5151-001.jsonl",
@@ -521,5 +550,355 @@ test(
         assert.equal(state?.bytesIngested ?? 0, all.length);
       },
     ));
+  },
+);
+
+// ---------------------------------------------------------------------------
+// The ingest transaction, against real DuckDB
+// ---------------------------------------------------------------------------
+
+/** Runs per DuckDB-backed property: each run opens a fresh event-log file and ingests several times. */
+const DUCKDB_RUNS = Math.min(NUM_RUNS, 30);
+
+/** Where a run fails: the `statement`-th statement after `BEGIN` of its `batch`-th batch, or that batch's `COMMIT`. */
+type Fault =
+  | { readonly kind: "none" }
+  | { readonly kind: "fail" | "interrupt"; readonly batch: number; readonly statement: number };
+
+/** What the probing driver is told for the current run, and what it saw. */
+interface Probe {
+  fault: Fault;
+  begins: number;
+  /** Statements since the open transaction's `BEGIN`; `undefined` outside a transaction. */
+  sinceBegin: number | undefined;
+  fired: boolean;
+  onInterrupt: () => void;
+  /** The current raw connection, for reading the tables between runs. */
+  raw?: EventLogConnection;
+}
+
+/** The real driver, with the fault injected into the statement it names. */
+function probingDriver(probe: Probe): EventLogDriver {
+  return {
+    open: async (path) => {
+      const instance = await eventLogDriver.open(path);
+      return {
+        closeSync: () => instance.closeSync(),
+        connect: async () => {
+          const connection = await instance.connect();
+          probe.raw = connection;
+          const intercept = <A>(sql: string, run: () => Promise<A>): Promise<A> => {
+            if (sql === "BEGIN TRANSACTION") {
+              probe.begins += 1;
+              probe.sinceBegin = 0;
+              return run();
+            }
+            if (sql === "ROLLBACK") probe.sinceBegin = undefined;
+            if (probe.sinceBegin === undefined) return run();
+            probe.sinceBegin += 1;
+            const fault = probe.fault;
+            if (
+              fault.kind !== "none" && !probe.fired && probe.begins === fault.batch + 1 &&
+              (probe.sinceBegin === fault.statement + 1 || sql === "COMMIT")
+            ) {
+              probe.fired = true;
+              if (fault.kind === "fail") {
+                return Promise.reject(new Error(`injected failure at: ${sql.slice(0, 60)}`));
+              }
+              probe.onInterrupt();
+              return new Promise<A>(() => {}); // parked until the run's fiber is interrupted
+            }
+            if (sql === "COMMIT") probe.sinceBegin = undefined;
+            return run();
+          };
+          const wrapped: EventLogConnection = {
+            run: (sql, values) => intercept(sql, () => connection.run(sql, values)),
+            runAndReadAll: (sql) => intercept(sql, () => connection.runAndReadAll(sql)),
+            closeSync: () => connection.closeSync(),
+          };
+          return wrapped;
+        },
+      };
+    },
+  };
+}
+
+/** One scratch log tree and event-log file, with one ingest service over it for the whole run. */
+interface IngestWorld {
+  readonly logDir: string;
+  readonly probe: Probe;
+  readonly service: EventLogIngestService;
+  /** Every event id written to each file so far, in file order. */
+  readonly written: Map<string, string[]>;
+  nextId: number;
+}
+
+async function withIngestWorld(
+  batchBytes: number,
+  body: (world: IngestWorld) => Effect.Effect<void, unknown, Scope.Scope>,
+): Promise<void> {
+  const root = await Deno.makeTempDir({ prefix: "offsets-ingest-prop-" });
+  try {
+    const probe: Probe = {
+      fault: { kind: "none" },
+      begins: 0,
+      sinceBegin: undefined,
+      fired: false,
+      onInterrupt() {},
+    };
+    const logDir = join(root, "logs");
+    const program = Effect.gen(function* () {
+      const service = yield* makeEventLogIngest({ driver: probingDriver(probe), batchBytes });
+      yield* body({ logDir, probe, service, written: new Map(), nextId: 0 });
+    });
+    const exit = await Effect.runPromiseExit(
+      Effect.scoped(program).pipe(
+        Effect.provide(Layer.merge(
+          ConfigTest({ logging: { dir: logDir }, eventLog: { duckdbPath: join(root, "events.duckdb") } }),
+          Layer.succeed(EventSink, { emit: () => Effect.void }),
+        )),
+      ),
+    );
+    if (Exit.isFailure(exit)) {
+      const failure = Cause.squash(exit.cause);
+      if (failure instanceof Error && failure.name === "AssertionError") throw failure;
+      throw new Error(Cause.pretty(exit.cause), { cause: failure });
+    }
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+}
+
+/** Appends `count` fresh, valid event records to `file`. */
+const appendEvents = (world: IngestWorld, file: string, count: number) =>
+  Effect.promise(async () => {
+    const ids = world.written.get(file) ?? [];
+    const role = file.startsWith("server/") ? "server" : "reader";
+    let text = "";
+    for (let i = 0; i < count; i++) {
+      const id = `e${++world.nextId}`;
+      ids.push(id);
+      text += toJsonLine(lifecycleEvent({
+        eventId: id,
+        ts: "2026-10-10T12:00:00.000Z",
+        level: "info",
+        role,
+        pid: role === "server" ? 4242 : 5151,
+        traceId: "trace-prop",
+        phase: id,
+      })) + "\n";
+    }
+    world.written.set(file, ids);
+    const path = join(world.logDir, file);
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(path, text, { append: true });
+  });
+
+/** What the event-log file holds: each source's offset row and event ids, in offset order. */
+interface Tables {
+  readonly state: readonly Record<string, unknown>[];
+  readonly ids: ReadonlyMap<string, readonly string[]>;
+  readonly duplicates: number;
+}
+
+const readTables = (world: IngestWorld): Effect.Effect<Tables> =>
+  Effect.promise(async () => {
+    const connection = world.probe.raw!;
+    const state = (await connection.runAndReadAll(
+      `SELECT source_file, bytes_ingested, prefix_sha256, dedupe, CAST(last_ingested_at AS VARCHAR) AS at
+       FROM _ingest_state ORDER BY source_file`,
+    )).getRowObjects().map((row) => ({ ...row, bytes_ingested: Number(row.bytes_ingested) }));
+    const ids = new Map<string, string[]>();
+    for (
+      const row of (await connection.runAndReadAll(
+        "SELECT source_file, event_id FROM platform_events ORDER BY source_file, source_offset",
+      )).getRowObjects()
+    ) {
+      const file = String(row.source_file);
+      ids.set(file, [...(ids.get(file) ?? []), String(row.event_id)]);
+    }
+    const [dup] = (await connection.runAndReadAll(
+      "SELECT count(*) - count(DISTINCT event_id) AS n FROM platform_events",
+    )).getRowObjects();
+    return { state, ids, duplicates: Number(dup.n) };
+  });
+
+/** Ids of the lines wholly inside a file's first `bytes` bytes (line and newline). Every written line is complete. */
+function idsWithin(world: IngestWorld, file: string, bytes: number): string[] {
+  const ids = world.written.get(file) ?? [];
+  const spans = completeLines(Deno.readFileSync(join(world.logDir, file)), 0).lines;
+  return ids.slice(0, spans.filter((span) => span.end + 1 <= bytes).length);
+}
+
+/** How an exit ended: `ok`, the failure's `_tag`, `Defect` or `Interrupted`. */
+function outcomeTag(exit: Exit.Exit<unknown, unknown>): string {
+  if (Exit.isSuccess(exit)) return "ok";
+  if (Cause.isInterruptedOnly(exit.cause)) return "Interrupted";
+  const failure = Cause.failureOption(exit.cause);
+  return Option.isSome(failure) ? String((failure.value as { _tag?: unknown })._tag) : "Defect";
+}
+
+/**
+ * The transaction invariant, checked after every run: for every source, the rows in
+ * `platform_events` are exactly the events in the bytes its `_ingest_state` row says were ingested —
+ * no partial batch, no offset ahead of its rows or behind them — and no event is in twice.
+ */
+function assertRowsMatchOffsets(world: IngestWorld, tables: Tables, label: string): void {
+  assert.equal(tables.duplicates, 0, `${label}: an event was inserted twice`);
+  const offsets = new Map(tables.state.map((row) => [String(row.source_file), row.bytes_ingested as number]));
+  for (const file of new Set([...world.written.keys(), ...tables.ids.keys()])) {
+    const expected = idsWithin(world, file, offsets.get(file) ?? 0);
+    assert.deepEqual(tables.ids.get(file) ?? [], expected, `${label}: ${file} rows disagree with its offset`);
+  }
+}
+
+/** Runs one ingest under `fault`, interrupting it at the fault if asked; returns how it ended. */
+const ingestRun = (world: IngestWorld, fault: Fault) =>
+  Effect.gen(function* () {
+    const reached = yield* Deferred.make<void>();
+    Object.assign(world.probe, {
+      fault,
+      begins: 0,
+      fired: false,
+      onInterrupt: () => Effect.runSync(Deferred.succeed(reached, undefined)),
+    });
+    const fiber = yield* Effect.fork(world.service.ingest);
+    if (fault.kind === "interrupt") {
+      yield* Effect.race(Deferred.await(reached), Effect.asVoid(Fiber.await(fiber)));
+      yield* Fiber.interrupt(fiber);
+    }
+    return yield* Fiber.await(fiber);
+  });
+
+const ingestFileArb = fc.constantFrom(...FILES);
+
+const faultArb: fc.Arbitrary<Fault> = fc.oneof(
+  { weight: 1, arbitrary: fc.constant<Fault>({ kind: "none" }) },
+  {
+    weight: 3,
+    arbitrary: fc.record({
+      kind: fc.constantFrom("fail" as const, "interrupt" as const),
+      batch: fc.nat(1),
+      statement: fc.nat(24),
+    }),
+  },
+);
+
+/** A round: append to some files, then ingest under a fault. */
+const roundArb = fc.record({
+  appends: fc.array(fc.tuple(ingestFileArb, fc.integer({ min: 1, max: 4 })), { maxLength: 4 }),
+  fault: faultArb,
+});
+
+test(
+  titled(
+    "ingest transaction: a failed or interrupted batch commits nothing — no partial rows, offsets unmoved",
+  ),
+  async () => {
+    const fired = { fail: 0, interrupt: 0, multiBatchPartial: 0 };
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom(1, 1 << 30),
+        fc.array(roundArb, { minLength: 1, maxLength: 5 }),
+        (batchBytes, rounds) =>
+          withIngestWorld(batchBytes, (world) =>
+            Effect.gen(function* () {
+              for (const [index, round] of rounds.entries()) {
+                for (const [file, count] of round.appends) yield* appendEvents(world, file, count);
+                const before = yield* readTables(world);
+                const exit = yield* ingestRun(world, round.fault);
+                const after = yield* readTables(world);
+                const label = `round ${index} (${JSON.stringify(round.fault)}, batchBytes ${batchBytes})`;
+                assertRowsMatchOffsets(world, after, label);
+                const complete = (file: string) => Deno.statSync(join(world.logDir, file)).size;
+                if (!world.probe.fired) {
+                  assert.ok(Exit.isSuccess(exit), `${label}: a run with no fault succeeded`);
+                  for (const row of after.state) {
+                    assert.equal(
+                      row.bytes_ingested,
+                      complete(String(row.source_file)),
+                      `${label}: fully ingested`,
+                    );
+                  }
+                  continue;
+                }
+                const fault = round.fault as Exclude<Fault, { kind: "none" }>;
+                fired[fault.kind] += 1;
+                if (fault.kind === "interrupt") {
+                  assert.ok(Exit.isInterrupted(exit), `${label}: ended interrupted`);
+                } else assert.equal(outcomeTag(exit), "IngestError", label);
+                if (batchBytes > 1) {
+                  // One batch: the run committed nothing at all.
+                  assert.deepEqual(after, before, `${label}: tables and _ingest_state unchanged`);
+                } else {
+                  // One batch per file: earlier batches committed whole; every other file is untouched.
+                  const was = new Map(before.state.map((row) => [row.source_file, row]));
+                  let unchanged = 0;
+                  for (const row of after.state) {
+                    const old = was.get(row.source_file);
+                    if (old !== undefined && JSON.stringify(old) === JSON.stringify(row)) {
+                      unchanged += 1;
+                    } else {
+                      assert.equal(
+                        row.bytes_ingested,
+                        complete(String(row.source_file)),
+                        `${label}: whole batch`,
+                      );
+                    }
+                  }
+                  if (unchanged < after.state.length) fired.multiBatchPartial += 1;
+                }
+              }
+              // A clean run afterwards ingests every event exactly once.
+              assert.ok(Exit.isSuccess(yield* ingestRun(world, { kind: "none" })));
+              const final = yield* readTables(world);
+              assertRowsMatchOffsets(world, final, "final");
+              for (const [file, ids] of world.written) {
+                assert.deepEqual(final.ids.get(file), ids, `final: ${file}`);
+              }
+            })),
+      ),
+      { numRuns: DUCKDB_RUNS },
+    );
+    console.log(`ingest fault coverage: ${JSON.stringify(fired)}`);
+    assert.ok(fired.fail >= 5 && fired.interrupt >= 5, JSON.stringify(fired));
+  },
+);
+
+test(
+  titled("ingest transaction: concurrent runs interleaved with appends neither duplicate nor lose events"),
+  async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom(1, 1 << 30),
+        fc.array(fc.array(fc.tuple(ingestFileArb, fc.integer({ min: 1, max: 4 })), { maxLength: 3 }), {
+          minLength: 2,
+          maxLength: 6,
+        }),
+        (batchBytes, steps) =>
+          withIngestWorld(batchBytes, (world) =>
+            Effect.gen(function* () {
+              // Each step appends, then starts a run without waiting for it: runs overlap each other and
+              // the appends that follow them.
+              const runs: Fiber.RuntimeFiber<IngestReport, IngestError>[] = [];
+              for (const appends of steps) {
+                for (const [file, count] of appends) yield* appendEvents(world, file, count);
+                runs.push(yield* Effect.fork(world.service.ingest));
+                yield* Effect.yieldNow();
+              }
+              const reports = yield* Effect.forEach(runs, (fiber) => Fiber.join(fiber));
+              const last = yield* world.service.ingest;
+              const tables = yield* readTables(world);
+              assertRowsMatchOffsets(world, tables, "after concurrent runs");
+              for (const [file, ids] of world.written) {
+                assert.deepEqual(tables.ids.get(file), ids, `${file}: every event once, in order`);
+              }
+              const total = [...world.written.values()].reduce((n, ids) => n + ids.length, 0);
+              const reported = [...reports, last].reduce((n, report) => n + report.linesIngested, 0);
+              assert.equal(reported, total, "the runs' reports add up to every event exactly once");
+            })),
+      ),
+      { numRuns: DUCKDB_RUNS },
+    );
   },
 );

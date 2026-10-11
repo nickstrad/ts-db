@@ -27,7 +27,6 @@ import {
   fieldName,
   fieldsArb,
   leftOf,
-  named,
   nodeArb,
   rightOf,
   runs,
@@ -38,6 +37,7 @@ import {
   textValue,
   valueFor,
 } from "./compiler_arbitraries.ts";
+import { titled } from "./arbitraries.ts";
 
 const MAX = BigInt(Number.MAX_SAFE_INTEGER);
 
@@ -88,25 +88,28 @@ const stored = fc.tuple(tableName, tableArb()).chain(([name, table]) =>
   })
 );
 
-Deno.test(named("decode: decode(insert(doc)) round-trips in both layouts, whatever the driver forms"), () => {
-  fc.assert(
-    fc.property(stored, ({ name, table, body, id, time, forms, nullPrototype }) => {
-      const schema: Schema = { [name]: table };
-      const insert = rightOf(compileInsert(schema, name, body, { _id: id, _creationTime: time }));
-      const row = rowFor(table, insert, forms, nullPrototype);
-      const decoded = rightOf(decode(schema, rowsPlan(name), [row]));
-      assert.deepStrictEqual(decoded, [{ ...body, _id: id, _creationTime: time, _version: 1 }], show(row));
-    }),
-    runs(500),
-  );
-});
+Deno.test(
+  titled("decode: decode(insert(doc)) round-trips in both layouts, whatever the driver forms"),
+  () => {
+    fc.assert(
+      fc.property(stored, ({ name, table, body, id, time, forms, nullPrototype }) => {
+        const schema: Schema = { [name]: table };
+        const insert = rightOf(compileInsert(schema, name, body, { _id: id, _creationTime: time }));
+        const row = rowFor(table, insert, forms, nullPrototype);
+        const decoded = rightOf(decode(schema, rowsPlan(name), [row]));
+        assert.deepStrictEqual(decoded, [{ ...body, _id: id, _creationTime: time, _version: 1 }], show(row));
+      }),
+      runs(500),
+    );
+  },
+);
 
 /** A scalar node and a value for it, for the aggregate decode paths. */
 const scalarCase = nodeArb(0).chain((node) =>
   fc.record({ node: fc.constant(node), value: valueFor(node), form: fc.constantFrom<Form>(0, 1, 2) })
 );
 
-Deno.test(named("decode: count and countBy decode driver integers and booleans to plain values"), () => {
+Deno.test(titled("decode: count and countBy decode driver integers and booleans to plain values"), () => {
   const arb = fc.record({
     name: tableName,
     field: fieldName,
@@ -147,7 +150,7 @@ const unsafeInteger: fc.Arbitrary<bigint | number> = fc.oneof(
   fc.constantFrom(2 ** 53, -(2 ** 53), 2 ** 53 + 2, 1e20, -1e300),
 );
 
-Deno.test(named("decode: safeNumber is exact or fails — it never rounds"), () => {
+Deno.test(titled("decode: safeNumber is exact or fails — it never rounds"), () => {
   fc.assert(
     fc.property(
       fc.oneof(
@@ -205,7 +208,7 @@ const withInteger = fc
     });
   });
 
-Deno.test(named("decode: an integer outside the safe range fails to decode, never truncates"), () => {
+Deno.test(titled("decode: an integer outside the safe range fails to decode, never truncates"), () => {
   fc.assert(
     fc.property(withInteger, ({ name, table, integer, body, forms, target, unsafe }) => {
       const schema: Schema = { [name]: table };

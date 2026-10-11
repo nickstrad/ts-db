@@ -41,7 +41,6 @@ import {
   junkSchema,
   leftOf,
   lex,
-  named,
   placeholders,
   rightOf,
   runs,
@@ -54,6 +53,7 @@ import {
   textValue,
   validPlanArb,
 } from "./compiler_arbitraries.ts";
+import { titled } from "./arbitraries.ts";
 
 const DIALECTS: readonly Dialect[] = ["sqlite", "duckdb"];
 const STORAGES = ["columns", "json"] as const;
@@ -112,7 +112,7 @@ function foreignIdentifiers(text: string, schema: Schema): string[] {
 // Bind parity
 // ---------------------------------------------------------------------------
 
-Deno.test(named("compiler: bind parity — select placeholders equal values; $pN is exactly 1..n"), () => {
+Deno.test(titled("compiler: bind parity — select placeholders equal values; $pN is exactly 1..n"), () => {
   fc.assert(
     fc.property(schemaAndPlan, ({ schema, plan }) => {
       for (const { dialect, result } of compileAll(schema, plan)) {
@@ -134,7 +134,7 @@ Deno.test(named("compiler: bind parity — select placeholders equal values; $pN
   );
 });
 
-Deno.test(named("compiler: bind parity — insert/replace/delete placeholders equal values"), () => {
+Deno.test(titled("compiler: bind parity — insert/replace/delete placeholders equal values"), () => {
   const arb = fc
     .tuple(tableName, tableArb())
     .chain(([name, table]) =>
@@ -227,7 +227,7 @@ const injectionExample = {
 } satisfies { schema: Schema; plan: SelectPlan };
 
 Deno.test(
-  named("compiler: no value leakage — adversarial filter values are bound, never in the text"),
+  titled("compiler: no value leakage — adversarial filter values are bound, never in the text"),
   () => {
     let injectionRuns = 0;
     fc.assert(
@@ -261,7 +261,7 @@ Deno.test(
 // ---------------------------------------------------------------------------
 
 Deno.test(
-  named("compiler: identifier safety — every emitted token is a quoted identifier or a known keyword"),
+  titled("compiler: identifier safety — every emitted token is a quoted identifier or a known keyword"),
   () => {
     const arb = schemaAndPlan.chain(({ schema, plan }) =>
       bodyArb(schema[plan.table]).map((body) => ({ schema, plan, body }))
@@ -356,7 +356,7 @@ function expectInvalidIdentifier(result: Either.Either<unknown, unknown>, contex
 }
 
 Deno.test(
-  named("compiler: identifier safety — a non-identifier name fails to compile rather than being emitted"),
+  titled("compiler: identifier safety — a non-identifier name fails to compile rather than being emitted"),
   () => {
     fc.assert(
       fc.property(poisoned, ({ schema, name, bad, where, plan }) => {
@@ -419,7 +419,7 @@ function total<A>(run: () => Either.Either<A, unknown>, context: string): Either
   return result;
 }
 
-Deno.test(named("compiler: totality — junk schemas and plans yield Either, never a raise"), () => {
+Deno.test(titled("compiler: totality — junk schemas and plans yield Either, never a raise"), () => {
   const arb = junkSchema.chain((schema) =>
     fc.record({
       schema: fc.constant(schema),
@@ -468,7 +468,7 @@ Deno.test(named("compiler: totality — junk schemas and plans yield Either, nev
 // Dialect and storage agreement
 // ---------------------------------------------------------------------------
 
-Deno.test(named("compiler: dialect agreement — same values and same filter/order/limit skeleton"), () => {
+Deno.test(titled("compiler: dialect agreement — same values and same filter/order/limit skeleton"), () => {
   fc.assert(
     fc.property(schemaAndPlan, ({ schema, plan }) => {
       for (const storage of STORAGES) {
@@ -488,7 +488,7 @@ Deno.test(named("compiler: dialect agreement — same values and same filter/ord
   );
 });
 
-Deno.test(named("compiler: storage agreement — columns and json layouts bind the same values"), () => {
+Deno.test(titled("compiler: storage agreement — columns and json layouts bind the same values"), () => {
   fc.assert(
     fc.property(schemaAndPlan, ({ schema, plan }) => {
       for (const dialect of DIALECTS) {
@@ -513,7 +513,7 @@ const anyOrder = fc.record({
 });
 
 Deno.test(
-  named("compiler: limit semantics — count never LIMITs, countBy and rows always do; aggregates drop order"),
+  titled("compiler: limit semantics — count never LIMITs, countBy and rows always do; aggregates drop order"),
   () => {
     fc.assert(
       fc.property(schemaAndPlan, anyOrder, ({ schema, plan }, order) => {

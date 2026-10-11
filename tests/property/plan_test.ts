@@ -18,13 +18,13 @@ import { compileSelect } from "../../core/compile/select.ts";
 import {
   anyName,
   leftOf,
-  named,
   rightOf,
   runs,
   schemaAndInvalidPlan,
   schemaAndPlan,
   show,
 } from "./compiler_arbitraries.ts";
+import { titled } from "./arbitraries.ts";
 
 const DIALECTS: readonly Dialect[] = ["sqlite", "duckdb"];
 const STORAGES = ["columns", "json"] as const;
@@ -53,7 +53,7 @@ function legalLimit(limit: number): boolean {
   return Number.isFinite(limit) && Math.trunc(limit) === limit && limit >= 1 && limit <= 1000;
 }
 
-Deno.test(named("plan: normalise accepts exactly the whole-number limits 1..1000"), () => {
+Deno.test(titled("plan: normalise accepts exactly the whole-number limits 1..1000"), () => {
   fc.assert(
     fc.property(schemaAndPlan, anyLimit, ({ plan }, limit) => {
       const result = normalise({ ...plan, limit });
@@ -70,7 +70,7 @@ Deno.test(named("plan: normalise accepts exactly the whole-number limits 1..1000
   );
 });
 
-Deno.test(named("plan: normalise drops the ordering of aggregates and touches nothing else"), () => {
+Deno.test(titled("plan: normalise drops the ordering of aggregates and touches nothing else"), () => {
   const order = fc.record({ field: anyName, direction: fc.constantFrom("asc" as const, "desc" as const) });
   fc.assert(
     fc.property(schemaAndPlan, fc.option(order, { nil: undefined }), ({ plan }, extraOrder) => {
@@ -91,7 +91,7 @@ Deno.test(named("plan: normalise drops the ordering of aggregates and touches no
 });
 
 Deno.test(
-  named("plan: compileSelect rejects a limit exactly when normalise does (one copy of the rule)"),
+  titled("plan: compileSelect rejects a limit exactly when normalise does (one copy of the rule)"),
   () => {
     fc.assert(
       fc.property(schemaAndPlan, anyLimit, ({ schema, plan }, limit) => {
@@ -111,7 +111,7 @@ Deno.test(
   },
 );
 
-Deno.test(named("plan: generated valid plans compile in every dialect and layout"), () => {
+Deno.test(titled("plan: generated valid plans compile in every dialect and layout"), () => {
   fc.assert(
     fc.property(schemaAndPlan, ({ schema, plan }) => {
       for (const storage of STORAGES) {
@@ -123,7 +123,7 @@ Deno.test(named("plan: generated valid plans compile in every dialect and layout
 });
 
 Deno.test(
-  named("plan: a plan with one defect fails with that defect's reason in every dialect and layout"),
+  titled("plan: a plan with one defect fails with that defect's reason in every dialect and layout"),
   () => {
     const reasons = new Set<string>();
     fc.assert(
