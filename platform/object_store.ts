@@ -11,7 +11,13 @@
  *
  * Every operation emits one event: a `backup` event for `put` (phase `put-object`) and a `lifecycle`
  * event for `get`, because `BackupPhase` in `core/errors.ts` has no read phase. Both carry key, bytes,
- * duration and outcome. This module reads no environment variables; `platform/config.ts` is the only reader.
+ * duration, outcome and `attempts` — the requests sent to the backend, retries included, so a retried
+ * transfer is one event that says how many tries it took, never several. A put's event is a transfer
+ * record (`emitter: "object-store"`), distinct from the phase records `Backups` writes, and carries the
+ * backup run it served (`runId`, read from the `backupRunId` log annotation) when there is one (ADR 0006).
+ * The event is emitted on interruption too (`errorTag: "Interrupted"`, attempts so far); an interrupted
+ * put's `errorDetail` is `{ written: "unknown" }`, because the object may or may not have been stored.
+ * This module reads no environment variables; `platform/config.ts` is the only reader.
  */
 import { dirname, resolve, sep } from "node:path";
 import { Cause, Clock, Duration, Effect, Exit, FiberId, HashMap, Layer, Option, Schedule } from "effect";
@@ -70,6 +76,12 @@ function validateKey(key: string): Effect.Effect<string, InvalidKeyError> {
 type ObjectOperation = "put" | "get";
 type OperationError = ObjectStoreError | InvalidKeyError;
 
+/**
+ * The log annotation naming the backup run an operation serves. `platform/backup.ts` sets it for the
+ * whole of one `take`; `instrument` copies it to the transfer record's `runId`.
+ */
+export const BACKUP_RUN_ANNOTATION = "backupRunId";
+
 interface Instrumentation {
   readonly role: Role;
   readonly sink: EventSinkService;
@@ -90,67 +102,97 @@ function annotation(annotations: HashMap.HashMap<string, unknown>, ...keys: stri
 }
 
 /**
- * Runs `operation`, then emits exactly one event describing it. The event is emitted whatever the
- * outcome and cannot fail (`EventSink.emit` is `Effect<void>`), so it never alters the result.
+ * `errorTag`/`errorDetail` for a failed operation. An interrupted put cannot say whether the object was
+ * written: the interrupt may land before the request, during it, or after the backend stored the bytes
+ * (a local write already under way runs to completion), so its detail says `written: "unknown"`.
+ */
+function failureColumns(
+  op: ObjectOperation,
+  cause: Cause.Cause<OperationError>,
+): { errorTag?: string; errorDetail?: unknown } {
+  if (Cause.isInterruptedOnly(cause)) {
+    return { errorTag: "Interrupted", errorDetail: op === "put" ? { written: "unknown" } : undefined };
+  }
+  const error = Option.getOrUndefined(Cause.failureOption(cause));
+  return error === undefined ? {} : fromPlatformError(error);
+}
+
+/**
+ * Runs `operation` and emits exactly one event describing it. The event is emitted from a finalizer,
+ * so it is written whatever the exit — interruption included — and cannot fail (`EventSink.emit` is
+ * `Effect<void>`), so it never alters the result.
+ *
+ * `run` receives `sent`, which it runs once per request it sends to the backend (each retry included);
+ * the event's `attempts` is how many times it ran before the operation ended.
  */
 function instrument<A>(
   deps: Instrumentation,
   op: ObjectOperation,
   key: string,
   bytesIn: number | undefined,
-  run: Effect.Effect<A, OperationError>,
+  run: (sent: Effect.Effect<void>) => Effect.Effect<A, OperationError>,
   bytesOf: (value: A) => number,
 ): Effect.Effect<A, OperationError> {
   return Effect.gen(function* () {
+    let attempts = 0;
+    const sent = Effect.sync(() => void (attempts += 1));
     const startedAt = yield* Clock.currentTimeMillis;
-    const exit = yield* Effect.exit(run);
-    const finishedAt = yield* Clock.currentTimeMillis;
-    const annotations = yield* Effect.logAnnotations;
-    const fiber = FiberId.threadName(yield* Effect.fiberId);
-    const eventId = yield* deps.ids.next;
-    const ok = Exit.isSuccess(exit);
-    const error = ok ? undefined : Option.getOrUndefined(Cause.failureOption(exit.cause));
-    const columns = error === undefined ? undefined : fromPlatformError(error);
-    const bytes = ok ? bytesOf(exit.value) : bytesIn;
-    const envelope: EventEnvelope = {
-      eventId,
-      ts: new Date(finishedAt).toISOString(),
-      level: ok ? "info" : "error",
-      role: deps.role,
-      pid: Deno.pid,
-      traceId: annotation(annotations, "traceId", "trace_id") ?? fiber,
-      spanId: annotation(annotations, "spanId", "span_id"),
-      appId: annotation(annotations, "appId", "app_id"),
-    };
-    const durationMs = finishedAt - startedAt;
-    const outcome = ok ? "ok" : "error";
-    const event: EventRecord = op === "put"
-      ? backupEvent({
-        ...envelope,
-        phase: "put-object",
-        key,
-        bytes,
-        durationMs,
-        outcome,
-        errorTag: columns?.errorTag,
-        errorDetail: columns?.errorDetail,
-      })
-      : lifecycleEvent({
-        ...envelope,
-        phase: "object-get",
-        detail: {
+    // `onExit` finalizers run uninterruptibly, so an interrupted operation still records its transfer.
+    return yield* Effect.onExit(run(sent), (exit) => emitFor(exit, startedAt, attempts));
+  });
+
+  function emitFor(exit: Exit.Exit<A, OperationError>, startedAt: number, attempts: number) {
+    return Effect.gen(function* () {
+      const finishedAt = yield* Clock.currentTimeMillis;
+      const annotations = yield* Effect.logAnnotations;
+      const fiber = FiberId.threadName(yield* Effect.fiberId);
+      const eventId = yield* deps.ids.next;
+      const ok = Exit.isSuccess(exit);
+      const columns = Exit.isFailure(exit) ? failureColumns(op, exit.cause) : undefined;
+      const interrupted = columns?.errorTag === "Interrupted";
+      const bytes = ok ? bytesOf(exit.value) : bytesIn;
+      const envelope: EventEnvelope = {
+        eventId,
+        ts: new Date(finishedAt).toISOString(),
+        level: ok ? "info" : interrupted ? "warn" : "error",
+        role: deps.role,
+        pid: Deno.pid,
+        traceId: annotation(annotations, "traceId", "trace_id") ?? fiber,
+        spanId: annotation(annotations, "spanId", "span_id"),
+        appId: annotation(annotations, "appId", "app_id"),
+      };
+      const durationMs = finishedAt - startedAt;
+      const outcome = ok ? "ok" : "error";
+      const event: EventRecord = op === "put"
+        ? backupEvent({
+          ...envelope,
+          phase: "put-object",
+          emitter: "object-store",
+          runId: annotation(annotations, BACKUP_RUN_ANNOTATION),
           key,
           bytes,
+          attempts,
           durationMs,
           outcome,
           errorTag: columns?.errorTag,
           errorDetail: columns?.errorDetail,
-        },
-      });
-    yield* deps.sink.emit(event);
-    // A defect (not a typed failure) is re-raised as-is; typed failures keep their channel.
-    return yield* exit;
-  });
+        })
+        : lifecycleEvent({
+          ...envelope,
+          phase: "object-get",
+          detail: {
+            key,
+            bytes,
+            attempts,
+            durationMs,
+            outcome,
+            errorTag: columns?.errorTag,
+            errorDetail: columns?.errorDetail,
+          },
+        });
+      yield* deps.sink.emit(event);
+    });
+  }
 }
 
 // ===========================================================================
@@ -240,10 +282,11 @@ export function makeObjectStoreLocal(options: ObjectStoreOptions = {}): ObjectSt
             "put",
             key,
             bytes.byteLength,
-            validateKey(key).pipe(
-              Effect.flatMap(localPath),
-              Effect.flatMap((file) => publish(key, file, bytes)),
-            ),
+            (sent) =>
+              validateKey(key).pipe(
+                Effect.flatMap(localPath),
+                Effect.flatMap((file) => Effect.zipRight(sent, publish(key, file, bytes))),
+              ),
             () => bytes.byteLength,
           ),
         get: (key) =>
@@ -252,15 +295,19 @@ export function makeObjectStoreLocal(options: ObjectStoreOptions = {}): ObjectSt
             "get",
             key,
             undefined,
-            validateKey(key).pipe(
-              Effect.flatMap(localPath),
-              Effect.flatMap((file) =>
-                Effect.tryPromise({
-                  try: () => fs.readFile(file),
-                  catch: fail("get", key),
-                })
+            (sent) =>
+              validateKey(key).pipe(
+                Effect.flatMap(localPath),
+                Effect.flatMap((file) =>
+                  Effect.zipRight(
+                    sent,
+                    Effect.tryPromise({
+                      try: () => fs.readFile(file),
+                      catch: fail("get", key),
+                    }),
+                  )
+                ),
               ),
-            ),
             (value) => value.byteLength,
           ),
       };
@@ -349,29 +396,36 @@ export function makeObjectStoreS3(options: ObjectStoreOptions = {}): ObjectStore
         Schedule.intersect(Schedule.recurs(RETRIES)),
       );
 
-      /** One signed request, one attempt. Re-signed per attempt so the timestamp is fresh. */
+      /**
+       * One signed request per attempt, retried on transient failures. Re-signed per attempt so the
+       * timestamp is fresh; `sent` counts each one.
+       */
       const attempt = <A>(
         operation: ObjectOperation,
         key: string,
         init: RequestInit,
         read: (response: Response) => Promise<A>,
+        sent: Effect.Effect<void>,
       ): Effect.Effect<A, ObjectStoreError> =>
-        Effect.tryPromise({
-          try: async (interrupt) => {
-            const signal = AbortSignal.any([interrupt, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]);
-            const request = await signer.sign(url(key), init);
-            const response = await send(request, { signal });
-            if (!response.ok) {
-              const body = await response.text().catch(() => "");
-              throw new HttpFailure(response.status, body.slice(0, MAX_BODY_CHARS));
-            }
-            return await read(response);
-          },
-          catch: (cause) =>
-            cause instanceof HttpFailure
-              ? new ObjectStoreError({ operation, key, status: cause.status, detail: cause.body })
-              : new ObjectStoreError({ operation, key, cause, detail: String(cause) }),
-        }).pipe(Effect.retry({ schedule, while: isTransient }));
+        Effect.zipRight(
+          sent,
+          Effect.tryPromise({
+            try: async (interrupt) => {
+              const signal = AbortSignal.any([interrupt, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]);
+              const request = await signer.sign(url(key), init);
+              const response = await send(request, { signal });
+              if (!response.ok) {
+                const body = await response.text().catch(() => "");
+                throw new HttpFailure(response.status, body.slice(0, MAX_BODY_CHARS));
+              }
+              return await read(response);
+            },
+            catch: (cause) =>
+              cause instanceof HttpFailure
+                ? new ObjectStoreError({ operation, key, status: cause.status, detail: cause.body })
+                : new ObjectStoreError({ operation, key, cause, detail: String(cause) }),
+          }),
+        ).pipe(Effect.retry({ schedule, while: isTransient }));
 
       const service: ObjectStoreService = {
         put: (key, bytes) =>
@@ -380,19 +434,21 @@ export function makeObjectStoreS3(options: ObjectStoreOptions = {}): ObjectStore
             "put",
             key,
             bytes.byteLength,
-            Effect.flatMap(validateKey(key), () =>
-              attempt(
-                "put",
-                key,
-                {
-                  method: "PUT",
-                  body: bytes.slice().buffer,
-                  headers: { "content-type": "application/octet-stream" },
-                },
-                async (response) => {
-                  await response.body?.cancel();
-                },
-              )),
+            (sent) =>
+              Effect.flatMap(validateKey(key), () =>
+                attempt(
+                  "put",
+                  key,
+                  {
+                    method: "PUT",
+                    body: bytes.slice().buffer,
+                    headers: { "content-type": "application/octet-stream" },
+                  },
+                  async (response) => {
+                    await response.body?.cancel();
+                  },
+                  sent,
+                )),
             () => bytes.byteLength,
           ),
         get: (key) =>
@@ -401,13 +457,15 @@ export function makeObjectStoreS3(options: ObjectStoreOptions = {}): ObjectStore
             "get",
             key,
             undefined,
-            Effect.flatMap(validateKey(key), () =>
-              attempt(
-                "get",
-                key,
-                { method: "GET" },
-                async (response) => new Uint8Array(await response.arrayBuffer()),
-              )),
+            (sent) =>
+              Effect.flatMap(validateKey(key), () =>
+                attempt(
+                  "get",
+                  key,
+                  { method: "GET" },
+                  async (response) => new Uint8Array(await response.arrayBuffer()),
+                  sent,
+                )),
             (value) => value.byteLength,
           ),
       };
