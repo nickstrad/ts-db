@@ -37,7 +37,7 @@ things, style), see `CLAUDE.md`.
   public type-level API, the error taxonomy.
 - **Sonnet** (`implementer-sonnet-high`) — bounded, mechanical items: the interface is already fixed by an
   earlier item, the file list is short, acceptance criteria are checkable by running a command.
-- **Haiku 5.5** (never 4.5) — experiments and side quests **only**, tracked in `docs/haiku-experiments.md`.
+- **Haiku** (never ≤4.5) — experiments and side quests **only**, tracked in `docs/haiku-experiments.md`.
   Haiku never lands work to `main` without both an Opus review (PASS) and explicit human approval — a PASS
   alone is not sufficient authorization to merge. Haiku work happens on `haiku/NN-slug` branches, never on an
   `item/NN-slug` branch or worktree.
@@ -53,17 +53,17 @@ below are plan labels; pass the full verified ID to Codex. The top Anthropic tie
 | ------------------------------- | -------------------------------- | ------------ | -------------- |
 | Top: hard correctness, reviews  | `opus` (Opus 5.5)                | astra        | `gpt-6-astra`  |
 | Middle: bounded mechanical work | `sonnet`                         | sol          | `gpt-6.1-sol`  |
-| Fast/cheap, run on high effort  | `haiku` (= Haiku 5.5, never 4.5) | luna         | `gpt-6-luna`   |
+| Fast/cheap, run on high effort  | `haiku` (= Haiku ≥5.5, never ≤4.5) | luna       | `gpt-6-luna`   |
 
 IDs verified in `/root/.codex/models_cache.json`, fetched 2026-10-11 02:23 UTC (CLI 0.161.0). No OpenAI ID
 deviations were found. This is the repo's standing dispatch correspondence.
 
 Match the task's intelligence tier; either family is acceptable within that tier. This section permits astra
 where the build protocol or a plan calls for Opus 5.5, including an independent top-tier review (a different
-reviewer from the builder), and sol where it calls for Sonnet. Luna is the Haiku 5.5-tier OpenAI label and
+reviewer from the builder), and sol where it calls for Sonnet. Luna is the Haiku-tier OpenAI label and
 always runs on high effort; the `haiku` alias resolves to `claude-haiku-5-5` (verified 2026-10-11 via
-`--output-format json`); if the alias ever drifts, pin with `claude --model claude-haiku-5-5`. Haiku 4.5 must
-never be used; the Haiku experiment restrictions, including explicit human approval before landing, also apply
+`--output-format json`); if the alias ever drifts to Haiku ≤4.5, pin with a ≥5.5 model ID (e.g.
+`claude --model claude-haiku-5-5`). Haiku ≤4.5 must never be used; the Haiku experiment restrictions, including explicit human approval before landing, also apply
 to luna when dispatched in the experiment tier. The mapping above is the standing one. Independent reviews
 stay top-tier (Opus 5.5 or astra). Model names alone never authorize work outside an item's ownership. This
 orchestration policy lives only here; `CLAUDE.md` needs no change.
