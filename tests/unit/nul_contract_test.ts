@@ -31,7 +31,14 @@ import { IdGen } from "../../platform/services.ts";
 import { makeStorage } from "../../platform/sqlite.ts";
 import type { WriteDB } from "../../sdk/db.ts";
 import { defineFunctions } from "../../sdk/functions.ts";
-import { defineSchema, defineTable, type Storage as Layout, v, withStorage } from "../../sdk/schema.ts";
+import {
+  defineSchema,
+  defineTable,
+  type Schema,
+  type Storage as Layout,
+  v,
+  withStorage,
+} from "../../sdk/schema.ts";
 import { runTest } from "../helpers/run.ts";
 import {
   makeIdGenTest,
@@ -116,10 +123,10 @@ const tempDir = Effect.acquireRelease(
   (dir) => Effect.sync(() => rmSync(dir, { recursive: true, force: true })),
 );
 
-function open(target: Target, layout: Layout, ids?: IdGenService) {
+function open(target: Target, layout: Layout, ids?: IdGenService, tables: Schema = schema) {
   return Effect.gen(function* () {
     yield* TestClock.setTime(T0);
-    const laidOut = withStorage(schema, layout);
+    const laidOut = withStorage(tables, layout);
     const idGen = ids ? Effect.succeed(ids) : makeIdGenTest();
     if (target === "live") {
       const file = join(yield* tempDir, "app.sqlite");
@@ -459,13 +466,23 @@ forEachBackend(
       assert.deepStrictEqual(yield* expect(mutate((db) => db.get("docs", "b"))), storedNul(column("name")));
       assert.deepStrictEqual(yield* expect(mutate((db) => db.get("docs", "c"))), storedNul(column("tags")));
       assert.deepStrictEqual(yield* expect(mutate((db) => db.get("docs", "e"))), storedNul(column("note")));
-      assert.deepStrictEqual(
-        yield* expect(mutate((db) => db.find("docs").where("n", 4).collect())),
-        storedNul("_id"),
-        "the `_id` itself",
-      );
-      const everything = yield* expect(all);
-      assert.ok("fail" in everything && everything.fail.operation === "select", show(everything));
+      // Each planted document read on its own by a filter: the clean one reads, every NUL one fails.
+      const alone: [number, Outcome][] = [
+        [1, { ok: [{ ...PLANTED[0].body, _id: "a", _creationTime: T0, _version: 1 }] }],
+        [2, storedNul(column("name"))],
+        [3, storedNul(column("tags"))],
+        [4, storedNul("_id")],
+        [5, storedNul(column("note"))],
+      ];
+      for (const [n, expected] of alone) {
+        assert.deepStrictEqual(
+          yield* expect(mutate((db) => db.find("docs").where("n", n).collect())),
+          expected,
+          `n = ${n}`,
+        );
+      }
+      // Reading them all fails on the first NUL row in read order, `b`.
+      assert.deepStrictEqual(yield* expect(all), storedNul(column("name")), "the whole table");
       // A `countBy` group value is named by its field in either layout.
       assert.deepStrictEqual(
         yield* expect(mutate((db) => db.find("docs").countBy("name"))),
@@ -502,6 +519,34 @@ forEachBackend(
       assert.equal(yield* o.version("d\u0000"), 1);
     }),
 );
+
+/** A field named `doc`: in the `columns` layout its column holds JSON text, but not the body. */
+const docField = defineSchema({ docs: defineTable({ doc: v.array(v.string()) }) });
+
+for (const { target, layout } of BACKENDS) {
+  runTest(
+    `pre-existing NUL text in an array field named \`doc\` fails the read (${target}, ${layout})`,
+    Effect.gen(function* () {
+      const o = yield* open(target, layout, undefined, docField);
+      yield* o.plant([
+        { _id: "a", body: { doc: ["clean"] } },
+        { _id: "b", body: { doc: ["t", "x\u0000"] } },
+      ].map((doc) => ({ ...doc, _creationTime: T0, _version: 1 })));
+      const get = (id: string) =>
+        outcome(
+          run(
+            o.storage,
+            defineFunctions(docField).mutation({ args: {}, handler: ({ db }) => db.get("docs", id) }),
+          ),
+        );
+      assert.deepStrictEqual(yield* get("a"), {
+        ok: { doc: ["clean"], _id: "a", _creationTime: T0, _version: 1 },
+      });
+      // Either layout stores the NUL in a column named `doc`, as a JSON escape.
+      assert.deepStrictEqual(yield* get("b"), storedNul("doc"));
+    }),
+  );
+}
 
 runTest(
   "pre-existing NUL text: MemoryStore.select (ReaderTest's path) reads it losslessly, as DuckDB does",

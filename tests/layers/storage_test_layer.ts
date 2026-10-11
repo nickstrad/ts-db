@@ -273,7 +273,7 @@ function selectRows(
  */
 function storedNul(table: Table, plan: SelectPlan, rows: readonly Row[]): string | undefined {
   const json = (column: string) =>
-    column === "doc" ? table.storage === "json" : table.fields[column]?.node.kind === "array";
+    table.storage === "json" ? column === "doc" : table.fields[column]?.node.kind === "array";
   for (const row of rows) {
     for (const [column, value] of Object.entries(row)) {
       if (typeof value !== "string") continue;

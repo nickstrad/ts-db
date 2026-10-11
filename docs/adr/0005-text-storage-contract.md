@@ -100,9 +100,14 @@ deleted through the API; removing it takes manual SQL.
 
 - No accepted string or id is changed by U+0000 truncation: it reads back exactly as written, or the write is
   refused. (Lone surrogates are the one remaining exception; see above.)
+- Stored NUL text that used to be readable becomes unreadable through `Storage`: `string`/`enum` columns,
+  array columns and `json`-layout bodies that previously returned (possibly truncated) text now fail the read
+  with `StorageError` instead, and a `patch` of such a row fails the same way.
 - Clients that need NUL bytes must encode them (base64, or an array of code points) before storing.
-- A writer read that returns text runs one more statement, which emits its own `sql` event. Mutation reads are
-  small (`get` is one row; `find` is capped at 1000), so the cost is one indexed or bounded rescan per read.
+- A writer read that returns text runs one more statement over the same compiled read, which emits its own
+  `sql` event. Results are small (`get` is one row; `find` is capped at 1000), but the probe re-runs the whole
+  read: an indexed lookup for `get` and indexed filters, a full rescan of the table for `find` or `countBy` on
+  unindexed fields.
 - The oracle's documents still exclude U+0000, because the oracle checks compiled SQL rather than Storage. The
   NUL regression goes through the real `StorageLive` instead.
 - Lossless reads remain possible later: a compiler item could emit `CAST(... AS BLOB)` and lift this
