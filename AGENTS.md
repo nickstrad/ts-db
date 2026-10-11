@@ -92,6 +92,14 @@ folder. Full placement rules in `work-scripts/README.md`. The rule that matters 
 `work-scripts/INDEX.md` before writing a new script, and append a row to it when you add one** — over time
 this becomes the shared set of building blocks agents start from instead of re-creating.
 
+## Knowledge
+
+`docs/knowledge/` is the project's durable memory — decisions, gotchas, glossary — plain markdown with an
+`index.md`. **Read `docs/knowledge/index.md` at session/orientation start**, before planning new work.
+**Update it when you learn something durable**: a landing, a decision, a debugging session that taught you
+something another agent would otherwise rediscover. Date new entries (`YYYY-MM-DD`); link, don't duplicate;
+mark superseded entries instead of deleting history. Markdown only — never the `kb` CLI.
+
 ## Diagram maintenance (C4 architecture docs)
 
 `docs/architecture/` holds Simon Brown C4 diagrams for this project (see `docs/architecture/AGENTS.md` for the
