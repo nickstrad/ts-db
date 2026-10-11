@@ -8,7 +8,8 @@
     "npm:@duckdb/node-api@1.5.6-r.1": "1.5.6-r.1",
     "npm:aws4fetch@1.0.20": "1.0.20",
     "npm:effect@3.22.2": "3.22.2",
-    "npm:fast-check@4.10.2": "4.10.2"
+    "npm:fast-check@4.10.2": "4.10.2",
+    "npm:postgres@3.4.9": "3.4.9"
   },
   "jsr": {
     "@std/fs@1.0.24": {
@@ -118,6 +119,9 @@
       "dependencies": [
         "pure-rand@8.4.2"
       ]
+    },
+    "postgres@3.4.9": {
+      "integrity": "sha512-GD3qdB0x1z9xgFI6cdRD6xu2Sp2WCOEoe3mtnyB5Ee0XrrL5Pe+e4CCnJrRMnL1zYtRDZmQQVbvOttLnKDLnaw=="
     },
     "pure-rand@6.1.0": {
       "integrity": "sha512-bVWawvoZoBYpp6yIoQtQXHZjmz35RSVHnUOTefl8Vcjr8snTPY1wnpSPMWekcFwbxI6gtmT7rSYPFvz71ldiOA=="
