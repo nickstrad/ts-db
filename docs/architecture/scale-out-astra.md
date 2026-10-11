@@ -3,6 +3,12 @@
 Design exercise, 2026-10-11. Source baseline: `1031b06ed8520c33d0d5f496084268071de0b348` on
 `arch/astra-scale-out`. These are independent proposals, not implemented architecture or a migration plan.
 
+Revision, 2026-10-11: the independent pass remains at `c8ee93d`. This pass cross-checks its four approaches
+against the supplied Convex/SurrealDB/Turso brief and primary sources. The recommendation and source baseline
+above are unchanged. The brief is local, untracked reference material; the source links below keep this
+revision readable without it. Vendor examples support techniques, not our proposed latency or failover
+guarantees. Proposed mechanisms below remain unimplemented.
+
 I would choose **capacity-aware tenant shards with replicated writers and separate read capacity (approach
 3)**. Descriptor multiplexing belongs inside those shards. A new handle pool alone does not isolate
 synchronous execution, and distributing files alone does not protect writes from analytical I/O.
@@ -148,6 +154,26 @@ loop or hold a global cache lock across cleanup. Snapshot scans are explicitly s
 rejected or converted to asynchronous snapshot jobs. No transparent host recovery; adding processes does not
 add disk bandwidth or remove the shared host failure domain.
 
+### Research cross-check
+
+Turso's database-per-tenant model supports multiplexing a large population of mostly dormant files. The
+brief's 10k+ databases per account and hundreds per node describe different scopes; neither establishes how
+many connections this Deno host can safely keep open. Keep the measured FD formula and cold-open test. Its
+many-database model also challenges any interpretation of this proposal as one permanent process per tenant:
+only the protected working set is pinned; ordinary workers are pooled.
+
+For hot-file backups, evaluate the brief's bottomless pattern: archive ordered WAL frames to object storage
+between consistent base snapshots. Retain the snapshot and every required frame until a newer restore point is
+durable; a restore drill must verify continuity. This augments approach 1's local scan copies and approach 2's
+recovery path, without turning backups into promotable replicas.
+
+Borrow the brief's cross-database upload batching only for the backup lane: flush on a bounded timer or byte
+limit, retain per-tenant sequence ranges, checksums and restore manifests, and cap each tenant's contribution.
+This amortizes object-store requests, not SQLite descriptors or transaction commits. Do not wait for a batch
+to fill before serving a protected write. If upload is asynchronous, expose the durable backup watermark and
+recovery-point gap; if upload gates acknowledgement, include its bounded delay and outage in the write SLO.
+The brief's single-digit-millisecond claim is not a budget measured for this implementation.
+
 ### When I would pick it
 
 Many mostly dormant tenants, one bounded hot working set, and no requirement to survive host loss. It is a
@@ -240,6 +266,25 @@ control-plane outage is not permission to invent a new owner. A metadata epoch a
 SQLite writer: A must persist its handoff and cease writes before B starts, or infrastructure must positively
 isolate A. If that cannot be established, the tenant stops safely. Placement and hot-tenant exceptions need
 operational tooling. Backups provide disaster recovery, not automatic low-latency failover.
+
+### Research cross-check
+
+The brief's Turso control/data-plane split confirms the placement boundary; its Convex router pattern adds an
+explicit operation and consistency contract. Mutations go to the current owner. Here, authoritative short
+reads also go to that owner; snapshot reads require an explicit stale-read choice. Carry the last successful
+write's tenant-scoped commit token across router instances and ownership moves. In approach 3, route reads to
+replicas only after they meet that token. Session affinity improves cache locality but cannot prove freshness.
+Tokens need a database incarnation and committed position, with a validated continuity rule across handoff;
+wall-clock timestamps or a new placement epoch alone do not prove that earlier writes were applied.
+
+Keep local and remote executors behind one operation interface, with deadlines, cancellation, authorization
+and unknown-write outcomes specified at that boundary. Convex's shipped
+[Funrun split](https://stack.convex.dev/horizontally-scaling-functions) separates read-only function execution
+from backend commit validation over gRPC. It supports moving compute without moving write authority; it does
+not prove that our arbitrary handlers are safe to execute speculatively. The brief's specific
+Primary/Replica/RemoteCommitter topology is treated as a design reference, not a verified deployed contract.
+Neither its roughly 5k mutations/sec guidance nor another service's tenant count sets our sharding threshold:
+use measured queue latency, FD pressure and I/O saturation. Hot-tenant overrides remain capacity decisions.
 
 ### When I would pick it
 
@@ -347,6 +392,45 @@ replica that misses its deadline returns a freshness error or reroutes to anothe
 never silently sends a large scan into the writer lane. A lagging learner may be dropped and resnapshotted
 rather than retaining unbounded log history. Cross-tenant atomicity remains unsupported.
 
+### Research cross-check
+
+**Added mechanism: frame-log catch-up.** Prefer evaluating a libSQL-style physical frame stream for the
+committed-change edges (7 and 9), rather than rerunning handlers or repeatedly copying whole hot files.
+libSQL's
+[WAL wrapper](https://github.com/tursodatabase/libsql/blob/main/libsql-server/src/replication/primary/replication_logger_wal.rs)
+records page changes, handles rollback, and publishes a committed frame position. That is engine integration,
+not a feature exposed by our existing `node:sqlite` adapter. The proposed adapter must couple this stream to
+the quorum commit boundary before publishing frames as committed; the referenced implementation is not proof
+of that stronger contract.
+
+Bootstrap from a consistent snapshot labelled with its database incarnation and committed log position, then
+replay a contiguous frame range. Apply complete transactions and publish an applied position only when readers
+can see the whole commit. Detect gaps, generation changes and incompatible formats; discard divergent
+uncommitted tails through the replication protocol. Retain catch-up history under a byte/time budget and
+resnapshot a replica that falls behind it. Snapshot transfer and frame application consume the replica's FD,
+memory and I/O budgets. Measure page-level write amplification before choosing physical replication over
+concrete logical changes. This also provides a candidate for approach 2's planned-move catch-up stream.
+
+**Confirmed and qualified: read-after-write.** Turso documents local reads, primary-forwarded writes and
+[read-your-writes for embedded replicas](https://docs.turso.tech/features/embedded-replicas/introduction). The
+guarantee applies to the initiating replica; other replicas need catch-up. For our routers, require the
+selected replica's applied position to cover the response token before opening the read transaction. A
+synchronized embedded replica is a useful read cache, not automatically an eligible failover voter.
+Read-your-writes does not replace the leader-certified barrier for linearizable reads.
+
+**Challenged: replication is not the failover protocol.** The brief's suggestion that per-file serial
+semantics need no consensus overlooks ownership and acknowledged-write survival during node loss. One local
+writer prevents local write races; it cannot elect its replacement or preserve an unreplicated success. Keep
+the three-voter contract. Neither asynchronous frame shipping nor WAL-to-S3 backup by itself supplies it.
+SurrealDB's multi-writer model from the brief is a contrast, not a reason to add concurrent writers to one
+SQLite file or assume SQLite inherits distributed transactional visibility.
+
+Turso also narrows my original implication that synchronous durability must always mean three full SQLite
+copies: its [current storage description](https://turso.tech/what-is-turso) says acknowledgement follows WAL
+persistence to S3 Express, with lazy segment fetching. That is distinct from the brief's libSQL/bottomless
+model. A durable shared-log authority could be evaluated separately, but would still need fencing, recovery,
+and availability proofs. It does not remove the three-voter dependency of the design chosen here.
+
 ### When I would pick it
 
 Protected synchronous writes must survive one data-node failure, tenant count exceeds node FD capacity, and
@@ -438,6 +522,22 @@ Command acceptance remains available during projection movement, but visible sta
 to wait for application or explicitly accept stale reads. Backlog must drain faster than accepted traffic;
 otherwise no completion bound exists even when append latency looks excellent.
 
+### Research cross-check
+
+Convex confirms the usefulness of an ordered transaction log, but challenges equating every log-backed system
+with this approach's asynchronous command acceptance. Its
+[commit protocol](https://stack.convex.dev/how-convex-works) validates a finalized transaction's read set,
+appends its write set, and then returns the mutation result. Our existing semaphore serializes local writes;
+it does not provide Convex's OCC validation or distributed durability. Likewise, libSQL frame logs encode
+executed page changes, not pending application commands. A broker or WAL stream alone cannot validate a
+conditional command before its SQLite projector runs.
+
+Keep the receipt/result distinction explicit: rejection at intake differs from a durably accepted command that
+later fails its condition. Persist that terminal result with the applied offset. Borrow ordered replay,
+checkpointed snapshots and bounded retention, while preserving the stated asynchronous API change. A separate
+backup consumer may batch uploads as in approach 1; it must not block the protected append or projector lanes.
+None of the brief's examples establishes the finite outage horizon or backlog-drain bound this design needs.
+
 ### When I would pick it
 
 Ingestion, jobs, telemetry or workflows where “durably accepted” is the useful write contract. I would not
@@ -499,6 +599,13 @@ running them:
    Verify commit-token reads never return older state, scan cancellation releases actual resources, and stale
    learners are resnapshotted without filling the protected write volume. Reads must not turn into implicit
    synchronous dependencies of write acknowledgement.
+
+5. **Frame-stream and backup recovery:** Interrupt replication inside a transaction, truncate retained
+   history, reset a database incarnation and restore snapshot-plus-frames. Reject missing or mismatched
+   history; expose no partial transaction and recover the same request results. Carry a write token through
+   router replacement and primary movement; a lagging or unrelated replica must not satisfy it. Run one
+   tenant's upload burst beside the protected write and measure batch delay, write amplification, backup
+   watermark and restore time. If any object-store write gates acknowledgement, inject its outage explicitly.
 
 These are design acceptance criteria, not tests executed in this documentation exercise. The current repo
 supplies local storage, routing and supervision building blocks; it does not yet establish these distributed
