@@ -31,7 +31,7 @@ S3_REGION     := us-east-1
 
 UP_TIMEOUT_SECONDS := 60
 
-.PHONY: help up down restart ps logs clean s3-init
+.PHONY: help up down restart ps logs clean s3-init db-shell db-migrate
 
 help: ## Show this help
 	@grep -E '^[a-z0-9-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-10s %s\n", $$1, $$2}'
@@ -102,3 +102,13 @@ s3-init: ## Create the tsdb-test bucket and print endpoint + test credentials
 	@echo "  export AWS_ACCESS_KEY_ID=$(S3_ACCESS_KEY)"
 	@echo "  export AWS_SECRET_ACCESS_KEY=$(S3_SECRET_KEY)"
 	@echo "  export AWS_REGION=$(S3_REGION)"
+
+# Same dev defaults as the postgres service in docker-compose.yml (DEV ONLY).
+POSTGRES_USER ?= tsdb
+POSTGRES_DB   ?= tsdb
+
+db-shell: ## Open an interactive psql shell in the postgres service
+	docker compose exec postgres psql -U $(POSTGRES_USER) -d $(POSTGRES_DB)
+
+db-migrate: ## Apply platform/tenants/schema.sql to postgres (idempotent)
+	docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U $(POSTGRES_USER) -d $(POSTGRES_DB) < platform/tenants/schema.sql
