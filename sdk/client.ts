@@ -41,6 +41,7 @@ function remoteFailure(status: number, body: unknown): RemoteError {
   return new RemoteError({ status, message: `HTTP ${status}` });
 }
 
+/** `token` is the tenant API key in tenancy modes, or the legacy app token with TENANCY=off. */
 export function createClient<F extends Functions>(
   baseURL: string,
   appId: string,
@@ -107,3 +108,6 @@ export function createPromiseClient<F extends Functions>(
       run(client.mutation(name, args, traceId)),
   };
 }
+
+/** Tenant-key spelling of createClient; identical types, trace support and wire format. */
+export const createTenantClient = createClient;

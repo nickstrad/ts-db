@@ -132,6 +132,8 @@ export type ReaderRequest =
     | { readonly kind: "ping" }
     | {
       readonly kind: "query";
+      /** Trusted writer-resolved tenant location; never copied from HTTP input. */
+      readonly tenant?: { readonly id: string; readonly file: string };
       readonly appId: string;
       readonly name: string;
       readonly args: unknown;

@@ -34,7 +34,9 @@
  *
  * `analysis` stays unavailable until item 23's catalog.
  */
-import { Cause, Effect, Exit, Logger, Option } from "effect";
+import { isAbsolute } from "node:path";
+import { parseTenantId } from "./tenants/registry.ts";
+import { Cause, Context, Effect, Exit, Layer, Logger, Option } from "effect";
 import {
   ConfigError,
   HandlerKindMismatch,
@@ -46,7 +48,7 @@ import {
   UnknownHandlerError,
 } from "../core/errors.ts";
 import { decoder } from "../core/ipc/framing.ts";
-import { emitLifecycle, makeReaderPool } from "./duckdb.ts";
+import { emitLifecycle, makeReaderPool, ReaderLive } from "./duckdb.ts";
 import { type ReceivedRequest, receiveFrame, withRequestContext } from "./reader_context.ts";
 import { ReaderRootLive } from "./reader_layers.ts";
 import { appsFromConfig } from "./registry.ts";
@@ -55,6 +57,7 @@ import {
   EventLogIngest,
   EventSink,
   type IdGen,
+  Reader,
   type ReaderErrorFrame,
   type ReaderReply,
   type ReaderRequestFrame,
@@ -138,7 +141,8 @@ const program = Effect.gen(function* () {
   const sink = yield* EventSink;
   const eventLog = yield* EventLogIngest;
   const readerFor = yield* makeReaderPool();
-  const apps = new Map(appsFromConfig(yield* Config).map((app) => [app.id, app] as const));
+  const config = yield* Config;
+  const apps = new Map(appsFromConfig(config).map((app) => [app.id, app] as const));
   const pid = Deno.pid;
   const lifecycle = (phase: string, detail?: unknown) => emitLifecycle(sink, phase, detail);
 
@@ -162,7 +166,25 @@ const program = Effect.gen(function* () {
               actual: definition.kind,
             });
           }
-          return yield* readerFor(app).query(definition, frame.args);
+          if (config.tenancy.mode === "off") {
+            return yield* readerFor(app).query(definition, frame.args);
+          }
+          // This capability is sent only by the writer after authentication and router.prepare.
+          // Never fall back to app.file when tenant context is absent or malformed.
+          if (
+            !frame.tenant || typeof frame.tenant.id !== "string" ||
+            typeof frame.tenant.file !== "string" || !isAbsolute(frame.tenant.file)
+          ) {
+            return yield* new ReaderError({ operation: "open", detail: "Missing tenant context" });
+          }
+          yield* parseTenantId(frame.tenant.id).pipe(
+            Effect.mapError(() => new ReaderError({ operation: "open", detail: "Invalid tenant context" })),
+          );
+          // Scope per request: bounded handles and no cross-tenant cache identity aliasing.
+          return yield* Effect.scoped(Effect.gen(function* () {
+            const context = yield* Layer.build(ReaderLive({ ...app, file: frame.tenant!.file }));
+            return yield* Context.get(context, Reader).query(definition, frame.args);
+          })).pipe(Effect.provideService(Config, config), Effect.provideService(EventSink, sink));
         });
       case "ingest":
         return eventLog.ingest;

@@ -83,3 +83,26 @@ consecutive calls show missing worktrees or unfamiliar state, drop a sentinel fi
 (`touch
 /root/Software/ts-db/.<your-name>`) and retry the connection; bail out rather than working on the
 wrong backend. (2026-10-11)
+
+## 2026-10-11 — MT-07 tenant reader and preparation boundary
+
+Tenant queries carry a writer-resolved location over private IPC; no path or tenant id is copied from HTTP
+arguments. Do not import `platform/tenants/routing.ts` in the reader: it loads `node:sqlite` and would violate
+the two-native-libraries process boundary. The pure UUID parser lives in `registry.ts`. Tenant readers are
+scoped to one query for now; a bounded, leased tenant reader pool is a performance follow-up, not a reason to
+fall back to the legacy app file.
+
+Writer initialization and query preparation must share the same successful-preparation barrier. Calling
+`router.prepare` again on every query takes `BEGIN IMMEDIATE` on a second connection and can block the writer
+event loop while a yielding mutation holds a transaction. Regression coverage:
+`tests/unit/tenant_auth_test.ts` holds a mutation open while an authenticated query completes.
+
+The required one-file-per-tenant layout means a tenant file has one schema/storage fingerprint. The default
+columns and JSON sample apps are alternative layouts: using the other layout on an already-initialized tenant
+fails closed on schema mismatch. Supporting incompatible app schemas for one tenant requires an explicit
+storage-model decision; do not silently create per-app tenant files.
+
+The key cache stores hashes only, including negative results, with a fixed (non-sliding) deadline. Admin
+mutations and authentication must use the same cached registry instance for immediate local invalidation.
+Another server instance observes revocation/deactivation within one TTL; there is no cross-instance
+invalidation protocol.

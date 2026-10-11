@@ -39,6 +39,7 @@
  */
 import { Cause, Clock, Effect, Exit, FiberId, Option } from "effect";
 import {
+  AuthError,
   type HandlerKind,
   HandlerKindMismatch,
   type PlatformError,
@@ -50,7 +51,8 @@ import {
 import { fromPlatformError, handlerEvent, type Level } from "../../core/events.ts";
 import { AppServices } from "../registry.ts";
 import { AppRegistry, Config, EventSink, ReaderClient, TenantRegistry } from "../services.ts";
-import { authenticateAdmin, authenticateApp } from "./auth.ts";
+import { authenticateAdmin, withAppAuthentication } from "./auth.ts";
+import { TenantContext } from "../tenants/routing.ts";
 import { parseApiKeyId, parseTenantId } from "../tenants/registry.ts";
 import { currentTraceContext, newSpanId, withChildSpan } from "./trace.ts";
 
@@ -154,17 +156,42 @@ export function invoke(
     appId,
     Effect.gen(function* () {
       const stack = yield* (yield* AppServices).get(appId);
-      yield* authenticateApp(context.headers, stack.app);
-      if (!Object.hasOwn(stack.app.functions, name)) {
-        return yield* new UnknownHandlerError({ appId, name });
-      }
-      const definition = stack.app.functions[name];
-      if (definition.kind !== kind) {
-        return yield* new HandlerKindMismatch({ appId, name, expected: kind, actual: definition.kind });
-      }
-      const args = yield* context.body;
-      if (kind === "mutation") return yield* stack.storage.mutation(definition, args);
-      return yield* (yield* ReaderClient).call({ kind: "query", appId, name, args });
+      return yield* withAppAuthentication(
+        context.headers,
+        stack.app,
+        Effect.gen(function* () {
+          if (!Object.hasOwn(stack.app.functions, name)) {
+            return yield* new UnknownHandlerError({ appId, name });
+          }
+          const definition = stack.app.functions[name];
+          if (definition.kind !== kind) {
+            return yield* new HandlerKindMismatch({ appId, name, expected: kind, actual: definition.kind });
+          }
+          return yield* context.body;
+        }),
+        (args) =>
+          Effect.gen(function* () {
+            const definition = stack.app.functions[name];
+            if (kind === "mutation") return yield* stack.storage.mutation(definition, args);
+            const config = yield* Config;
+            if (config.tenancy.mode === "off") {
+              return yield* (yield* ReaderClient).call({ kind: "query", appId, name, args });
+            }
+            const tenant = yield* Effect.serviceOption(TenantContext);
+            if (Option.isNone(tenant) || !stack.tenantRouter) {
+              return yield* new AuthError({ scope: "app", appId, reason: "missing" });
+            }
+            const location = yield* stack.tenantRouter.resolve(tenant.value.tenantId);
+            yield* stack.tenantRouter.prepare(location);
+            return yield* (yield* ReaderClient).call({
+              kind: "query",
+              appId,
+              name,
+              args,
+              tenant: { id: tenant.value.tenantId, file: location.path },
+            });
+          }),
+      );
     }),
   );
 }

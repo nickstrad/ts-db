@@ -14,6 +14,7 @@
  * The pre-port `trace()` helper is gone: SQL tracing is the `sql` event kind at the `TRACE_SQL`
  * level (`Config.logging.traceSql`), written by the event log rather than to stderr.
  */
+import type { TenantStorageRouterService } from "./tenants/routing.ts";
 import { resolve } from "node:path";
 import { Context, Effect, Layer } from "effect";
 import { UnknownAppError } from "../core/errors.ts";
@@ -77,6 +78,7 @@ export function AppRegistryTest(apps: readonly App[]): Layer.Layer<AppRegistry> 
 /** One app's write-side services. `backups.take` snapshots exactly this `storage`. */
 export interface AppStack {
   readonly app: App;
+  readonly tenantRouter?: TenantStorageRouterService;
   readonly storage: StorageService;
   readonly backups: BackupsService;
 }

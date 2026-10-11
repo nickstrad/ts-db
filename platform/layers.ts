@@ -72,6 +72,9 @@
  * `AppServices.get`) and the auth functions in `platform/http/auth.ts`; nothing else in this chain
  * names an app.
  */
+import { makeCachedTenantRegistry } from "./http/auth.ts";
+import { TenantRegistryLazy } from "./tenants/store.ts";
+import { LocalFolderRouter, TenantStorageRouter } from "./tenants/routing.ts";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Cause, Context, Duration, Effect, Exit, Layer } from "effect";
@@ -95,6 +98,7 @@ import {
   type EventSinkService,
   ReaderClient,
   Storage,
+  TenantRegistry,
 } from "./services.ts";
 
 /** The reader entry module the server spawns as its child process. */
@@ -172,6 +176,7 @@ export function makeAppServicesLive(afterStep: AfterStep = noStep) {
       const sink = yield* EventSink;
       const apps = yield* (yield* AppRegistry).all;
       const stacks: AppStack[] = [];
+      const config = yield* Config;
       for (const app of apps) {
         yield* Effect.tryPromise({
           try: () => Deno.mkdir(dirname(app.file), { recursive: true }),
@@ -182,12 +187,47 @@ export function makeAppServicesLive(afterStep: AfterStep = noStep) {
         yield* Effect.addFinalizer(() =>
           opened ? emitServerLifecycle(sink, "storage-closed", { appId: app.id }) : Effect.void
         );
+        const rawRouter = config.tenancy.mode === "off"
+          ? undefined
+          : Context.get(yield* Layer.build(LocalFolderRouter(app.schema)), TenantStorageRouter);
+        // Reader preparation and Storage's first open share one initialization barrier.
+        // Repeating prepare on every read would take BEGIN IMMEDIATE on a second SQLite
+        // connection while an asynchronous mutation may already hold the writer lock.
+        const prepared = new WeakSet<object>();
+        const prepareLock = yield* Effect.makeSemaphore(1);
+        const tenantRouter = rawRouter && {
+          resolve: rawRouter.resolve,
+          prepare: (location: Parameters<typeof rawRouter.prepare>[0]) =>
+            prepareLock.withPermits(1)(
+              Effect.suspend(() =>
+                prepared.has(location) ? Effect.void : rawRouter.prepare(location).pipe(
+                  Effect.tap(() =>
+                    Effect.sync(() => {
+                      prepared.add(location);
+                    })
+                  ),
+                )
+              ),
+            ),
+        };
+        const storage = StorageLive({ file: app.file, schema: app.schema, appId: app.id });
         const stack = BackupsLive.pipe(
-          Layer.provideMerge(StorageLive({ file: app.file, schema: app.schema, appId: app.id })),
+          Layer.provideMerge(
+            tenantRouter
+              ? storage.pipe(
+                Layer.provide(Layer.succeed(TenantStorageRouter, tenantRouter)),
+              )
+              : storage,
+          ),
         );
         const context = yield* Layer.build(stack);
         opened = true;
-        stacks.push({ app, storage: Context.get(context, Storage), backups: Context.get(context, Backups) });
+        stacks.push({
+          app,
+          tenantRouter,
+          storage: Context.get(context, Storage),
+          backups: Context.get(context, Backups),
+        });
         yield* emitServerLifecycle(sink, "storage-opened", { appId: app.id, file: app.file });
         yield* afterStep(`storage:${app.id}`);
       }
@@ -269,6 +309,15 @@ export function makePlatformLive(options: PlatformOptions = {}) {
   return stepDone(afterStep, "reader").pipe(
     Layer.provideMerge(ReaderClientConfigured),
     Layer.provideMerge(makeAppServicesLive(afterStep)),
+    Layer.provideMerge(
+      Layer.effect(
+        TenantRegistry,
+        Effect.gen(function* () {
+          const registry = yield* TenantRegistry;
+          return yield* makeCachedTenantRegistry(registry, 30_000);
+        }),
+      ).pipe(Layer.provide(TenantRegistryLazy)),
+    ),
     Layer.provideMerge(stepDone(afterStep, "object-store")),
     Layer.provideMerge(Layer.mergeAll(ObjectStoreLive, AppRegistryLive)),
     Layer.provideMerge(IdGenLive),
