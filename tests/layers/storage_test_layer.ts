@@ -268,12 +268,14 @@ function selectRows(
 
 /**
  * The live stored-text probe over the rows a read returned: the first column holding U+0000, either
- * as raw text or, in the JSON text of `doc` and array columns, as an escape. A `countBy` group value
- * is named by its field, as live names it. `undefined` when there is none.
+ * as raw text or, in the JSON text of `doc` and array columns, as an escape. An aggregate's rows are
+ * result columns (`value`, `count`), never stored ones, so none is JSON even when a field shares its
+ * name. A `countBy` group value is named by its field, as live names it. `undefined` when there is none.
  */
 function storedNul(table: Table, plan: SelectPlan, rows: readonly Row[]): string | undefined {
   const json = (column: string) =>
-    table.storage === "json" ? column === "doc" : table.fields[column]?.node.kind === "array";
+    !plan.aggregate &&
+    (table.storage === "json" ? column === "doc" : table.fields[column]?.node.kind === "array");
   for (const row of rows) {
     for (const [column, value] of Object.entries(row)) {
       if (typeof value !== "string") continue;

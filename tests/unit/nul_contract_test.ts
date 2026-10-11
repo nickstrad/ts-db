@@ -548,6 +548,37 @@ for (const { target, layout } of BACKENDS) {
   );
 }
 
+/** An array field named `value`: a `countBy` result column shares its name but is never JSON. */
+const valueField = defineSchema({ docs: defineTable({ name: v.string(), value: v.array(v.string()) }) });
+
+for (const { target, layout } of BACKENDS) {
+  runTest(
+    `countBy beside an array field named \`value\` reads its group values as text (${target}, ${layout})`,
+    Effect.gen(function* () {
+      const o = yield* open(target, layout, undefined, valueField);
+      const countBy = () =>
+        outcome(
+          run(
+            o.storage,
+            defineFunctions(valueField).mutation({
+              args: {},
+              handler: ({ db }) => db.find("docs").countBy("name"),
+            }),
+          ),
+        );
+      yield* o.plant([{ _id: "a", body: { name: "abc", value: ["v"] }, _creationTime: T0, _version: 1 }]);
+      assert.deepStrictEqual(yield* countBy(), { ok: [{ value: "abc", count: 1 }] });
+      yield* o.plant([{
+        _id: "b",
+        body: { name: "b\u0000x", value: ["v"] },
+        _creationTime: T0,
+        _version: 1,
+      }]);
+      assert.deepStrictEqual(yield* countBy(), storedNul("name"));
+    }),
+  );
+}
+
 runTest(
   "pre-existing NUL text: MemoryStore.select (ReaderTest's path) reads it losslessly, as DuckDB does",
   Effect.gen(function* () {
