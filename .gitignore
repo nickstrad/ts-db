@@ -156,3 +156,9 @@ $RECYCLE.BIN/
 .claude/settings.local.json
 .codex/
 agent-work/
+
+# Shared agent-event documentation and committed event archives
+!agent-work/
+agent-work/*
+!agent-work/event-log.md
+!agent-work/events/

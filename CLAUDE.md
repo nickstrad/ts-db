@@ -39,3 +39,8 @@ entirely, even if a fix looks trivial.
 
 One logical change per commit; subject line `<area>: <imperative summary>` (e.g.
 `core: extract total schema validation`). Match the plan's item-per-commit convention when landing plan work.
+
+## Coordination entrypoint
+
+Read `AGENTS.md` for the shared agent event-log requirement and
+[`agent-work/event-log.md`](agent-work/event-log.md) for executable write/read commands at session start.

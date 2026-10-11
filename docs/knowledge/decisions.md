@@ -72,3 +72,10 @@ while sending back data-semantics fixes (items 30–37).
 Every real plan item gets an independent top-tier review (Opus 5.5 or Astra, a different agent from the
 builder) before landing. Nothing merges without Opus review **and** human approval. Landings are reported as
 "item N landed and it now gives ability to do \<capability\>".
+
+## 2026-10-11 — Shared agent event inbox, batched Git archive
+
+Agent sessions across linked worktrees need one live log without concurrent index writes. The
+[event-log design](../../agent-work/event-log.md) uses Git's common directory for immutable live events and
+tracked `agent-work/events/` for coordinator-batched snapshots. Per-event publication uses an atomic hard
+link; writers never commit. This is coordination infrastructure, separate from the product's event log.

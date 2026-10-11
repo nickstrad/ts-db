@@ -163,3 +163,13 @@ AGENTS.md — empirically validated in sq-05.
 Work proceeds item by item (or quest by quest) and stops at the item the human and coordinator agreed on for
 that session. The coordinator reports status on completion: which items landed, which are in review, and what
 the next item would be. Do not continue past the agreed stopping point without checking in.
+
+## Shared agent event log
+
+Every agent/session reads the shared log at task start and reports task starts/completions, landings, review
+verdicts, blockers, and decisions needed using `work-scripts/bash/log-event.sh`. Follow
+[the write/read and archive protocols](agent-work/event-log.md) and the closed
+[event schema](agent-work/events/README.md). Use a stable actor ID and put the item/task ID in summaries. The
+shared live inbox is under Git's common directory, visible across linked worktrees; the tracked
+`agent-work/events/` directory is its batched archive. Coordinators poll the live inbox for status, including
+20-minute updates. Events supplement the coordination summary and never grant merge authority.
