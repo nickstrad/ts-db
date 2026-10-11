@@ -74,3 +74,12 @@ Every factual claim cites pasted command output. Unexecuted checks are labeled _
 Haiku 5.5's characteristic failure mode is overstatement of secondary claims (misattributed evidence, dropped
 table rows, severity inflation) — headline verdicts held, but every review corrected the details. Verify,
 don't trust pastes.
+
+## sshvm.sh fingerprint can't distinguish ts-db backends
+
+`sshvm.sh` fingerprints `/root/Software/prototyper/.git`, which exists on BOTH the right and wrong
+same-hostname backends — so a "REPO_OK" fingerprint does not prove you are on the ts-db backend. If
+consecutive calls show missing worktrees or unfamiliar state, drop a sentinel file
+(`touch
+/root/Software/ts-db/.<your-name>`) and retry the connection; bail out rather than working on the
+wrong backend. (2026-10-11)
