@@ -119,6 +119,7 @@ no Makefile logic changes are needed — only a `db-shell` convenience target.
 | MT-B | MT-03, MT-04 | TenantRegistry service; per-tenant SQLite routing | concurrent (MT-04 takes tenant id as a plain param) |
 | MT-C | MT-05, MT-06 | Admin CRUD endpoints; admin CLI | MT-06 after MT-05 (CLI dogfoods the endpoints) |
 | MT-D | MT-07, MT-08 | Tenant resolution in request path; Better Auth | MT-08 after MT-07 (needs the tenant-context seam) |
+| MT-E | MT-09 | Property tests for tenant routing invariants | after MT-03 and MT-04 (needs the registry and router interfaces) |
 
 Model policy (same as the main plan): **Opus** for security boundaries and resource lifetimes;
 **Sonnet** for bounded, mechanical items with checkable acceptance.
@@ -233,6 +234,28 @@ Model policy (same as the main plan): **Opus** for security boundaries and resou
   - Headless sign-up/sign-in round-trip from a Deno script, exit 0.
   - Session token authenticates tenant-scoped requests; wrong password → 401; unknown user → 401.
   - If spiked infeasible: the spike script and a `docs.md`-style note recording the failure mode and the API-keys fallback (no silent punt).
+
+#### MT-09 — Property tests for tenant routing invariants
+
+- **Scoping:** After MT-03 and MT-04 (needs the registry and `TenantStorageRouter` interfaces). Batch MT-E.
+- **Model:** **Sonnet.** Bounded, mechanical, checked by running.
+- **Owns:** `tests/property/tenant_routing_props.ts` (new file only — disjoint from MT-04's `tests/unit/tenant_routing_test.ts`).
+- **Reads:** `platform/tenants/routing.ts`, `platform/tenants/registry.ts`, `core/errors.ts`, `tests/property/arbitraries.ts` (seed harness), `work-scripts/deno/tx-conflict-stress.ts` (sq-06 concurrent-load approach).
+- **Work:**
+  1. **Seed-replay pattern (reuse the item-12/13 convention):** import the seed harness from `tests/property/arbitraries.ts` — `PROP_SEED` env var → `fc.configureGlobal({ seed, numRuns })`, `titled()` suffixes every test name with `[seed=..., runs=...]` so the seed appears in `deno test` output. A failure therefore prints the shrunk counterexample AND the seed; re-running with `PROP_SEED=<n>` reproduces the exact failing case. Do not invent a second seed mechanism.
+  2. **Arbitraries:** tenant ids (valid uuids), malformed ids (`../x`, separators, unicode, empty strings), registry states per tenant (active/deactivated/unknown), doc ids, op sequences (put/get/del).
+  3. **Properties over the router + registry seam:**
+     - **Isolation:** for arbitrary distinct tenant ids `a ≠ b`, `resolve(a)` and `resolve(b)` never produce the same `StorageLocation.path`.
+     - **Determinism:** `resolve(id)` called twice yields deep-equal locations.
+     - **Traversal impossibility:** for arbitrary string ids, `resolve` either returns a typed `TenantError` (`MalformedTenantId`) or a path strictly contained in `tenantsDir` after normalization — it never throws, and no produced path escapes the tenants dir.
+     - **Registry-state gating (composed):** with a stub registry holding arbitrary per-tenant states, the `authorize → resolve → prepare` path yields typed `UnknownTenant`/`TenantDeactivated` errors for unknown/deactivated tenants and correct locations for active ones.
+     - **Concurrent multi-tenant load (extends the sq-06 approach):** arbitrary tenant sets × concurrent put/get op sequences run in parallel; each tenant's reads see exactly its own writes — no cross-talk, no lost updates, and every write lands in the right tenant's file.
+  4. `numRuns >= 200` per property, following the repo convention.
+- **Acceptance criteria:**
+  - `deno task test:prop` passes and includes the new file (it matches the existing `tests/property/**/*.ts` glob).
+  - Each property's test name prints its seed (`[seed=...]` in `deno test` output).
+  - Seed replay: deliberately breaking one invariant (e.g. making `resolve` return a constant path) makes the suite fail with a minimal counterexample; `PROP_SEED=<the printed seed> deno task test:prop` reproduces the exact same failure.
+  - `deno task test:prop` completes in under 60 s on this droplet.
 
 ## 4. Out of scope / deferred
 
