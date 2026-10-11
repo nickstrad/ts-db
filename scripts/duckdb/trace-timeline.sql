@@ -1,45 +1,13 @@
--- trace-timeline.sql
---
--- Question: the complete ordered event timeline for one trace_id across both processes —
--- mirrors the plan's named `trace` analysis query (§4.3, item 23).
--- Tables: platform_events, sql_events, tx_events, http_events, k6_points (PLANNED
---   SCHEMA — items 21-23 not yet landed).
--- Variables: $trace_id.
---
--- Assumption: only these five tables carry a trace_id column in §4.1's DDL —
--- queue_events, backup_events and lifecycle_events do not, so they can't be joined into
--- a trace timeline and are intentionally excluded here.
+-- One row per ingested platform event for a trace, including backup/queue/lifecycle.
+-- Typed tables project the SAME records: UNIONing them duplicates the timeline.
+-- k6_points is excluded: no producer has landed, and metric values are not all ms.
+-- Variable: trace_id (SET VARIABLE trace_id = 'reader-...').
+-- source_file/source_offset make equal timestamps deterministic. Rewritten files
+-- can make those original offsets stale; event_id identifies the ingested event.
 
-SELECT ts, 'platform' AS source, kind, name, outcome, error_tag, duration_ms, NULL AS extra
+SELECT
+  ts, event_id, trace_id, role, app_id, kind, name, outcome, error_tag,
+  duration_ms, attrs, source_file, source_offset
 FROM platform_events
-WHERE trace_id = $trace_id
-
-UNION ALL
-
-SELECT ts, 'sql' AS source, statement_kind AS kind, table_name AS name, outcome, error_tag,
-       duration_ms, sql_text AS extra
-FROM sql_events
-WHERE trace_id = $trace_id
-
-UNION ALL
-
-SELECT ts, 'tx' AS source, 'tx' AS kind, outcome AS name, outcome, error_tag, duration_ms,
-       NULL AS extra
-FROM tx_events
-WHERE trace_id = $trace_id
-
-UNION ALL
-
-SELECT ts, 'http' AS source, kind, name, CASE WHEN error_tag IS NULL THEN 'ok' ELSE 'error' END,
-       error_tag, duration_ms, path AS extra
-FROM http_events
-WHERE trace_id = $trace_id
-
-UNION ALL
-
-SELECT ts, 'k6' AS source, metric AS kind, scenario AS name, status AS outcome,
-       NULL AS error_tag, value AS duration_ms, tags AS extra
-FROM k6_points
-WHERE trace_id = $trace_id
-
-ORDER BY ts;
+WHERE trace_id = getvariable('trace_id')
+ORDER BY ts, source_file, source_offset, event_id;

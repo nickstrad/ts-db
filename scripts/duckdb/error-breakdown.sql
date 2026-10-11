@@ -1,20 +1,16 @@
--- error-breakdown.sql
---
--- Question: which error_tag values are showing up, how often, and what share of all
--- errors (and of all events) do they represent in the window?
--- Table: platform_events (PLANNED SCHEMA — items 21-23 not yet landed).
--- Variables: $start_ts, $end_ts (inclusive TIMESTAMP bounds).
-
+-- Failure records by error tag. A failed operation may emit several records.
+-- Table: platform_events (landed item 21; core/eventlog/ddl.ts).
+-- Variables: start_ts, end_ts; UTC [start, end).
 WITH windowed AS (
-  SELECT *
+  SELECT *,
+    (outcome IN ('error', 'rollback', 'interrupted')
+      OR error_tag IS NOT NULL OR level = 'error') AS is_failure
   FROM platform_events
-  WHERE ts >= $start_ts
-    AND ts <  $end_ts
+  WHERE ts >= getvariable('start_ts') AND ts < getvariable('end_ts')
 ),
 totals AS (
-  SELECT
-    count(*) AS total_events,
-    count(*) FILTER (WHERE outcome = 'error') AS total_errors
+  SELECT count(*) AS total_events,
+    count(*) FILTER (WHERE is_failure) AS total_errors
   FROM windowed
 )
 SELECT
@@ -23,6 +19,6 @@ SELECT
   round(100.0 * count(*) / t.total_errors, 2) AS pct_of_errors,
   round(100.0 * count(*) / t.total_events, 2) AS pct_of_all_events
 FROM windowed w, totals t
-WHERE w.outcome = 'error'
+WHERE w.is_failure
 GROUP BY w.error_tag, t.total_errors, t.total_events
-ORDER BY error_count DESC;
+ORDER BY error_count DESC, w.error_tag;

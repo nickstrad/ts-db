@@ -2,21 +2,25 @@
 --
 -- Question: per-app backup phases, durations, bytes, failures, and the gap between
 -- successive successful backups.
--- Table: backup_events (PLANNED SCHEMA — items 21-23 not yet landed).
--- Variables: $start_ts, $end_ts (inclusive TIMESTAMP bounds).
+-- Table: backup_events (landed item 21; core/eventlog/ddl.ts).
+-- Variables: getvariable('start_ts'), getvariable('end_ts') (UTC TIMESTAMP bounds: start inclusive, end exclusive).
 --
--- Assumption: a backup "succeeds" when its final phase, `publish-latest`, lands with
+-- Interpretation: a backup "succeeds" when its final phase, `publish-latest`, lands with
 -- outcome = 'ok' (core/errors.ts's BackupPhase order: snapshot, verify, hash,
 -- put-object, put-manifest, publish-latest). backup_events carries no trace_id, so
 -- phases can't be joined into one run_id here — this query reports per-phase stats and
 -- treats successful `publish-latest` rows as the "backup completed" marker for the
 -- gap calculation.
 
+-- Counts are emitted phase records, not unique backups or unique uploaded bytes.
+-- ObjectStore also emits put-object records, so that phase can have multiple emitters.
+-- Gaps only compare completions within the requested window.
+
 WITH windowed AS (
   SELECT *
   FROM backup_events
-  WHERE ts >= $start_ts
-    AND ts <  $end_ts
+  WHERE ts >= getvariable('start_ts')
+    AND ts <  getvariable('end_ts')
 ),
 per_phase AS (
   SELECT

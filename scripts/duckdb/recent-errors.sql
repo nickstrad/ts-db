@@ -1,12 +1,12 @@
 -- recent-errors.sql
 --
 -- Question: what are the most recent errors, with their detail/attrs, newest first?
--- Table: platform_events (PLANNED SCHEMA — items 21-23 not yet landed).
--- Variables: $limit (row cap, e.g. 100).
+-- Table: platform_events (landed item 21; core/eventlog/ddl.ts).
+-- Variables: getvariable('row_limit') (row cap, e.g. 100).
 --
--- Assumption: `attrs` is the generic JSON payload column from §4.1. core/events.ts notes
--- EventRecord has no `attrs` field today — it carries error payloads in `errorDetail` —
--- and that item 11 should map `errorDetail` -> `attrs` when it populates this table.
+-- attrs maps errorDetail (or lifecycle.detail) at ingest, not the full event.
+-- Include failed/interrupted transactions and error-level logs, whose outcome
+-- may be rollback/interrupted/NULL rather than the string error.
 
 SELECT
   ts,
@@ -18,6 +18,8 @@ SELECT
   error_tag,
   attrs
 FROM platform_events
-WHERE outcome = 'error'
-ORDER BY ts DESC
-LIMIT $limit;
+WHERE outcome IN ('error', 'rollback', 'interrupted')
+   OR error_tag IS NOT NULL
+   OR level = 'error'
+ORDER BY ts DESC, source_file, source_offset
+LIMIT getvariable('row_limit');
