@@ -81,6 +81,25 @@ export function matchRoute(method: string, path: string): Option.Option<Route> {
   if (method === "GET" && path === "/health") {
     return Option.some({ handlerKind: "query", name: "health", run: () => handlers.health });
   }
+  const tenant = path.match(/^\/admin\/tenants(?:\/([^/]+)(?:\/(keys)(?:\/([^/]+))?)?)?$/);
+  if (tenant) {
+    const [, id, keys, keyId] = tenant;
+    const allowed = id === undefined
+      ? ["GET", "POST"]
+      : keys === undefined
+      ? ["GET", "PATCH", "DELETE"]
+      : keyId === undefined
+      ? ["POST"]
+      : ["DELETE"];
+    if (allowed.includes(method)) {
+      return Option.some({
+        handlerKind: method === "GET" ? "query" : "mutation",
+        name: `admin.tenants.${method.toLowerCase()}${keys ? ".keys" : ""}`,
+        run: (context) => handlers.tenants(context, method, id, keys !== undefined, keyId),
+      });
+    }
+    return Option.none();
+  }
   if (method !== "POST") return Option.none();
   const app = path.match(APP_ROUTE);
   if (app) {

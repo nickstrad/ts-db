@@ -49,8 +49,9 @@ import {
 } from "../../core/errors.ts";
 import { fromPlatformError, handlerEvent, type Level } from "../../core/events.ts";
 import { AppServices } from "../registry.ts";
-import { AppRegistry, Config, EventSink, ReaderClient } from "../services.ts";
+import { AppRegistry, Config, EventSink, ReaderClient, TenantRegistry } from "../services.ts";
 import { authenticateAdmin, authenticateApp } from "./auth.ts";
+import { parseApiKeyId, parseTenantId } from "../tenants/registry.ts";
 import { currentTraceContext, newSpanId, withChildSpan } from "./trace.ts";
 
 /** What a handler may read from the request. */
@@ -64,7 +65,13 @@ export interface RequestContext {
 }
 
 /** Every service a handler may use. */
-export type HandlerRequirements = Config | AppRegistry | AppServices | ReaderClient | EventSink;
+export type HandlerRequirements =
+  | Config
+  | AppRegistry
+  | AppServices
+  | ReaderClient
+  | EventSink
+  | TenantRegistry;
 
 export type Handler = Effect.Effect<unknown, PlatformError, HandlerRequirements>;
 
@@ -214,4 +221,74 @@ export function analysis(context: RequestContext, name: string): Handler {
     const params = yield* analysisParams(yield* context.body);
     return yield* (yield* ReaderClient).call({ kind: "analysis", name, params });
   }));
+}
+
+/** Admin tenant CRUD. Authenticate before parsing identifiers or reading the body. */
+export function tenants(
+  context: RequestContext,
+  method: string,
+  rawId?: string,
+  keys = false,
+  rawKeyId?: string,
+): Handler {
+  return inSpan(Effect.gen(function* () {
+    yield* authenticateAdmin(context.headers, yield* Config);
+    const registry = yield* TenantRegistry;
+    if (rawId === undefined) {
+      if (method === "GET") return yield* registry.listTenants();
+      const body = yield* tenantBody(yield* context.body, ["name", "slug"]);
+      const name = yield* requiredText(body, "name");
+      const slug = yield* requiredText(body, "slug");
+      const tenant = yield* registry.createTenant({ name, slug });
+      const apiKey = yield* registry.issueApiKey(tenant.id, "default");
+      return { tenant, apiKey };
+    }
+    const id = yield* parseTenantId(rawId);
+    if (keys) {
+      // Check the URL's tenant even for idempotent revocation of an unknown key.
+      yield* registry.getTenant(id);
+      if (method === "DELETE") {
+        const keyId = yield* parseApiKeyId(rawKeyId!);
+        yield* registry.revokeApiKey(keyId, id);
+        return { revoked: true };
+      }
+      const body = yield* tenantBody(yield* context.body, ["name"]);
+      return yield* registry.issueApiKey(id, yield* requiredText(body, "name"));
+    }
+    if (method === "GET") return yield* registry.getTenant(id);
+    if (method === "DELETE") return yield* registry.deactivateTenant(id);
+    const body = yield* tenantBody(yield* context.body, ["name", "status"]);
+    const name = body.name === undefined ? undefined : yield* requiredText(body, "name");
+    const status = body.status;
+    if (status !== undefined && status !== "active" && status !== "deactivated") {
+      return yield* new SchemaError({
+        reason: "type-mismatch",
+        path: "status",
+        expected: "active or deactivated",
+      });
+    }
+    return yield* registry.updateTenant(id, { name, status });
+  }));
+}
+
+function tenantBody(
+  body: unknown,
+  fields: readonly string[],
+): Effect.Effect<Record<string, unknown>, SchemaError> {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    return Effect.fail(new SchemaError({ reason: "not-an-object", path: "body", expected: "object" }));
+  }
+  for (const key of Object.keys(body)) {
+    if (!fields.includes(key)) return Effect.fail(new SchemaError({ reason: "unknown-field", path: key }));
+  }
+  return Effect.succeed(body as Record<string, unknown>);
+}
+
+function requiredText(body: Record<string, unknown>, field: string): Effect.Effect<string, SchemaError> {
+  const value = body[field];
+  return typeof value === "string" && value.trim().length > 0 && !value.includes("\0")
+    ? Effect.succeed(value)
+    : Effect.fail(
+      new SchemaError({ reason: "type-mismatch", path: field, expected: "nonempty string without NUL" }),
+    );
 }
