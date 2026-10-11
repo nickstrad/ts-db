@@ -22,8 +22,8 @@ test("e2e/4-tenant-isolation: foreign ids behave as missing and forged tenant he
     const url = yield* database("tenant_isolation");
     const server = yield* startServer(dir, url, { TENANCY: "api-key" });
     yield* Effect.promise(async () => {
-      const a = await tenant(server, 3), b = await tenant(server, 4);
-      for (const app of apps) {
+      for (const [index, app] of apps.entries()) {
+        const a = await tenant(server, 3 + index * 2), b = await tenant(server, 4 + index * 2);
         const ca = client(server, app, a.key), cb = client(server, app, b.key);
         const game = await play(ca, moves.X.slice(0, 1));
         const missing = "never-existing-game";

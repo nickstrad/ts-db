@@ -463,6 +463,41 @@ test("import graph: the server never reaches the reader root or its context modu
 // Ingest via RPC
 // ===========================================================================
 
+test("analysis RPC: catalog validates names and parameters and sees subsequent ingest commits", async () => {
+  await withWorld(async (world) => {
+    await putSource(world, 3, 1, ["analysis-first"]);
+    const reader = new ReaderSession(world);
+    try {
+      const unknown = await reader.ask({ id: 1, kind: "analysis", name: "noSuchQuery", params: {} });
+      assert.equal(unknown.error?._tag, "UnknownAnalysisQuery");
+      assert.ok((unknown.error?.fields.known as string[]).includes("trace"));
+      const invalid = await reader.ask({ id: 2, kind: "analysis", name: "trace", params: {} });
+      assert.equal(invalid.error?._tag, "AnalysisError");
+      resultOf(await reader.ask({ id: 3, kind: "ingest" }));
+      const timeline = async (id: number) => {
+        const reply = await reader.ask({
+          id,
+          kind: "analysis",
+          name: "trace",
+          params: { traceId: "fixture" },
+        });
+        assert.equal(reply.error, undefined, JSON.stringify(reply));
+        assert.ok(Array.isArray(reply.result));
+        return (reply.result as unknown as Row[]).map((row) => row.event_id).sort();
+      };
+      assert.deepEqual(await timeline(4), ["analysis-first"]);
+      // The analysis handle is already open: a later ingest must be visible without reopening it.
+      await putSource(world, 3, 2, ["analysis-second"]);
+      resultOf(await reader.ask({ id: 5, kind: "ingest" }));
+      assert.deepEqual(await timeline(6), ["analysis-first", "analysis-second"]);
+    } finally {
+      const stopped = await reader.finish();
+      assert.equal(stopped.code, 0, stopped.stderr);
+      assertPureProtocol(stopped.stdout);
+    }
+  });
+});
+
 test(
   "ingest RPC: a closed source lands once, survives restarts with zero new rows, then only its tail; retention runs after",
   { timeout: 180_000 },

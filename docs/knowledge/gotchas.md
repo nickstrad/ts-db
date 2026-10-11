@@ -111,3 +111,16 @@ MT-07 consumes `Config.tenancy.tenantKeyCacheTtlMs` with the specified 30000 ms 
 MT-02's promised `TENANT_KEY_CACHE_TTL_MS` decoder; adding that option, its README row and config tests
 remains a configuration-owner follow-up. Do not claim the environment variable is honored until that follow-up
 lands. The injected Config field already controls the cache and rejects invalid limits.
+
+## 2026-10-11 — MT-10 tenant fixtures and live analysis
+
+The platform E2E suite must allocate different tenants for the column and JSON sample apps: they are
+incompatible layouts of the same tables, and the one-file-per-tenant schema guard intentionally rejects
+switching layouts. Better Auth cases also use a fresh server per layout to keep their login workload within
+the shared per-path rate limit; credential failures still assert 401.
+
+The reader's analysis RPC must execute the existing catalog, not the pre-item-23 placeholder. Ingest and
+analysis use separate connections from the same `DuckDBInstanceCache` in `platform/reader_layers.ts`, with
+matching open options. Independent native instances can give analysis stale state after a later ingest;
+`tests/unit/reader_ingest_test.ts` covers ingest → analysis → another ingest → analysis. The standalone logs
+CLI still opens read-only. The writer process must not import the catalog or DuckDB.

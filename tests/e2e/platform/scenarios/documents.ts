@@ -21,9 +21,10 @@ test("e2e/1-documents: typed CRUD, versions and argument errors in both layouts 
     for (const mode of ["off", "api-key"]) {
       yield* Effect.scoped(Effect.gen(function* () {
         const server = yield* startServer(`${dir}/${mode}`, url, { TENANCY: mode });
-        const key = mode === "api-key" ? (yield* Effect.promise(() => tenant(server, 2))).key : undefined;
         yield* Effect.promise(async () => {
-          for (const app of apps) {
+          for (const [index, app] of apps.entries()) {
+            // A tenant file has one layout; exercise each app with a fresh tenant.
+            const key = mode === "api-key" ? (await tenant(server, 2 + index)).key : undefined;
             const c = client(server, app, key);
             const { gameId } = await run(c.mutation("createGame", players));
             let game = await run(c.query("getGame", { gameId }));

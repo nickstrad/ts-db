@@ -32,8 +32,9 @@
  *   batch). Then app readers close connection-then-instance, then the event-log handle, then the
  *   log sink drains and closes.
  *
- * `analysis` stays unavailable until item 23's catalog.
+ * `analysis` executes item 23's named catalog over the event-log file.
  */
+import { makeAnalysis } from "./analysis/catalog.ts";
 import { isAbsolute } from "node:path";
 import { parseTenantId } from "./tenants/registry.ts";
 import { Cause, Context, Effect, Exit, Layer, Logger, Option } from "effect";
@@ -43,14 +44,13 @@ import {
   IpcError,
   ReaderError,
   type RemoteReaderError,
-  UnknownAnalysisQuery,
   UnknownAppError,
   UnknownHandlerError,
 } from "../core/errors.ts";
 import { decoder } from "../core/ipc/framing.ts";
 import { emitLifecycle, makeReaderPool, ReaderLive } from "./duckdb.ts";
 import { type ReceivedRequest, receiveFrame, withRequestContext } from "./reader_context.ts";
-import { ReaderRootLive } from "./reader_layers.ts";
+import { openReaderEventLog, ReaderRootLive } from "./reader_layers.ts";
 import { appsFromConfig } from "./registry.ts";
 import {
   Config,
@@ -140,6 +140,10 @@ function encodeReply(reply: ReaderReply): Uint8Array {
 const program = Effect.gen(function* () {
   const sink = yield* EventSink;
   const eventLog = yield* EventLogIngest;
+  // Share ingest's native database instance so analysis sees later commits. Matching
+  // read/write options are required here; the standalone CLI stays READ_ONLY.
+  // Only the fixed catalog's SELECTs run on this connection, never caller SQL.
+  const analysis = yield* makeAnalysis({ open: openReaderEventLog });
   const readerFor = yield* makeReaderPool();
   const config = yield* Config;
   const apps = new Map(appsFromConfig(config).map((app) => [app.id, app] as const));
@@ -188,9 +192,8 @@ const program = Effect.gen(function* () {
         });
       case "ingest":
         return eventLog.ingest;
-      // Item 23 implements this over the event-log DuckDB file.
       case "analysis":
-        return Effect.fail(new UnknownAnalysisQuery({ name: frame.name, known: [] }));
+        return analysis.run(frame.name, frame.params);
     }
   };
 
