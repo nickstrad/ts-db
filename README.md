@@ -4,7 +4,16 @@
 operations as a small intermediate representation and compiles them to SQLite or DuckDB SQL. Regular
 TypeScript control flow (the tic-tac-toe rules) still runs as TypeScript.
 
+For CI on a shared host, use `bash work-scripts/bash/ci-isolated-postgres.sh`. Some unit tests truncate their
+configured Postgres database; the wrapper supplies a disposable instance. See
+[testing isolation](docs/testing.md#isolating-postgres-for-ci).
+
 ## Verification status
+
+Latest reflection at `cd669d1`: unit/core tests report 602 passed, two obsolete reader-exit tests failed, one
+optional S3 case ignored. Properties pass 79/79; integration, seven-scenario E2E and k6 observability pass.
+See [reflection astra-2](docs/architecture/reflection-astra-2.md) for evidence and follow-ups. The item-27
+results below are historical.
 
 Item 27 audit on 2026-10-11, based on landed main `643b706`, on this 8 GB VM with Deno 2.9.5 and
 `@duckdb/node-api` 1.5.6-r.1. These are dated observations, not standing guarantees.
@@ -136,11 +145,11 @@ local snapshot -> S3-compatible object store
 ```
 
 Both long-lived processes run on **the same machine with the same local filesystem**. The server starts the
-reader automatically. The two demo app IDs share these processes but have independent files. App data has no
-second copy: no CDC pipeline, no replica-copy refresh loop, and no extra backup daemon. The only persistent
-DuckDB file is the **derived** event-log file written by the reader's ingest from the JSONL logs
-(`EVENTLOG_DUCKDB`, default `<DATA_DIR>/eventlog.duckdb`); the server never opens it. See "Observability and
-the event log" below.
+reader automatically. With tenancy off, the two demo app IDs share these processes but have independent files.
+App data has no second copy: no CDC pipeline, no replica-copy refresh loop, and no extra backup daemon. The
+platform event-log DuckDB file is the **derived** event-log file written by the reader's ingest from the JSONL
+logs (`EVENTLOG_DUCKDB`, default `<DATA_DIR>/eventlog.duckdb`); the server never opens it. See "Observability
+and the event log" below. The k6 loader creates a separate metrics DuckDB file by default.
 
 SQLite writes use `node:sqlite`. DuckDB uses its SQLite extension to read the live file. The processes are
 separated because DuckDB documents a warning about linking multiple SQLite-library copies into one
@@ -368,6 +377,10 @@ the same coordinator; dry-run plans from already committed state without writing
 
 ## Backups and restore
 
+Backups currently require `TENANCY=off`. Tenant-mode snapshot acquisition fails because the admin route and
+periodic sweep provide no `TenantContext`; object keys and restore manifests are still app-scoped. A tenant
+recovery protocol remains follow-up work.
+
 Manual backup, using the local object-store stand-in by default:
 
 ```sh
@@ -471,6 +484,22 @@ tests.
 | `betterAuthSecret`     | `BETTER_AUTH_SECRET`      | optional-string                 | `(unset)`                                  | Secret used to verify Better Auth session tokens. No default; required when TENANCY is `better-auth`.                                                          |
 | `betterAuthUrl`        | `BETTER_AUTH_URL`         | string                          | `http://localhost:3000`                    | Base URL of the Better Auth instance issuing session tokens.                                                                                                   |
 
+## Reader recovery
+
+`ReaderClientConfigured` supervises the reader child. Unexpected exit fails pending RPCs without replay; calls
+during recovery return 502. Restart attempts wait 1, 2, 4, 8 and 8 seconds, and the connection swaps only
+after a ready-ping. More than five attempts in a rolling ten-minute window causes server drain and exit 1. An
+external process supervisor is still required for that case and startup failures. SQLite writes remain in the
+server; a reader restart does not restart the writer or replay mutations.
+
+Child processes and native test tasks enable exposed GC. The query-reader and ingest finalizers drain DuckDB
+result finalizers before closing native handles. This mitigates the observed teardown crash; it is not proof
+that the native defect is eliminated. Lifecycle events identify restart, recovery and exhaustion.
+
+Tenant setup and CLI/auth boundaries are described in [the user guide](docs.md#tenant-operation). The
+key-cache TTL defaults to 30 seconds in composition; no `TENANT_KEY_CACHE_TTL_MS` decoder exists yet. Analysis
+remains admin-global because event schema v2 has no tenant identity.
+
 ## Deliberate limits
 
 This is a local, trusted-application prototype. Two database files are not a hostile-tenant security sandbox.
@@ -483,9 +512,9 @@ have no automatic retry or idempotency key, so a network timeout can leave an un
 Legacy mode uses one writer connection per app; tenancy leases writers from a bounded per-app handle cache.
 Both use one shared serial reader process. This demonstrates the design without establishing capacity.
 SQLite's synchronous API and snapshot creation can block the API event loop. There are queue-size and
-result-size caps but no complete deadline/cancellation, overload, restart, or resource-governance policy.
-Avoid network I/O or long-running work inside mutation handlers. All long-lived processes must remain on one
-local filesystem; object storage is a backup target, not a mounted live SQLite volume.
+result-size caps but no complete deadline/cancellation, overload or resource-governance policy. Avoid network
+I/O or long-running work inside mutation handlers. All long-lived processes must remain on one local
+filesystem; object storage is a backup target, not a mounted live SQLite volume.
 
 Reactive subscriptions, automatic dependency tracking, optimistic UI, durable actions/jobs, automatic
 application-schema migrations, a complete production authentication policy, and a full query optimizer are not

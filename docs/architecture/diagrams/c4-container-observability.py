@@ -43,6 +43,8 @@ NODES = [('server',
   'perf/ingest_k6.ts',
   'Loads raw points into k6_points (item 25)',
   True),
+ ('k6db', 'k6 metrics file', 'DuckDB file', 'logs/k6/run-id/k6.duckdb',
+  'Default loader target; K6_DUCKDB overrides', True),
  ('results', 'k6 artifacts', 'Filesystem', 'logs/k6/run-id/', 'raw.json and summary.json', True),
  ('k6',
   'k6 load generator',
@@ -59,8 +61,11 @@ EDGES = [('server', 'jsonl', 'Append structured JSONL through dropping queue'),
  ('cli', 'jsonl', 'Offline ingest-then-sweep; dry-run plans only'),
  ('k6', 'results', 'Raw points and summary JSON'),
  ('results', 'loader', 'Read raw.json for selected run id'),
- ('loader', 'duck', 'Insert k6_points; catalog compares overlapping HTTP buckets')]
+ ('loader', 'k6db', 'Default: replace selected run k6_points'),
+ ('loader', 'duck', 'Offline only: K6_DUCKDB override co-locates catalog data')]
 NOTES = 'Item 23 provides the named catalog and logs CLI; item 25 provides the k6 loader and join acceptance\ntest. MT-10 wires the reader analysis RPC and shares the ingest instance so later commits remain visible.\nThe server never opens DuckDB. The standalone CLI queries read-only and can fail while a writer owns the\nfile; use the live admin route during serving. Ingest and analysis handles are independently scoped\nconnections on the shared native instance. Per-app query readers are independent of the event log.\nRetention bounds JSONL only, requires committed watermarks and matching hashes, and never touches today\nor the reader sink open path. Derived tables are never pruned; logs:compact remains future work.\nGzipped retained sources are not re-ingested by the current scanner. No load-performance result is\nclaimed by this diagram.'
+NOTES += '\nReader restart lifecycle events are emitted by platform/layers.ts into the server sink. A child crash\nmay lose buffered reader events; restart is availability recovery, not durable audit delivery.\nSchema v2 has no tenant identity in the envelope or typed tables. Analysis is admin-global, not tenant\nscoped; app_id and caller-controlled trace_id cannot safely reconstruct tenant attribution.'
+NOTES += '\nThe k6 loader defaults to a separate k6.duckdb, not EVENTLOG_DUCKDB. The observability acceptance\nprogram attaches the stopped server event log. The named catalog expects k6_points in its own file;\nuse K6_DUCKDB to ingest into the stopped event log, or an explicit offline attach query. The catalog\ncurrently compares all HTTP events in overlapping time buckets; it does not isolate the run workload.'
 NAME = 'c4-container-observability'
 
 
@@ -105,7 +110,7 @@ def mermaid():
 
 
 def document(github):
-    text = '# ' + TITLE + '\n\nAudited against landed main `643b706` on 2026-10-11 (item 27). Both formats are generated from\n'
+    text = '# ' + TITLE + '\n\nAudited against landed main `cd669d1` on 2026-10-11 (reflection astra-2). Both formats are generated from\n'
     text += '`diagrams/' + NAME + '.py`; numbered relationships are identical. All boxes describe landed code.\n\n'
     if github:
         text += '```mermaid\n' + mermaid() + '\n```\n'

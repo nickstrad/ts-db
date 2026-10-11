@@ -1,6 +1,6 @@
 # Container — request path
 
-Audited against landed main `643b706` on 2026-10-11 (item 27). Both formats are generated from
+Audited against landed main `cd669d1` on 2026-10-11 (reflection astra-2). Both formats are generated from
 `diagrams/c4-container-platform.py`; numbered relationships are identical. All boxes describe landed code.
 
 <!-- c4-render: diagrams/c4-container-platform.py -->
@@ -26,12 +26,19 @@ Audited against landed main `643b706` on 2026-10-11 (item 27). Both formats are 
 ╎  └──────────────────────────────┘   └──────────────────────────────┘ ╎
 ╎                                                                      ╎
 ╎  ┌──────────────────────────────┐   ┌──────────────────────────────┐ ╎
-╎  │ Tenant/auth CLI              │   │ Migration runner             │ ╎
+╎  │ Tenant CLI                   │   │ Auth CLI                     │ ╎
 ╎  │ [Deno process]               │   │ [Deno process]               │ ╎
-╎  │ scripts/tenants.ts;          │   │ scripts/db/migrate.ts        │ ╎
-╎  │ scripts/auth.ts              │   │ Journaled, advisory-locked   │ ╎
-╎  │ Tenant administration and    │   │ SQL migrations               │ ╎
-╎  │ headless email/password      │   └──────────────────────────────┘ ╎
+╎  │ scripts/tenants.ts           │   │ scripts/auth.ts              │ ╎
+╎  │ Admin HTTP client; explicit  │   │ Headless account creation    │ ╎
+╎  │ ADMIN_TOKEN                  │   │ and membership linking       │ ╎
+╎  └──────────────────────────────┘   └──────────────────────────────┘ ╎
+╎                                                                      ╎
+╎  ┌──────────────────────────────┐                                    ╎
+╎  │ Migration runner             │                                    ╎
+╎  │ [Deno process]               │                                    ╎
+╎  │ scripts/db/migrate.ts        │                                    ╎
+╎  │ Journaled, advisory-locked   │                                    ╎
+╎  │ SQL migrations               │                                    ╎
 ╎  └──────────────────────────────┘                                    ╎
 ╎                                                                      ╎
 ╰╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╯
@@ -49,16 +56,18 @@ Audited against landed main `643b706` on 2026-10-11 (item 27). Both formats are 
 
 ## Relationships
 
-| # | From             | To                    | Relationship                                                 |
-| - | ---------------- | --------------------- | ------------------------------------------------------------ |
-| 1 | Typed client SDK | Server process        | HTTP JSON + bearer + trace                                   |
-| 2 | Server process   | Reader process        | JSONL IPC query/ping/ingest/analysis; trusted tenant id/path |
-| 3 | Server process   | Application documents | node:sqlite; serialized mutation transaction                 |
-| 4 | Reader process   | Application documents | DuckDB SQLite extension; READ_ONLY attachment                |
-| 5 | Server process   | Central registry      | Postgres protocol; registry SQL and session auth             |
-| 6 | Tenant/auth CLI  | Central registry      | Postgres protocol; tenant/key or auth operations             |
-| 7 | Migration runner | Central registry      | Postgres protocol; journal and migration SQL                 |
-| 8 | Server process   | Object storage        | Snapshot verification/hash; S3 HTTPS or local publication    |
+| #  | From             | To                    | Relationship                                                      |
+| -- | ---------------- | --------------------- | ----------------------------------------------------------------- |
+| 1  | Typed client SDK | Server process        | HTTP JSON + bearer + trace                                        |
+| 2  | Server process   | Reader process        | JSONL IPC query/ping/ingest/analysis; trusted tenant id/path      |
+| 3  | Server process   | Application documents | node:sqlite; serialized mutation transaction                      |
+| 4  | Reader process   | Application documents | DuckDB SQLite extension; READ_ONLY attachment                     |
+| 5  | Server process   | Central registry      | Postgres protocol; registry SQL and session auth                  |
+| 6  | Tenant CLI       | Server process        | HTTP JSON; ADMIN_TOKEN; tenant/key CRUD                           |
+| 7  | Migration runner | Central registry      | Postgres protocol; journal and migration SQL                      |
+| 8  | Server process   | Object storage        | Tenancy-off snapshots; S3 HTTPS or local publication              |
+| 9  | Auth CLI         | Central registry      | Postgres protocol; auth and membership SQL                        |
+| 10 | Server process   | Reader process        | Spawn and ready-ping; restart backoff; stop on breaker exhaustion |
 
 ## Runtime notes
 
@@ -69,4 +78,9 @@ tenants because the schema guard rejects switching layouts. Tenant-mode reads ac
 per request; legacy reads use the app pool. Application documents stay in SQLite. Better Auth is mounted in
 the server at /api/auth/*; scripts/auth.ts is the headless CLI. The future control-plane router is not
 implemented. E2E uses ephemeral Postgres, distinct tenants for layouts, and fresh Better Auth servers per
-layout.
+layout. Tenant CLI calls the admin HTTP API; only the auth CLI and migration runner connect directly to
+Postgres. The backup route/timer supplies no TenantContext and therefore fails in tenant modes; app-only
+object keys and restore are not a tenant recovery protocol. Reader restarts preserve SQLite files, but queued
+reader calls fail with 502 and are never replayed. Five restart attempts per ten minutes are allowed. The E2E
+harness (tests/e2e/platform/main.ts and compose.yml) instantiates isolated copies of these containers, never
+the dev stack. Its backup scenario uses tenancy-off; it does not prove tenant recovery.

@@ -8,12 +8,12 @@ Conventions, naming and the maintenance contract: [`AGENTS.md`](AGENTS.md).
 
 ## Index
 
-| Level | Diagram                        | What it shows                                                                                                                                                         | GitHub                                         | Terminal                                           |
-| ----- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- | -------------------------------------------------- |
-| 1     | System Context                 | The platform as one box: app developers, players, the operator, and the external object store, DuckDB analytics consumer and k6 load generator.                       | [github](c4-context-document-db.github.md)     | [terminal](c4-context-document-db.terminal.md)     |
-| 2     | Container — request path       | The server process, the DuckDB reader child process, the per-app SQLite files and the object store, and how a request and a backup move between them.                 | [github](c4-container-platform.github.md)      | [terminal](c4-container-platform.terminal.md)      |
-| 2     | Container — observability path | Server/reader JSONL, the reader's connected ingest-then-sweep into the derived DuckDB event log, the reader composition, live named analysis, logs CLI and k6 loader. | [github](c4-container-observability.github.md) | [terminal](c4-container-observability.terminal.md) |
-| 3     | Component — server process     | The mounted HTTP/lifecycle components and services, including per-app AppServices, storage, backups, reader client, logging and dependencies.                         | [github](c4-component-server.github.md)        | [terminal](c4-component-server.terminal.md)        |
+| Level | Diagram                        | What it shows                                                                                                                                                                      | GitHub                                         | Terminal                                           |
+| ----- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- | -------------------------------------------------- |
+| 1     | System Context                 | The platform as one box: app developers, players, the operator, and the external object store, DuckDB analytics consumer and k6 load generator.                                    | [github](c4-context-document-db.github.md)     | [terminal](c4-context-document-db.terminal.md)     |
+| 2     | Container — request path       | The server process, the DuckDB reader child process, the legacy/per-tenant SQLite files, Postgres registry and the object store, and how a request and a backup move between them. | [github](c4-container-platform.github.md)      | [terminal](c4-container-platform.terminal.md)      |
+| 2     | Container — observability path | Server/reader JSONL, the reader's connected ingest-then-sweep into the derived DuckDB event log, the reader composition, live named analysis, logs CLI and k6 loader.              | [github](c4-container-observability.github.md) | [terminal](c4-container-observability.terminal.md) |
+| 3     | Component — server process     | The mounted HTTP/lifecycle components and services, including per-app AppServices, storage, backups, reader client, logging and dependencies.                                      | [github](c4-component-server.github.md)        | [terminal](c4-component-server.terminal.md)        |
 
 Level 2 is split in two so neither picture is cluttered; together they cover one container set.
 
@@ -45,7 +45,7 @@ containers, tenant components, and connected analysis/k6 observability paths.
 | MT-03       | `6f448f8`         | Postgres TenantRegistry service; live scope-owned lazy acquisition in server root.                                                                                           |
 | MT-04       | `4eeacbf`         | TenantContext and per-app LocalFolderRouter; validated tenant files and leased, scope-owned Storage cache.                                                                   |
 | MT-05       | `6d7df35`         | Admin tenant/key HTTP operations backed by registry.                                                                                                                         |
-| MT-06       | `027e177`         | Tenant administration CLI and direct registry SQL path.                                                                                                                      |
+| MT-06       | `027e177`         | Tenant administration CLI via admin HTTP; registry SQL stays in the server.                                                                                                  |
 | MT-07       | `ebd89fa`         | Credential-derived tenant context, hashed-key cache and trusted tenant reader IPC.                                                                                           |
 | MT-08       | `9ff9859`         | Headless Better Auth HTTP/CLI, Postgres users/sessions/memberships; no external identity provider.                                                                           |
 | MT-09       | `c9ba958`         | Tenant-routing properties; no new runtime C4 surface.                                                                                                                        |
@@ -78,3 +78,9 @@ hand-edited:
 python3 docs/architecture/diagrams/render.py           # regenerate both formats
 python3 docs/architecture/diagrams/render.py --check   # non-zero exit if either format is stale
 ```
+
+## Reflection astra-2
+
+All four pairs were audited at `cd669d1` on 2026-10-11. The updates describe supervised reader restart and
+correct tenant CLI transport, tenant backup limitations and missing tenant telemetry. See
+[the full reflection](reflection-astra-2.md) for phase results and follow-ups.

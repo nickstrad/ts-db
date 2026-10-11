@@ -1,6 +1,6 @@
 # Container — request path
 
-Audited against landed main `643b706` on 2026-10-11 (item 27). Both formats are generated from
+Audited against landed main `cd669d1` on 2026-10-11 (reflection astra-2). Both formats are generated from
 `diagrams/c4-container-platform.py`; numbered relationships are identical. All boxes describe landed code.
 
 ```mermaid
@@ -10,7 +10,8 @@ flowchart TB
         reader["Reader process<br/>[Deno child process]<br/>platform/reader.ts<br/>DuckDB SQLite reads; ingest and named analysis"]
         files["Application documents<br/>[SQLite 3 WAL files]<br/>DATA_DIR; TENANTS_DIR<br/>Legacy app.sqlite; TENANTS_DIR/tenantId.db; one file per tenant"]
         pg["Central registry<br/>[Postgres 17 process/store]<br/>docker-compose.yml; platform/tenants/<br/>Tenants, hashed keys, users, sessions, memberships"]
-        tenants["Tenant/auth CLI<br/>[Deno process]<br/>scripts/tenants.ts; scripts/auth.ts<br/>Tenant administration and headless email/password"]
+        tenants["Tenant CLI<br/>[Deno process]<br/>scripts/tenants.ts<br/>Admin HTTP client; explicit ADMIN_TOKEN"]
+        authcli["Auth CLI<br/>[Deno process]<br/>scripts/auth.ts<br/>Headless account creation and membership linking"]
         migration["Migration runner<br/>[Deno process]<br/>scripts/db/migrate.ts<br/>Journaled, advisory-locked SQL migrations"]
     end
         client["Typed client SDK<br/>[Library in caller process]<br/>sdk/client.ts<br/>Named handlers, bearer, X-Trace-Id"]
@@ -20,9 +21,11 @@ flowchart TB
     server -->|"(3) node:sqlite; serialized mutation transaction"| files
     reader -->|"(4) DuckDB SQLite extension; READ_ONLY attachment"| files
     server -->|"(5) Postgres protocol; registry SQL and session auth"| pg
-    tenants -->|"(6) Postgres protocol; tenant/key or auth operations"| pg
+    tenants -->|"(6) HTTP JSON; ADMIN_TOKEN; tenant/key CRUD"| server
     migration -->|"(7) Postgres protocol; journal and migration SQL"| pg
-    server -->|"(8) Snapshot verification/hash; S3 HTTPS or local publication"| objects
+    server -->|"(8) Tenancy-off snapshots; S3 HTTPS or local publication"| objects
+    authcli -->|"(9) Postgres protocol; auth and membership SQL"| pg
+    server -->|"(10) Spawn and ready-ping; restart backoff; stop on breaker exhaustion"| reader
     classDef planned stroke-dasharray: 5 3
     classDef person fill:#fff,stroke-width:2px
     classDef external fill:#f4f4f4
@@ -32,16 +35,18 @@ flowchart TB
 
 ## Relationships
 
-| # | From             | To                    | Relationship                                                 |
-| - | ---------------- | --------------------- | ------------------------------------------------------------ |
-| 1 | Typed client SDK | Server process        | HTTP JSON + bearer + trace                                   |
-| 2 | Server process   | Reader process        | JSONL IPC query/ping/ingest/analysis; trusted tenant id/path |
-| 3 | Server process   | Application documents | node:sqlite; serialized mutation transaction                 |
-| 4 | Reader process   | Application documents | DuckDB SQLite extension; READ_ONLY attachment                |
-| 5 | Server process   | Central registry      | Postgres protocol; registry SQL and session auth             |
-| 6 | Tenant/auth CLI  | Central registry      | Postgres protocol; tenant/key or auth operations             |
-| 7 | Migration runner | Central registry      | Postgres protocol; journal and migration SQL                 |
-| 8 | Server process   | Object storage        | Snapshot verification/hash; S3 HTTPS or local publication    |
+| #  | From             | To                    | Relationship                                                      |
+| -- | ---------------- | --------------------- | ----------------------------------------------------------------- |
+| 1  | Typed client SDK | Server process        | HTTP JSON + bearer + trace                                        |
+| 2  | Server process   | Reader process        | JSONL IPC query/ping/ingest/analysis; trusted tenant id/path      |
+| 3  | Server process   | Application documents | node:sqlite; serialized mutation transaction                      |
+| 4  | Reader process   | Application documents | DuckDB SQLite extension; READ_ONLY attachment                     |
+| 5  | Server process   | Central registry      | Postgres protocol; registry SQL and session auth                  |
+| 6  | Tenant CLI       | Server process        | HTTP JSON; ADMIN_TOKEN; tenant/key CRUD                           |
+| 7  | Migration runner | Central registry      | Postgres protocol; journal and migration SQL                      |
+| 8  | Server process   | Object storage        | Tenancy-off snapshots; S3 HTTPS or local publication              |
+| 9  | Auth CLI         | Central registry      | Postgres protocol; auth and membership SQL                        |
+| 10 | Server process   | Reader process        | Spawn and ready-ping; restart backoff; stop on breaker exhaustion |
 
 ## Runtime notes
 
@@ -52,4 +57,9 @@ tenants because the schema guard rejects switching layouts. Tenant-mode reads ac
 per request; legacy reads use the app pool. Application documents stay in SQLite. Better Auth is mounted in
 the server at /api/auth/*; scripts/auth.ts is the headless CLI. The future control-plane router is not
 implemented. E2E uses ephemeral Postgres, distinct tenants for layouts, and fresh Better Auth servers per
-layout.
+layout. Tenant CLI calls the admin HTTP API; only the auth CLI and migration runner connect directly to
+Postgres. The backup route/timer supplies no TenantContext and therefore fails in tenant modes; app-only
+object keys and restore are not a tenant recovery protocol. Reader restarts preserve SQLite files, but queued
+reader calls fail with 502 and are never replayed. Five restart attempts per ten minutes are allowed. The E2E
+harness (tests/e2e/platform/main.ts and compose.yml) instantiates isolated copies of these containers, never
+the dev stack. Its backup scenario uses tenancy-off; it does not prove tenant recovery.

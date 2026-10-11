@@ -17,7 +17,7 @@ NODES = [('http',
   'Server lifecycle',
   'Component',
   'platform/server.ts',
-  'Scoped listener, backup and ingest timers, reader-exit watch',
+  'Scoped listener, backup and ingest timers, supervisor exhaustion watch',
   True),
  ('apps',
   'AppRegistry / AppServices',
@@ -59,7 +59,7 @@ NODES = [('http',
   'ReaderClient / ReaderProcess',
   'Effect services',
   'platform/ipc.ts; platform/layers.ts',
-  'Scoped child, capped queue, deadline, trace/tenant frames',
+  'Supervised child, backoff and breaker; capped RPC queue',
   True),
  ('logging',
   'Logger / EventSink',
@@ -114,12 +114,12 @@ EDGES = [('http', 'apps', 'Resolve app and named handler'),
  ('http', 'storage', 'Mutation Effect inside serialized transaction'),
  ('http', 'rpc', 'Query/ingest/analysis frames; trace and trusted tenant path'),
  ('storage', 'files', 'node:sqlite transaction and snapshot reads'),
- ('life', 'backup', 'Scoped backup timer'),
- ('backup', 'storage', 'Consistent VACUUM INTO snapshot'),
+ ('life', 'backup', 'App backup timer (tenancy-off only)'),
+ ('backup', 'storage', 'VACUUM INTO snapshot (tenancy-off only)'),
  ('backup', 'objects', 'Verified snapshot and manifest publication'),
  ('tenant', 'pg', 'Parameterized registry SQL; lazy scoped pool'),
- ('life', 'rpc', 'Ping; hourly ingest; reader-exit watch and finalizer'),
- ('rpc', 'reader', 'JSONL RPC; scoped child shutdown'),
+ ('life', 'rpc', 'Ping; hourly ingest; supervisor exhaustion watch and finalizer'),
+ ('rpc', 'reader', 'JSONL RPC; restart, ready-ping and scoped shutdown'),
  ('storage', 'logging', 'SQL/tx/queue events'),
  ('http', 'logging', 'HTTP/handler spans and failures'),
  ('life', 'logging', 'Startup/shutdown and timer events'),
@@ -130,6 +130,7 @@ EDGES = [('http', 'apps', 'Resolve app and named handler'),
  ('config', 'route', 'TENANTS_DIR and router selection'),
  ('config', 'logging', 'Level, queue, flush and rotation settings')]
 NOTES = 'Config is acquired before logging, then IdGen, ObjectStore/AppRegistry, TenantRegistry, AppServices\nand ReaderClient. Shutdown drains HTTP, stops timers, closes reader and DB handles, emits the final\nlifecycle event, then drains logging. Every partial startup releases acquired resources.\nAuth derives TenantContext before consuming app arguments; the trusted reader location is prepared\nbehind a shared initialization barrier. Tenant key revocation invalidates the local cache; other\ninstances converge within its TTL. Tenant-mode writers use a bounded scope-owned handle cache (default 64 handles, 60-second idle expiry);\nrequests lease handles, and shutdown drains leases before closing them.\nRetention and named analysis execute in the reader, never as server-side DuckDB components.\nItem 26 removes compatibility wrappers and platform/compiler.ts; pure compilation now lives in\ncore/compile/ and introduces no new runtime component. HTTP status mapping lives in core/errors.ts.\nBetter Auth connections are bounded to each request/CLI operation, separate from the lazy registry pool.'
+NOTES += '\nReaderClientConfigured owns the restart supervisor: delays 1/2/4/8/8 seconds, at most five attempts\nper rolling ten minutes. It swaps connections only after a ready-ping; pending calls fail, never replay.\nA sixth attempt signals exhaustion to server.ts, which drains and exits 1. Startup ping still fails startup.\nTenant backups are not wired: admin backup and timers lack TenantContext; object keys remain app-only.\nBetter Auth uses the minimal entrypoint, bearer plugin and handwritten-SQL adapter; exactly one active\nmembership is required. Admin authority is a separate configured token, not a membership role.'
 NAME = 'c4-component-server'
 
 
@@ -174,7 +175,7 @@ def mermaid():
 
 
 def document(github):
-    text = '# ' + TITLE + '\n\nAudited against landed main `643b706` on 2026-10-11 (item 27). Both formats are generated from\n'
+    text = '# ' + TITLE + '\n\nAudited against landed main `cd669d1` on 2026-10-11 (reflection astra-2). Both formats are generated from\n'
     text += '`diagrams/' + NAME + '.py`; numbered relationships are identical. All boxes describe landed code.\n\n'
     if github:
         text += '```mermaid\n' + mermaid() + '\n```\n'

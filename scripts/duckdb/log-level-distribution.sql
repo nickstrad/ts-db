@@ -3,7 +3,7 @@
 -- Question: what's the distribution of log levels (debug/info/warn/error) in the
 -- rotated JSONL event log right now?
 -- Source: the JSONL files themselves — no DuckDB table or ingest needed. This is the
--- one query in this folder that works against real files today (see README).
+-- query in this folder that reads the JSONL sources instead of the ingested tables.
 -- Field names are the camelCase envelope fields from core/events.ts (`toJsonLine`),
 -- NOT the snake_case DuckDB column names used by the other queries here.
 -- Variables: $log_glob — a glob matching one or more rotated JSONL files, e.g.

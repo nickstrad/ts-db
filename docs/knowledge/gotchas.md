@@ -124,3 +124,21 @@ analysis use separate connections from the same `DuckDBInstanceCache` in `platfo
 matching open options. Independent native instances can give analysis stale state after a later ingest;
 `tests/unit/reader_ingest_test.ts` covers ingest → analysis → another ingest → analysis. The standalone logs
 CLI still opens read-only. The writer process must not import the catalog or DuckDB.
+
+## 2026-10-11 — Reflection astra-2: CI database ownership and supervision test drift
+
+`deno task ci` includes Postgres tests. `tests/unit/tenants_test.ts` truncates the configured registry tables
+and defaults to developer Postgres; do not run it against retained data. Use
+`bash work-scripts/bash/ci-isolated-postgres.sh` for a disposable instance. The architecture reflection
+initially hit the unsafe default; the
+[report](../architecture/reflection-astra-2.md#constraint-incident-and-corrected-test-isolation) discloses the
+temporary-database mutation and corrected isolation.
+
+At baseline `cd669d1`, supervised reader recovery makes two older `server_scope_test.ts` exit expectations
+fail: 602 unit/core tests pass, two fail, one S3 case is ignored. Properties pass 79/79 and E2E 7/7. Do not
+report the entire CI gate green because the new single-crash recovery test passes.
+
+Tenant backups are explicitly deferred; event schema v2 also lacks tenant attribution despite the plan's
+tenant-id-column statement. See the
+[reflection verdict](../architecture/reflection-astra-2.md#phase-4--architectural-verdict-and-proposed-follow-ups)
+for file-specific follow-ups and the real-workload query evidence.

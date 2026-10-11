@@ -3,7 +3,7 @@
 -- Question: startup/shutdown (and other) phases per role/pid, in order, with the time
 -- spent between consecutive phases of the same process.
 -- Table: lifecycle_events (schema v2).
--- Variables: $start_ts, $end_ts (inclusive TIMESTAMP bounds).
+-- Variables: $start_ts, $end_ts (inclusive start, exclusive end TIMESTAMP bounds).
 --
 -- Assumption: `phase` is free-form text (core/events.ts's LifecyclePayload.phase is
 -- `string`, not an enum), so this query does not filter or assume specific phase names

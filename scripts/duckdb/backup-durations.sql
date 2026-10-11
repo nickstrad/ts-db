@@ -3,7 +3,7 @@
 -- Question: per-app backup phases, durations, bytes, failures, and the gap between
 -- successive successful backups.
 -- Table: backup_events (schema v2).
--- Variables: $start_ts, $end_ts (inclusive TIMESTAMP bounds).
+-- Variables: $start_ts, $end_ts (inclusive start, exclusive end TIMESTAMP bounds).
 --
 -- Assumption: a backup "succeeds" when its final phase, `publish-latest`, lands with
 -- outcome = 'ok' (core/errors.ts's BackupPhase order: snapshot, verify, hash,

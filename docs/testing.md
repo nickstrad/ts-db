@@ -14,13 +14,14 @@ four disjoint directories: historical unit files include real native/process tes
 ## Required gate
 
 ```sh
-deno task ci
+bash work-scripts/bash/ci-isolated-postgres.sh
 ```
 
-This runs fmt:check, lint, check, test, test:prop in order. It does not include integration, e2e or the k6
-acceptance test. Item 27 executes the gate and both integration commands; dated results are in
-[README.md](../README.md). Optional real-S3 backup coverage is ignored without an endpoint and credentials. A
-historical native DuckDB exit-139 flake is recorded there; a crashed test process is never a passing run.
+This runs the unchanged `deno task ci`: fmt:check, lint, check, test, test:prop in order. It does not include
+integration, e2e or the k6 acceptance test. Item 27 executes the gate and both integration commands; dated
+results are in [README.md](../README.md). Optional real-S3 backup coverage is ignored without an endpoint and
+credentials. A historical native DuckDB exit-139 flake is recorded there; a crashed test process is never a
+passing run.
 
 ## Replaying a property failure
 
@@ -46,6 +47,21 @@ merely mocking calls. `tests/property/storage_commit_test.ts` supplements this w
 behavior. Reader and cross-dialect properties check live-file reads and SQLite/DuckDB agreement; the in-memory
 double alone cannot prove native SQL, filesystem, IPC or process cleanup behavior.
 
+## Isolating Postgres for CI
+
+Some files in `tests/unit/` are database integration tests. In particular, `tests/unit/tenants_test.ts`
+applies DDL and truncates `api_keys, tenants` in `DATABASE_URL`, which otherwise defaults to the developer
+database. Never point that suite at retained data. Use a dedicated disposable database, or the repository
+wrapper:
+
+```sh
+bash work-scripts/bash/ci-isolated-postgres.sh
+```
+
+The wrapper runs the unchanged `deno task ci` against its own Postgres 17 container, allocated loopback port
+and no persistent volume, then removes only that container. It does not invoke developer Compose or borrow an
+E2E run's resources. The standard CI task has not yet been made hermetic by default.
+
 ## Integration and MT-10 gate
 
 ```sh
@@ -65,7 +81,7 @@ are recorded in the README.
 The item-25 k6 observability acceptance command is:
 
 ```sh
-deno test -A tests/e2e/observability_test.ts
+deno run -A tests/e2e/observability_test.ts
 ```
 
 **Not executed in item 27:** it runs k6 and host-dependent load/latency thresholds on this shared 8 GB VM.

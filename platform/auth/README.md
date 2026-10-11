@@ -1,10 +1,9 @@
 # Headless email/password authentication (MT-08)
 
-**Scope integration pending:** the brief excludes the normal migration directory, `deno.lock`, and
-`docs/knowledge/decisions.md` from ownership while requiring changes there. The tested migration pair
-currently lives here as `002_auth.up.sql` / `002_auth.down.sql`; the standard runner does not discover it
-here. `deno.lock.patch` and `decision.md` are prepared for the explicitly requested destinations. These
-artifacts must be installed before this item can be marked complete.
+The auth migration is installed in `platform/tenants/migrations/002_auth.up.sql` and `002_auth.down.sql` and
+discovered by `deno task db:migrate`. The lockfile and membership decision are integrated. The copies and
+patch in this directory are historical build artifacts, not installation steps. Verified against `cd669d1`
+during reflection astra-2.
 
 2026-10-11: **GO** on Deno 2.9.5, Better Auth 1.7.7 and Postgres 17. The executable [spike](spike.ts) uses the
 vanilla `createAuthClient`, signs up, signs in, captures the body token and calls a tenant endpoint. It

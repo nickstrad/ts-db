@@ -5,7 +5,7 @@
 -- Tables: platform_events, sql_events, tx_events, http_events, k6_points (schema v2).
 -- The supported form of this query is `deno task logs:query trace --param traceId=<id>`
 -- (platform/analysis/catalog.ts), which also drops the platform_events rows that
--- sql_events/tx_events/http_events already carry. This file lists them from both tables.
+-- sql_events/tx_events/http_events already carry. This file follows the same deduplication.
 -- Variables: $trace_id.
 --
 -- Assumption: only these five tables carry a trace_id column in §4.1's DDL —
@@ -15,6 +15,7 @@
 SELECT ts, 'platform' AS source, event_kind AS kind, name, outcome, error_tag, duration_ms, NULL AS extra
 FROM platform_events
 WHERE trace_id = $trace_id
+  AND event_kind NOT IN ('sql', 'tx', 'http')
 
 UNION ALL
 
@@ -32,7 +33,7 @@ WHERE trace_id = $trace_id
 
 UNION ALL
 
-SELECT ts, 'http' AS source, handler_kind AS kind, name, CASE WHEN error_tag IS NULL THEN 'ok' ELSE 'error' END,
+SELECT ts, 'http' AS source, handler_kind AS kind, name, CASE WHEN status >= 400 OR error_tag IS NOT NULL THEN 'error' ELSE 'ok' END,
        error_tag, duration_ms, path AS extra
 FROM http_events
 WHERE trace_id = $trace_id

@@ -38,11 +38,13 @@ NODES = [('client',
   'Tenants, hashed keys, users, sessions, memberships',
   True),
  ('tenants',
-  'Tenant/auth CLI',
+  'Tenant CLI',
   'Deno process',
-  'scripts/tenants.ts; scripts/auth.ts',
-  'Tenant administration and headless email/password',
+  'scripts/tenants.ts',
+  'Admin HTTP client; explicit ADMIN_TOKEN',
   True),
+ ('authcli', 'Auth CLI', 'Deno process', 'scripts/auth.ts',
+  'Headless account creation and membership linking', True),
  ('migration',
   'Migration runner',
   'Deno process',
@@ -60,10 +62,13 @@ EDGES = [('client', 'server', 'HTTP JSON + bearer + trace'),
  ('server', 'files', 'node:sqlite; serialized mutation transaction'),
  ('reader', 'files', 'DuckDB SQLite extension; READ_ONLY attachment'),
  ('server', 'pg', 'Postgres protocol; registry SQL and session auth'),
- ('tenants', 'pg', 'Postgres protocol; tenant/key or auth operations'),
+ ('tenants', 'server', 'HTTP JSON; ADMIN_TOKEN; tenant/key CRUD'),
  ('migration', 'pg', 'Postgres protocol; journal and migration SQL'),
- ('server', 'objects', 'Snapshot verification/hash; S3 HTTPS or local publication')]
+ ('server', 'objects', 'Tenancy-off snapshots; S3 HTTPS or local publication'),
+ ('authcli', 'pg', 'Postgres protocol; auth and membership SQL'),
+ ('server', 'reader', 'Spawn and ready-ping; restart backoff; stop on breaker exhaustion')]
 NOTES = 'The writer and reader remain separate OS processes and native module graphs. The central Postgres\nconnection is acquired lazily for registry use; TENANCY=off preserves app tokens and legacy files.\nEach app has a LocalFolderRouter over the shared TENANTS_DIR/tenantId.db path.\nDifferent physical layouts need distinct tenants because the schema guard rejects switching layouts. Tenant-mode reads acquire a fresh\nscoped reader per request; legacy reads use the app pool. Application documents stay in SQLite.\nBetter Auth is mounted in the server at /api/auth/*; scripts/auth.ts is the headless CLI. The future\ncontrol-plane router is not implemented. E2E uses ephemeral Postgres, distinct tenants for layouts, and fresh Better Auth servers per layout.'
+NOTES += '\nTenant CLI calls the admin HTTP API; only the auth CLI and migration runner connect directly to Postgres.\nThe backup route/timer supplies no TenantContext and therefore fails in tenant modes; app-only object\nkeys and restore are not a tenant recovery protocol. Reader restarts preserve SQLite files, but queued\nreader calls fail with 502 and are never replayed. Five restart attempts per ten minutes are allowed.\nThe E2E harness (tests/e2e/platform/main.ts and compose.yml) instantiates isolated copies of these\ncontainers, never the dev stack. Its backup scenario uses tenancy-off; it does not prove tenant recovery.'
 NAME = 'c4-container-platform'
 
 
@@ -108,7 +113,7 @@ def mermaid():
 
 
 def document(github):
-    text = '# ' + TITLE + '\n\nAudited against landed main `643b706` on 2026-10-11 (item 27). Both formats are generated from\n'
+    text = '# ' + TITLE + '\n\nAudited against landed main `cd669d1` on 2026-10-11 (reflection astra-2). Both formats are generated from\n'
     text += '`diagrams/' + NAME + '.py`; numbered relationships are identical. All boxes describe landed code.\n\n'
     if github:
         text += '```mermaid\n' + mermaid() + '\n```\n'

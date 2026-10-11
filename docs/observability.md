@@ -249,10 +249,11 @@ deno task logs:sweep [--dry-run]      # ingest, seal torn tails, then retention
 ## Named queries
 
 The catalog lives in `platform/analysis/catalog.ts` as a plain record of `{ sql, params, description }`. It is
-**extensible**: a new query is one more entry (the tenant-aware `error-rate-by-tenant`, for example, will be
-added that way). This section and the catalog are kept in step by `tests/unit/analysis_catalog_test.ts`, which
-fails if a name or parameter is documented here and absent there, or the reverse. Every entry is a single
-`SELECT`/`WITH`, also asserted by that test.
+**extensible**: a new query is one more entry. Tenant-scoped queries additionally require a schema change: the
+current event envelope and v2 tables do not retain authenticated tenant identity. An app ID or
+caller-controlled trace ID is not a substitute. This section and the catalog are kept in step by
+`tests/unit/analysis_catalog_test.ts`, which fails if a name or parameter is documented here and absent there,
+or the reverse. Every entry is a single `SELECT`/`WITH`, also asserted by that test.
 
 ### `slowest-sql`
 
@@ -372,11 +373,17 @@ source of truth, deleting the file and re-ingesting rebuilds it from whatever JS
 
 ## Worked examples
 
-Generate load and ingest it:
+Generate load against a scratch server (the helper prints its scratch path). This helper sets only DATA_DIR;
+set the log and object-store paths explicitly so the workload cannot write into a retained log tree. Its
+printed scratch data directory is separate from the log root below:
 
 ```sh
-TRACE_SQL=true bash work-scripts/bash/k6-scenario-run.sh perf:mixed my-run   # throwaway server, k6 -> logs/k6/my-run
+obs_root="$(mktemp -d)"
+export LOG_DIR="$obs_root/logs" EVENTLOG_DUCKDB="$obs_root/events.duckdb"
+export LOCAL_OBJECT_DIR="$obs_root/objects" TENANCY=off S3_BASE_URL= BACKUP_INTERVAL_MS=0
+TRACE_SQL=true bash work-scripts/bash/k6-scenario-run.sh perf:mixed my-run
 deno task logs:ingest
+K6_RUN_ID=my-run K6_DUCKDB="$EVENTLOG_DUCKDB" deno task perf:ingest
 deno task logs:list
 ```
 
@@ -438,3 +445,11 @@ deno task logs:query slowest-sql --format csv > slowest-sql.csv
 `scripts/duckdb/*.sql` are ad-hoc `duckdb`-CLI versions of a few of these queries, written against the same v2
 columns (see `scripts/duckdb/README.md`). The catalog is the supported interface; those files are for
 exploration.
+
+## Supervision analysis
+
+`scripts/duckdb/reader-restarts.sql` reads the server's `reader-restarting`, `reader-restarted` and
+`reader-restart-abandoned` lifecycle records. Their details include attempts/backoff or replacement PID. A
+crash can lose the reader sink's buffered records; the server's restart events are the recovery evidence. See
+[the real-data harness](../scripts/duckdb/README.md#running-the-real-data-check) for executable SQL
+validation, including tenant admin activity. These ad-hoc queries are not additional named catalog entries.

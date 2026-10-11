@@ -1,6 +1,6 @@
 # System Context
 
-Audited against landed main `643b706` on 2026-10-11 (item 27). Both formats are generated from
+Audited against landed main `cd669d1` on 2026-10-11 (reflection astra-2). Both formats are generated from
 `diagrams/c4-context-document-db.py`; numbered relationships are identical. All boxes describe landed code.
 
 <!-- c4-render: diagrams/c4-context-document-db.py -->
@@ -59,4 +59,5 @@ Audited against landed main `643b706` on 2026-10-11 (item 27). Both formats are 
 
 Tenant identity comes from API keys or headless Better Auth session bearers when enabled. Postgres is part of
 the platform, shown at Level 2; no external identity provider is wired. No application SQL crosses the client
-boundary. This audit includes items 23, 25, 26 and MT-01 through MT-10.
+boundary. This audit includes items 23-29, MT-01 through MT-10 and reader supervision. Backup publication
+currently works only with tenancy off; tenant recovery is a follow-up.

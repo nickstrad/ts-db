@@ -3,7 +3,7 @@
 -- Question: which error_tag values are showing up, how often, and what share of all
 -- errors (and of all events) do they represent in the window?
 -- Table: platform_events (schema v2).
--- Variables: $start_ts, $end_ts (inclusive TIMESTAMP bounds).
+-- Variables: $start_ts, $end_ts (inclusive start, exclusive end TIMESTAMP bounds).
 
 WITH windowed AS (
   SELECT *

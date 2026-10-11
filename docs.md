@@ -82,9 +82,9 @@ the same schema and return the same TypeScript document shape. See
 
 A **query** runs in the reader process with a read-only document context, through DuckDB's SQLite extension.
 Whole query handlers are serialized and each gets a fresh read transaction. A **mutation** runs in the server
-process, serialized per app, in one SQLite `BEGIN IMMEDIATE` transaction. Its reads use SQLite inside that
-transaction; its writes commit together or roll back on failure/interruption. Do not retain a handler's
-database context after the handler finishes.
+process, serialized per app/tenant writer (per app with tenancy off), in one SQLite `BEGIN IMMEDIATE`
+transaction. Its reads use SQLite inside that transaction; its writes commit together or roll back on
+failure/interruption. Do not retain a handler's database context after the handler finishes.
 
 A successful mutation response follows local commit. Queries read the live file rather than an asynchronously
 refreshed replica; a reader overlapping a write may see earlier state. See the
@@ -93,6 +93,26 @@ refreshed replica; a reader overlapping a write may see earlier state. See the
 The deployment registry is static. Adding an app means editing `platform/registry.ts` and `platform/config.ts`
 to register its schema, handlers, layout and token: there is no plugin loading. HTTP callers choose registered
 app IDs and named handlers, never database paths or raw SQL.
+
+### Tenant operation
+
+The examples below deliberately use `TENANCY=off`. For tenant deployment, first apply `deno task db:migrate`
+against your configured `DATABASE_URL`, then select `TENANCY=api-key` or `TENANCY=better-auth` and set
+`TENANTS_DIR`. Each tenant has one schema-guarded `<tenant-uuid>.db` file. Use distinct tenants for the two
+sample layouts.
+
+`scripts/tenants.ts` calls the admin HTTP API using `BASE_URL` and `ADMIN_TOKEN`; it supports create, list,
+show, deactivate, issue-key and revoke-key. Plaintext keys are returned only on creation/issuance. Use that
+key as the SDK bearer. Caller-supplied tenant selectors cannot change credential-derived identity. The API-key
+cache has a fixed 30-second default TTL; local admin writes invalidate it, while other server instances and
+direct database changes converge after expiry. There is currently no environment option for changing this TTL.
+
+Better Auth additionally requires `BETTER_AUTH_SECRET` (at least 32 characters) and `BETTER_AUTH_URL` matching
+the public origin. Its `/api/auth/*` endpoints issue session tokens used as bearer credentials. Public signup
+does not grant tenant access: an operator links the account with `scripts/auth.ts`, which connects directly to
+Postgres. Exactly one membership in an active tenant is required. Membership roles do not grant admin
+authority. See [the auth guide](platform/auth/README.md) for password input, rate limits and the
+handwritten-SQL adapter.
 
 ## SDK walkthrough
 
@@ -252,6 +272,10 @@ already-running backup is also 409; a body exceeding the configured cap is 413.
 
 ## Backups and restore
 
+These backup and restore commands work with `TENANCY=off`. In tenant modes, the current admin route and timer
+do not provide `TenantContext`, so snapshot acquisition fails. Object keys and restore manifests are still
+app-scoped; there is no supported tenant backup/restore flow yet.
+
 Request a whole-app snapshot with the admin token:
 
 ```sh
@@ -319,6 +343,9 @@ deno task logs:sweep --dry-run
 ingested files with matching committed watermarks can be gzipped or deleted. Today's files and blocked files
 can exceed the JSONL cap. The derived DuckDB file is never pruned and grows independently.
 
+Analysis remains global and admin-only. The v2 event schema does not retain authenticated tenant identity;
+neither an app ID nor a caller-provided trace ID is a tenant authorization boundary.
+
 The named analysis queries are:
 
 - `slowest-sql`: SQL p50/p95/p99 by engine, statement kind and collection.
@@ -365,8 +392,11 @@ Each entry follows symptom → cause → fix:
 - **503** → a bounded writer/reader queue is full → reduce concurrency and retry with backoff and
   application-level idempotency; inspect queue-depth analysis.
 - **Reader exited / 502** → reader process or IPC failed (object-store failures also map to 502) → inspect the
-  trace and lifecycle logs. A reader exit makes the server shut down and exit 1; correct the cause and restart
-  the server, or let your supervisor restart both processes together.
+  trace and lifecycle logs. The server restarts the child after 1/2/4/8/8-second backoffs and publishes a
+  replacement only after a ready-ping. Pending reader calls fail and are not replayed. A sixth restart attempt
+  within ten minutes exhausts the breaker, causing server drain and exit 1; an external supervisor must then
+  restart the server. Startup ping failure still fails startup. Inspect `reader-restarting`,
+  `reader-restarted` and `reader-restart-abandoned` lifecycle events.
 - **Port already in use / `ListenError`** → another listener owns the address → choose an unused `PORT` or
   stop the conflicting listener you own, then restart.
 - **Offline logs command fails with a lock error** → the live reader owns the derived DuckDB file → use admin

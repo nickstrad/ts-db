@@ -1,20 +1,20 @@
 # Component — server process
 
-Audited against landed main `643b706` on 2026-10-11 (item 27). Both formats are generated from
+Audited against landed main `cd669d1` on 2026-10-11 (reflection astra-2). Both formats are generated from
 `diagrams/c4-component-server.py`; numbered relationships are identical. All boxes describe landed code.
 
 ```mermaid
 flowchart TB
     subgraph platform["Server process: PlatformLive"]
         http["HTTP API / auth<br/>[Component]<br/>platform/http/; platform/auth/<br/>Named routes, traces, tenant/API-key/session authentication"]
-        life["Server lifecycle<br/>[Component]<br/>platform/server.ts<br/>Scoped listener, backup and ingest timers, reader-exit watch"]
+        life["Server lifecycle<br/>[Component]<br/>platform/server.ts<br/>Scoped listener, backup and ingest timers, supervisor exhaustion watch"]
         apps["AppRegistry / AppServices<br/>[Effect services]<br/>platform/registry.ts; platform/layers.ts<br/>App schema/handlers; Storage and Backups stack per app"]
         tenant["TenantRegistry<br/>[Effect service]<br/>platform/tenants/store.ts<br/>Lazy Postgres registry; bounded hashed-key TTL cache"]
         route["TenantStorageRouter<br/>[Effect service]<br/>platform/tenants/routing.ts<br/>LocalFolderRouter per app; validated locations"]
         context["TenantContext<br/>[Request-local Effect service]<br/>platform/tenants/routing.ts<br/>Trusted credential-derived tenant id; scoped continuation"]
         storage["Storage<br/>[Effect service]<br/>platform/sqlite.ts<br/>Scoped handles; serialization; rollback and context expiry"]
         backup["Backups / ObjectStore<br/>[Effect services]<br/>platform/backup.ts; platform/object_store.ts<br/>Snapshot/hash/manifest; local or signed S3"]
-        rpc["ReaderClient / ReaderProcess<br/>[Effect services]<br/>platform/ipc.ts; platform/layers.ts<br/>Scoped child, capped queue, deadline, trace/tenant frames"]
+        rpc["ReaderClient / ReaderProcess<br/>[Effect services]<br/>platform/ipc.ts; platform/layers.ts<br/>Supervised child, backoff and breaker; capped RPC queue"]
         logging["Logger / EventSink<br/>[Effect logger/service]<br/>platform/logging/<br/>Dropping queue; batched JSONL; final drain"]
         config["Config / IdGen<br/>[Effect services]<br/>platform/config.ts; platform/sqlite.ts<br/>Validated options; UUIDs; Effect runtime Clock"]
     end
@@ -34,12 +34,12 @@ flowchart TB
     http -->|"(9) Mutation Effect inside serialized transaction"| storage
     http -->|"(10) Query/ingest/analysis frames; trace and trusted tenant path"| rpc
     storage -->|"(11) node:sqlite transaction and snapshot reads"| files
-    life -->|"(12) Scoped backup timer"| backup
-    backup -->|"(13) Consistent VACUUM INTO snapshot"| storage
+    life -->|"(12) App backup timer (tenancy-off only)"| backup
+    backup -->|"(13) VACUUM INTO snapshot (tenancy-off only)"| storage
     backup -->|"(14) Verified snapshot and manifest publication"| objects
     tenant -->|"(15) Parameterized registry SQL; lazy scoped pool"| pg
-    life -->|"(16) Ping; hourly ingest; reader-exit watch and finalizer"| rpc
-    rpc -->|"(17) JSONL RPC; scoped child shutdown"| reader
+    life -->|"(16) Ping; hourly ingest; supervisor exhaustion watch and finalizer"| rpc
+    rpc -->|"(17) JSONL RPC; restart, ready-ping and scoped shutdown"| reader
     storage -->|"(18) SQL/tx/queue events"| logging
     http -->|"(19) HTTP/handler spans and failures"| logging
     life -->|"(20) Startup/shutdown and timer events"| logging
@@ -74,12 +74,12 @@ flowchart TB
 | 9  | HTTP API / auth              | Storage                      | Mutation Effect inside serialized transaction                  |
 | 10 | HTTP API / auth              | ReaderClient / ReaderProcess | Query/ingest/analysis frames; trace and trusted tenant path    |
 | 11 | Storage                      | Application files            | node:sqlite transaction and snapshot reads                     |
-| 12 | Server lifecycle             | Backups / ObjectStore        | Scoped backup timer                                            |
-| 13 | Backups / ObjectStore        | Storage                      | Consistent VACUUM INTO snapshot                                |
+| 12 | Server lifecycle             | Backups / ObjectStore        | App backup timer (tenancy-off only)                            |
+| 13 | Backups / ObjectStore        | Storage                      | VACUUM INTO snapshot (tenancy-off only)                        |
 | 14 | Backups / ObjectStore        | Object storage               | Verified snapshot and manifest publication                     |
 | 15 | TenantRegistry               | Central registry             | Parameterized registry SQL; lazy scoped pool                   |
-| 16 | Server lifecycle             | ReaderClient / ReaderProcess | Ping; hourly ingest; reader-exit watch and finalizer           |
-| 17 | ReaderClient / ReaderProcess | Reader child                 | JSONL RPC; scoped child shutdown                               |
+| 16 | Server lifecycle             | ReaderClient / ReaderProcess | Ping; hourly ingest; supervisor exhaustion watch and finalizer |
+| 17 | ReaderClient / ReaderProcess | Reader child                 | JSONL RPC; restart, ready-ping and scoped shutdown             |
 | 18 | Storage                      | Logger / EventSink           | SQL/tx/queue events                                            |
 | 19 | HTTP API / auth              | Logger / EventSink           | HTTP/handler spans and failures                                |
 | 20 | Server lifecycle             | Logger / EventSink           | Startup/shutdown and timer events                              |
@@ -102,4 +102,10 @@ requests lease handles, and shutdown drains leases before closing them. Retentio
 in the reader, never as server-side DuckDB components. Item 26 removes compatibility wrappers and
 platform/compiler.ts; pure compilation now lives in core/compile/ and introduces no new runtime component.
 HTTP status mapping lives in core/errors.ts. Better Auth connections are bounded to each request/CLI
-operation, separate from the lazy registry pool.
+operation, separate from the lazy registry pool. ReaderClientConfigured owns the restart supervisor: delays
+1/2/4/8/8 seconds, at most five attempts per rolling ten minutes. It swaps connections only after a
+ready-ping; pending calls fail, never replay. A sixth attempt signals exhaustion to server.ts, which drains
+and exits 1. Startup ping still fails startup. Tenant backups are not wired: admin backup and timers lack
+TenantContext; object keys remain app-only. Better Auth uses the minimal entrypoint, bearer plugin and
+handwritten-SQL adapter; exactly one active membership is required. Admin authority is a separate configured
+token, not a membership role.

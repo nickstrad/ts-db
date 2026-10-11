@@ -55,7 +55,7 @@ EDGES = [('developer', 'db', 'Schema and named handlers (TypeScript)'),
  ('db', 'objects', 'S3 HTTPS or local files; snapshots and manifests'),
  ('db', 'analytics', 'Query results; derived event-log rows'),
  ('k6', 'db', 'HTTP scenarios and trace headers')]
-NOTES = 'Tenant identity comes from API keys or headless Better Auth session bearers when enabled. Postgres is\npart of the platform, shown at Level 2; no external identity provider is wired. No application SQL crosses\nthe client boundary. This audit includes items 23, 25, 26 and MT-01 through MT-10.'
+NOTES = 'Tenant identity comes from API keys or headless Better Auth session bearers when enabled. Postgres is\npart of the platform, shown at Level 2; no external identity provider is wired. No application SQL crosses\nthe client boundary. This audit includes items 23-29, MT-01 through MT-10 and reader supervision.\nBackup publication currently works only with tenancy off; tenant recovery is a follow-up.'
 NAME = 'c4-context-document-db'
 
 
@@ -100,7 +100,7 @@ def mermaid():
 
 
 def document(github):
-    text = '# ' + TITLE + '\n\nAudited against landed main `643b706` on 2026-10-11 (item 27). Both formats are generated from\n'
+    text = '# ' + TITLE + '\n\nAudited against landed main `cd669d1` on 2026-10-11 (reflection astra-2). Both formats are generated from\n'
     text += '`diagrams/' + NAME + '.py`; numbered relationships are identical. All boxes describe landed code.\n\n'
     if github:
         text += '```mermaid\n' + mermaid() + '\n```\n'

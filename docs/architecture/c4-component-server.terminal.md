@@ -1,6 +1,6 @@
 # Component — server process
 
-Audited against landed main `643b706` on 2026-10-11 (item 27). Both formats are generated from
+Audited against landed main `cd669d1` on 2026-10-11 (reflection astra-2). Both formats are generated from
 `diagrams/c4-component-server.py`; numbered relationships are identical. All boxes describe landed code.
 
 <!-- c4-render: diagrams/c4-component-server.py -->
@@ -13,8 +13,8 @@ Audited against landed main `643b706` on 2026-10-11 (item 27). Both formats are 
 ╎  │ [Component]                  │   │ [Component]                  │ ╎
 ╎  │ platform/http/;              │   │ platform/server.ts           │ ╎
 ╎  │ platform/auth/               │   │ Scoped listener, backup and  │ ╎
-╎  │ Named routes, traces,        │   │ ingest timers, reader-exit   │ ╎
-╎  │ tenant/API-key/session       │   │ watch                        │ ╎
+╎  │ Named routes, traces,        │   │ ingest timers, supervisor    │ ╎
+╎  │ tenant/API-key/session       │   │ exhaustion watch             │ ╎
 ╎  │ authentication               │   └──────────────────────────────┘ ╎
 ╎  └──────────────────────────────┘                                    ╎
 ╎                                                                      ╎
@@ -51,9 +51,9 @@ Audited against landed main `643b706` on 2026-10-11 (item 27). Both formats are 
 ╎  │ [Effect services]            │   │ [Effect logger/service]      │ ╎
 ╎  │ platform/ipc.ts;             │   │ platform/logging/            │ ╎
 ╎  │ platform/layers.ts           │   │ Dropping queue; batched      │ ╎
-╎  │ Scoped child, capped queue,  │   │ JSONL; final drain           │ ╎
-╎  │ deadline, trace/tenant       │   └──────────────────────────────┘ ╎
-╎  │ frames                       │                                    ╎
+╎  │ Supervised child, backoff    │   │ JSONL; final drain           │ ╎
+╎  │ and breaker; capped RPC      │   └──────────────────────────────┘ ╎
+╎  │ queue                        │                                    ╎
 ╎  └──────────────────────────────┘                                    ╎
 ╎                                                                      ╎
 ╎  ┌──────────────────────────────┐                                    ╎
@@ -108,12 +108,12 @@ Audited against landed main `643b706` on 2026-10-11 (item 27). Both formats are 
 | 9  | HTTP API / auth              | Storage                      | Mutation Effect inside serialized transaction                  |
 | 10 | HTTP API / auth              | ReaderClient / ReaderProcess | Query/ingest/analysis frames; trace and trusted tenant path    |
 | 11 | Storage                      | Application files            | node:sqlite transaction and snapshot reads                     |
-| 12 | Server lifecycle             | Backups / ObjectStore        | Scoped backup timer                                            |
-| 13 | Backups / ObjectStore        | Storage                      | Consistent VACUUM INTO snapshot                                |
+| 12 | Server lifecycle             | Backups / ObjectStore        | App backup timer (tenancy-off only)                            |
+| 13 | Backups / ObjectStore        | Storage                      | VACUUM INTO snapshot (tenancy-off only)                        |
 | 14 | Backups / ObjectStore        | Object storage               | Verified snapshot and manifest publication                     |
 | 15 | TenantRegistry               | Central registry             | Parameterized registry SQL; lazy scoped pool                   |
-| 16 | Server lifecycle             | ReaderClient / ReaderProcess | Ping; hourly ingest; reader-exit watch and finalizer           |
-| 17 | ReaderClient / ReaderProcess | Reader child                 | JSONL RPC; scoped child shutdown                               |
+| 16 | Server lifecycle             | ReaderClient / ReaderProcess | Ping; hourly ingest; supervisor exhaustion watch and finalizer |
+| 17 | ReaderClient / ReaderProcess | Reader child                 | JSONL RPC; restart, ready-ping and scoped shutdown             |
 | 18 | Storage                      | Logger / EventSink           | SQL/tx/queue events                                            |
 | 19 | HTTP API / auth              | Logger / EventSink           | HTTP/handler spans and failures                                |
 | 20 | Server lifecycle             | Logger / EventSink           | Startup/shutdown and timer events                              |
@@ -136,4 +136,10 @@ requests lease handles, and shutdown drains leases before closing them. Retentio
 in the reader, never as server-side DuckDB components. Item 26 removes compatibility wrappers and
 platform/compiler.ts; pure compilation now lives in core/compile/ and introduces no new runtime component.
 HTTP status mapping lives in core/errors.ts. Better Auth connections are bounded to each request/CLI
-operation, separate from the lazy registry pool.
+operation, separate from the lazy registry pool. ReaderClientConfigured owns the restart supervisor: delays
+1/2/4/8/8 seconds, at most five attempts per rolling ten minutes. It swaps connections only after a
+ready-ping; pending calls fail, never replay. A sixth attempt signals exhaustion to server.ts, which drains
+and exits 1. Startup ping still fails startup. Tenant backups are not wired: admin backup and timers lack
+TenantContext; object keys remain app-only. Better Auth uses the minimal entrypoint, bearer plugin and
+handwritten-SQL adapter; exactly one active membership is required. Admin authority is a separate configured
+token, not a membership role.
