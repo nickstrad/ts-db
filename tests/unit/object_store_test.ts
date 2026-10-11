@@ -14,6 +14,7 @@ import { ConfigError, InvalidKeyError, ObjectStoreError } from "../../core/error
 import type { EventRecord } from "../../core/events.ts";
 import { ConfigTest } from "../../platform/config.ts";
 import {
+  BACKUP_RUN_ANNOTATION,
   keyFailure,
   makeObjectStoreLive,
   makeObjectStoreLocal,
@@ -256,6 +257,10 @@ test("local: put and get each emit one event with key, bytes, duration and outco
     assert.equal(putEvent.role, "restore");
     assert.equal(putEvent.eventId, "id-1");
     assert.equal(putEvent.level, "info");
+    // A transfer record, not a backup phase; outside any backup run it has no runId.
+    assert.equal(putEvent.emitter, "object-store");
+    assert.equal(putEvent.runId, undefined);
+    assert.equal(putEvent.attempts, 1);
 
     // `BackupPhase` has no read phase, so a get is a lifecycle event.
     assert.ok(getEvent.kind === "lifecycle");
@@ -265,6 +270,7 @@ test("local: put and get each emit one event with key, bytes, duration and outco
       {
         key: "k/obj.bin",
         bytes: 5,
+        attempts: 1,
         durationMs: undefined,
         outcome: "ok",
         errorTag: undefined,
@@ -289,6 +295,27 @@ test("local: a failed put reports the attempted byte count and the error tag", a
     assert.equal(event.bytes, 3);
     assert.equal(event.errorTag, "InvalidKeyError");
     assert.equal(event.level, "error");
+    assert.equal(event.attempts, 0, "a rejected key never reaches the filesystem");
+  });
+});
+
+test("local: a put inside a backup run carries the run's id from the backupRunId annotation", async () => {
+  await withTempDir(async (dir) => {
+    const h = harness({ localDir: dir }, makeObjectStoreLocal);
+    await exec(
+      h,
+      Effect.annotateLogs(put("apps/a/x.sqlite", enc.encode("x")), {
+        [BACKUP_RUN_ANNOTATION]: "run-9",
+        traceId: "trace-9",
+        appId: "a",
+      }),
+    );
+    const [event] = h.events;
+    assert.ok(event.kind === "backup");
+    assert.deepEqual(
+      [event.emitter, event.runId, event.traceId, event.appId, event.attempts],
+      ["object-store", "run-9", "trace-9", "a", 1],
+    );
   });
 });
 
@@ -421,8 +448,38 @@ test("s3: transient failures are retried and a later success wins", async () => 
   assert.ok(Exit.isSuccess(exit));
   assert.equal(dec.decode(exit.value), "ok");
   assert.equal(stub.calls.length, 3);
-  // One event per operation, not per attempt.
+  // One event per operation, not per attempt; the attempts are counted on it.
   assert.equal(h.events.length, 1);
+  const [event] = h.events;
+  assert.ok(event.kind === "lifecycle");
+  assert.equal((event.detail as { attempts: number }).attempts, 3);
+});
+
+test("s3: a retried put is one transfer record whose attempts count every request", async () => {
+  const stub = stubFetch([
+    new Response("SlowDown", { status: 503 }),
+    new Response("busy", { status: 500 }),
+    new Response(null, { status: 200 }),
+  ]);
+  const h = harness(S3, makeObjectStoreS3, s3Options(stub.fetch));
+  assert.ok(Exit.isSuccess(await exec(h, put("a.bin", enc.encode("abc")))));
+  assert.equal(stub.calls.length, 3);
+  assert.equal(h.events.length, 1);
+  const [event] = h.events;
+  assert.ok(event.kind === "backup");
+  assert.deepEqual([event.emitter, event.phase, event.attempts, event.outcome], [
+    "object-store",
+    "put-object",
+    3,
+    "ok",
+  ]);
+
+  const failing = stubFetch([new Response("SlowDown", { status: 503 })]);
+  const exhausted = harness(S3, makeObjectStoreS3, s3Options(failing.fetch));
+  await exec(exhausted, put("b.bin", enc.encode("abc")));
+  const [failed] = exhausted.events;
+  assert.ok(failed.kind === "backup");
+  assert.deepEqual([failed.attempts, failed.outcome], [4, "error"]);
 });
 
 test("s3: a network error surfaces without a status and keeps its cause", async () => {

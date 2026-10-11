@@ -13,19 +13,19 @@
  *   `Effect.acquireRelease`, so success, failure, defect and interruption all release it. The temp
  *   directory is a second resource in the same scope; it is removed before the guard is released.
  *
- * Events: one `backup` event per phase this module owns — `snapshot`, `verify`, `hash`, `put-manifest`,
- * `publish-latest` — with duration and outcome, emitted on interruption too, so a stalled or killed
- * backup is visible. A run that fails before its snapshot starts (the temp directory cannot be created)
- * still emits one failed `snapshot` event. `put-object` is NOT emitted here on success or failure:
- * `ObjectStore` already emits a `backup`/`put-object` event for every put (the manifest and
- * `latest.json` puts included), and a second one would double-count. The exception is interruption,
- * which the store usually cannot record (its event is written after the put settles, and an interrupted
- * fiber normally never gets there); see `putObject`. That exception is not race-free: an interrupt that
- * lands after the store has emitted its event but before `put` returns is recorded here as well, so one
- * written object can show both the store's `ok` and an `Interrupted` event. The `Interrupted` event
- * therefore carries `errorDetail: { written: "unknown" }`: the object may or may not have been written.
- * Every event of a run carries its `appId` and `traceId` through log annotations, which the store's
- * events read as well, so the store's put events join the run.
+ * Events (ADR 0006): every `take` is one backup run with its own `runId`. This module writes exactly one
+ * `backup` record (`emitter: "backups"`) per phase the run reaches — `snapshot`, `verify`, `hash`,
+ * `put-object`, `put-manifest`, `publish-latest` — with duration and outcome, emitted on failure and
+ * interruption too, so a stalled or killed backup is visible. A run that fails before its snapshot starts
+ * (the temp directory cannot be created) still emits one failed `snapshot` record.
+ *
+ * Object transfers are the store's to record, not this module's: `ObjectStore` writes one
+ * `emitter: "object-store"` record per PUT (the snapshot object, the manifest and `latest.json`), with
+ * its `attempts`. The run's `runId` reaches those records through the `backupRunId` log annotation, and
+ * each one links to the phase that issued it by `(runId, key)`. So a phase is never counted twice, a
+ * retry is never counted as a transfer, and a transfer is never counted as a backup: count runs by
+ * `runId`, phases from `backups` records, transfers from `object-store` records. Every record of a run
+ * also carries its `appId` and `traceId` through log annotations, which the store's records read too.
  */
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -58,7 +58,7 @@ import {
   lifecycleEvent,
   type Role,
 } from "../core/events.ts";
-import { sha256 } from "./object_store.ts";
+import { BACKUP_RUN_ANNOTATION, sha256 } from "./object_store.ts";
 import {
   Backups as BackupsTag,
   type BackupsService,
@@ -184,6 +184,12 @@ export function makeBackupRunner(
     const ids = yield* IdGen;
     const active = yield* Ref.make(HashSet.empty<string>());
 
+    /** The run this fiber is part of, from the annotation `take` sets. */
+    const runIdOf = Effect.map(
+      Effect.logAnnotations,
+      (annotations) => annotation(annotations, BACKUP_RUN_ANNOTATION),
+    );
+
     const envelope = (level: Level, at: number): Effect.Effect<EventEnvelope> =>
       Effect.gen(function* () {
         const annotations = yield* Effect.logAnnotations;
@@ -200,16 +206,12 @@ export function makeBackupRunner(
         };
       });
 
-    /**
-     * Emits the one `backup` event describing a phase that started at `startedAt` and ended in `exit`.
-     * `detail`, when given, replaces the failure's `errorDetail`.
-     */
+    /** Emits the one `backup` record describing a phase that started at `startedAt` and ended in `exit`. */
     const record = <A, E>(
       name: BackupPhase,
       startedAt: number,
       exit: Exit.Exit<A, E>,
       fields: PhaseFields,
-      detail?: unknown,
     ): Effect.Effect<void> =>
       Effect.gen(function* () {
         const finishedAt = yield* Clock.currentTimeMillis;
@@ -219,11 +221,13 @@ export function makeBackupRunner(
         yield* sink.emit(backupEvent({
           ...(yield* envelope(level, finishedAt)),
           phase: name,
+          emitter: "backups",
+          runId: yield* runIdOf,
           ...fields,
           durationMs: finishedAt - startedAt,
           outcome: ok ? "ok" : "error",
           errorTag: errors?.errorTag,
-          errorDetail: detail ?? errors?.errorDetail,
+          errorDetail: errors?.errorDetail,
         }));
       });
 
@@ -247,33 +251,6 @@ export function makeBackupRunner(
                 ...known,
                 ...(Exit.isSuccess(exit) ? fields(exit.value) : {}),
               }),
-          ),
-      );
-
-    /**
-     * The snapshot-object put. `ObjectStore` records its success or failure; only an interruption is
-     * recorded here, since the store's event is normally never written. So a backup killed mid-upload
-     * still shows where it stopped.
-     *
-     * This can double-count. The store emits its event before its `put` effect returns, so an interrupt
-     * landing between the two is recorded here too, for an object that was written (the store's event
-     * says `ok`). The interrupted record is marked `written: "unknown"` for that reason: read it as "may
-     * or may not have been written", and prefer the store's `put-object` event for the same key when
-     * both exist. Closing the window needs `ObjectStore` to record interruption itself (follow-up; that
-     * file is outside this item).
-     */
-    const putObject = (key: string, bytes: Uint8Array) =>
-      Effect.flatMap(
-        Clock.currentTimeMillis,
-        (startedAt) =>
-          Effect.onExit(
-            store.put(key, bytes),
-            (exit) =>
-              Exit.isFailure(exit) && Cause.isInterruptedOnly(exit.cause)
-                ? record("put-object", startedAt, exit, { key, bytes: bytes.byteLength }, {
-                  written: "unknown",
-                })
-                : Effect.void,
           ),
       );
 
@@ -355,8 +332,9 @@ export function makeBackupRunner(
         const manifestKey = `${key}.json`;
         const latestKey = `apps/${appId}/latest.json`;
         // Upload immutable data first; publish latest only after both immutable uploads succeed.
-        // The store's own `put-object` events record each JSON's bytes; these phase events carry the key.
-        yield* putObject(key, bytes).pipe(Effect.mapError(failed(appId, "put-object")));
+        // Each put phase records its key; the store's transfer record for that put shares it and the runId.
+        yield* phase("put-object", store.put(key, bytes), undefined, { key, bytes: bytes.byteLength })
+          .pipe(Effect.mapError(failed(appId, "put-object")));
         yield* phase("put-manifest", store.put(manifestKey, json), undefined, { key: manifestKey })
           .pipe(Effect.mapError(failed(appId, "put-manifest")));
         yield* phase("publish-latest", store.put(latestKey, json), undefined, { key: latestKey })
@@ -364,18 +342,21 @@ export function makeBackupRunner(
         return manifest;
       }));
 
-    /** Annotates the run with its app and, unless the caller already has one, a fresh trace id. */
+    /**
+     * Annotates the run with its app, a fresh backup-run id, and, unless the caller already has one, a
+     * fresh trace id. The run id is separate from the trace: one caller trace may span several backups.
+     */
     const take = (appId: string, storage: SnapshotSource): Effect.Effect<Manifest, TakeError> =>
-      Effect.flatMap(
-        Effect.logAnnotations,
-        (annotations) =>
-          annotation(annotations, "traceId", "trace_id") !== undefined
-            ? Effect.annotateLogs(run(appId, storage), { appId })
-            : Effect.flatMap(
-              ids.next,
-              (traceId) => Effect.annotateLogs(run(appId, storage), { appId, traceId }),
-            ),
-      );
+      Effect.gen(function* () {
+        const runId = yield* ids.next;
+        const callerTrace = annotation(yield* Effect.logAnnotations, "traceId", "trace_id");
+        const traceId = callerTrace === undefined ? { traceId: yield* ids.next } : {};
+        return yield* Effect.annotateLogs(run(appId, storage), {
+          appId,
+          [BACKUP_RUN_ANNOTATION]: runId,
+          ...traceId,
+        });
+      });
 
     const runner: BackupRunner = { take };
     return runner;

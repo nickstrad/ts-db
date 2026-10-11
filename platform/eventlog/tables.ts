@@ -1,10 +1,12 @@
 /**
- * The typed event tables (plan item 21, §4.1): how one ingested JSONL record becomes a row in each
- * DuckDB table. Statements only — `platform/eventlog/ingest.ts` decides when to run them, inside the
- * one transaction per batch that also moves `_ingest_state`.
+ * The typed event tables (plan items 21 and 35, §4.1): how one ingested JSONL record becomes a row in
+ * each DuckDB table, plus the one-off v1 → v2 schema upgrade. The ingest statements are statements
+ * only — `platform/eventlog/ingest.ts` decides when to run them, inside the one transaction per batch
+ * that also moves `_ingest_state`.
  *
  * Every statement here against an event table is an `INSERT ... SELECT` from the batch's staging
- * relations. Nothing in this module rewrites or removes a row.
+ * relations (or, in `upgradeEventLog`, from a rebuilt copy). Nothing in this module rewrites or
+ * removes a row.
  *
  * ## Staging
  *
@@ -21,19 +23,44 @@
  * A line is ingestible iff it is valid JSON, an object, has a non-empty string `eventId`, and has a
  * `ts` DuckDB can read as a timestamp. A wrong-typed *field* is not a reject: that column is `NULL`.
  *
- * ## Column mapping
+ * ## Column mapping (schema v2, ADR 0006)
  *
  * Every ingestible record lands in `platform_events`; records of a typed kind also land in that
- * kind's table. `handler` and `ingest` records have no typed table. As `core/events.ts` documents:
+ * kind's table (`TYPED_EVENT_TABLES`). `handler` and `ingest` records have no typed table. As
+ * `core/events.ts` documents:
  *
- * - `platform_events.kind` is the union discriminant, except for `handler` records, where it is the
- *   handler's `handlerKind` (`query` / `mutation`); `http_events.kind` is `handlerKind` too.
+ * - **Identity.** `event_id` is the record's `eventId`, in `platform_events` and in its typed table.
+ *   Both inserts read the same `ingest_rows`, in one transaction, so every typed row has exactly one
+ *   `platform_events` row with its `event_id`, and that row's `event_kind` is the typed table's kind.
+ *   Duplicates follow the offset model's rules (see "Identity under duplicates" below).
+ * - **Taxonomy.** `platform_events.event_kind` is the record's `kind`, always. `handler_kind` is
+ *   `handlerKind` mapped explicitly — `query` → `query`, `mutation` → `mutation`, anything else
+ *   `NULL` — for `http` and `handler` records, and `NULL` for every other kind. `http_events.handler_kind`
+ *   is the same mapping. Legacy JSONL shaped after §4.1's original field list, a handler record whose
+ *   `kind` is itself `query` or `mutation`, maps to `event_kind = 'handler'` with that `handler_kind`.
  * - `platform_events.attrs` is `errorDetail` (for `lifecycle` records, `detail`).
  * - `platform_events.name` is the record's most specific label: `name` (http, handler),
  *   `statementKind` (sql), `queue` (queue), `phase` (backup, lifecycle), `sourceFile` (ingest).
- * - `platform_events.outcome` is `outcome`, or `event` (queue), or `status` (ingest).
+ * - `platform_events.outcome` keeps each kind's own vocabulary, so item 23 can tell failures apart:
+ *   `outcome` (`ok`/`error`; for `tx`, `commit`/`rollback`/`interrupted`), `event` (queue), `status`
+ *   (ingest), and for `http` — which has no outcome field — `error` when `errorTag` is set, else `ok`.
+ * - **Backups.** `backup_events.emitter` is `emitter` (`backups` or `object-store`), `run_id` is
+ *   `runId`, `attempts` is `attempts`. A record written before item 35 has no `emitter`; it is inferred
+ *   from what each producer wrote then: `put-object` came from the object store, except the record
+ *   `Backups` wrote for an interrupted upload (`errorTag` `Interrupted`, `errorDetail.written`
+ *   `unknown`); every other phase came from `Backups`. Such records have no `run_id`.
  * - `ts` is read as `TIMESTAMPTZ` and stored as its UTC wall time, so a `+02:00` offset is honoured
  *   rather than dropped (a plain `CAST(... AS TIMESTAMP)` silently ignores the offset).
+ *
+ * ## Identity under duplicates
+ *
+ * The same `eventId` can reach ingest twice only through a rewritten source (offsets.ts): a re-read
+ * generation, or two copies inside one batch. Lines of a rewritten file land only if their `eventId`
+ * is not already in `platform_events` and is the batch's first copy, so the canonical row and its typed
+ * row exist once. Re-running ingest over an unchanged tree reads nothing. Duplicate *production* — an
+ * outside process copying lines into a file whose ingested prefix it keeps intact — is outside the
+ * offset model (ADR 0004): it would land twice, in both tables, and `SELECT event_id FROM
+ * platform_events GROUP BY 1 HAVING count(*) > 1` finds it. The platform's own writers never do it.
  *
  * ## Large integers
  *
@@ -52,7 +79,19 @@
  * producers are JavaScript, so a `number` past 2^53 has lost precision *before* it is written —
  * DuckDB stores exactly what the line says, which is the most this side can promise.
  */
-import { EVENTLOG_DDL } from "../../core/eventlog/ddl.ts";
+import { Clock, Effect, Exit } from "effect";
+import { IngestError } from "../../core/errors.ts";
+import { lifecycleEvent, type Role } from "../../core/events.ts";
+import {
+  EVENTLOG_DDL,
+  EVENTLOG_SCHEMA_VERSION,
+  INGEST_STATE_TABLE,
+  SCHEMA_TABLE,
+  TYPED_EVENT_TABLES,
+} from "../../core/eventlog/ddl.ts";
+import { Config, EventSink, type IngestReport } from "../services.ts";
+// Type-only: erased at runtime, so there is no import cycle. The values are imported lazily below.
+import type { EventLogConnection, EventLogDriver } from "./ingest.ts";
 
 export { EVENTLOG_DDL };
 
@@ -242,7 +281,37 @@ function jsonOf(field: string): string {
 }
 
 const TS = `(TRY_CAST(${textOf("ts")} AS TIMESTAMPTZ) AT TIME ZONE 'UTC')`;
+/** The record's `kind` as written: the union discriminant, or `query`/`mutation` in legacy handler records. */
 const KIND = textOf("kind");
+
+/** The canonical event kind: the discriminant, with legacy `query`/`mutation` handler records mapped to `handler`. */
+const EVENT_KIND = `CASE WHEN ${KIND} IN ('query', 'mutation') THEN 'handler' ELSE ${KIND} END`;
+
+/** The explicit `handlerKind` mapping. Anything but `query` or `mutation` is `NULL`. */
+const HANDLER_KIND_OF_FIELD = `CASE ${
+  textOf("handlerKind")
+} WHEN 'query' THEN 'query' WHEN 'mutation' THEN 'mutation' END`;
+
+/** `handler_kind` for any record: from `handlerKind` for http/handler records, from legacy `kind`, else `NULL`. */
+const HANDLER_KIND = `CASE WHEN ${KIND} IN ('http', 'handler') THEN ${HANDLER_KIND_OF_FIELD} ` +
+  `WHEN ${KIND} IN ('query', 'mutation') THEN ${KIND} END`;
+
+/** `true` when `field` is present and not JSON `null`. */
+function hasValue(field: string): string {
+  return `coalesce(json_type(j, ${path(field)}), 'NULL') <> 'NULL'`;
+}
+
+/** `backup_events.emitter`: explicit when written, inferred for pre-item-35 records (see the module doc). */
+const EMITTER = `CASE
+    WHEN ${hasValue("emitter")} THEN CASE ${textOf("emitter")} WHEN 'backups' THEN 'backups' ` +
+  `WHEN 'object-store' THEN 'object-store' END
+    WHEN ${textOf("phase")} = 'put-object' AND ${textOf("errorTag")} = 'Interrupted' ` +
+  `AND (j ->> '$.errorDetail.written') = 'unknown' THEN 'backups'
+    WHEN ${textOf("phase")} = 'put-object' THEN 'object-store'
+    WHEN ${textOf("phase")} IN ('snapshot', 'verify', 'hash', 'put-manifest', 'publish-latest') THEN 'backups'
+  END`;
+
+const EVENT_ID: readonly [string, string] = ["event_id", textOf("eventId")];
 
 /** One event table's insert: target columns, the expression for each, and which records qualify. */
 interface TableInsert {
@@ -263,7 +332,7 @@ ORDER BY source_file, source_offset`;
 const PLATFORM_EVENTS: TableInsert = {
   table: "platform_events",
   columns: [
-    ["event_id", textOf("eventId")],
+    EVENT_ID,
     ["ts", TS],
     ["level", textOf("level")],
     ["role", textOf("role")],
@@ -272,122 +341,513 @@ const PLATFORM_EVENTS: TableInsert = {
     ["span_id", textOf("spanId")],
     ["parent_span_id", textOf("parentSpanId")],
     ["app_id", textOf("appId")],
-    ["kind", `CASE WHEN ${KIND} = 'handler' THEN ${textOf("handlerKind")} ELSE ${KIND} END`],
+    ["event_kind", EVENT_KIND],
+    ["handler_kind", HANDLER_KIND],
     [
       "name",
-      `CASE ${KIND} WHEN 'http' THEN ${textOf("name")} WHEN 'handler' THEN ${textOf("name")} ` +
+      `CASE ${EVENT_KIND} WHEN 'http' THEN ${textOf("name")} WHEN 'handler' THEN ${textOf("name")} ` +
       `WHEN 'sql' THEN ${textOf("statementKind")} WHEN 'queue' THEN ${textOf("queue")} ` +
       `WHEN 'backup' THEN ${textOf("phase")} WHEN 'lifecycle' THEN ${textOf("phase")} ` +
       `WHEN 'ingest' THEN ${textOf("sourceFile")} END`,
     ],
     [
       "outcome",
-      `CASE ${KIND} WHEN 'queue' THEN ${textOf("event")} WHEN 'ingest' THEN ${textOf("status")} ` +
+      `CASE ${EVENT_KIND} WHEN 'queue' THEN ${textOf("event")} WHEN 'ingest' THEN ${textOf("status")} ` +
+      `WHEN 'http' THEN CASE WHEN ${hasValue("errorTag")} THEN 'error' ELSE 'ok' END ` +
       `ELSE ${textOf("outcome")} END`,
     ],
     ["error_tag", textOf("errorTag")],
     ["duration_ms", doubleOf("durationMs")],
-    ["attrs", `CASE WHEN ${KIND} = 'lifecycle' THEN ${jsonOf("detail")} ELSE ${jsonOf("errorDetail")} END`],
+    [
+      "attrs",
+      `CASE WHEN ${EVENT_KIND} = 'lifecycle' THEN ${jsonOf("detail")} ELSE ${jsonOf("errorDetail")} END`,
+    ],
     ["source_file", "source_file"],
     ["source_offset", "source_offset"],
   ],
 };
 
-const TYPED_TABLES: readonly TableInsert[] = [
-  {
-    table: "sql_events",
-    kind: "sql",
-    columns: [
-      ["ts", TS],
-      ["trace_id", textOf("traceId")],
-      ["app_id", textOf("appId")],
-      ["engine", textOf("engine")],
-      ["dialect", textOf("dialect")],
-      ["statement_kind", textOf("statementKind")],
-      ["table_name", textOf("tableName")],
-      ["sql_text", textOf("sqlText")],
-      ["bind_count", intOf("bindCount", "INTEGER")],
-      ["duration_ms", doubleOf("durationMs")],
-      ["row_count", intOf("rowCount", "BIGINT")],
-      ["outcome", textOf("outcome")],
-      ["error_tag", textOf("errorTag")],
-    ],
-  },
-  {
-    table: "tx_events",
-    kind: "tx",
-    columns: [
-      ["ts", TS],
-      ["trace_id", textOf("traceId")],
-      ["app_id", textOf("appId")],
-      ["engine", textOf("engine")],
-      ["outcome", textOf("outcome")],
-      ["operations", intOf("operations", "INTEGER")],
-      ["duration_ms", doubleOf("durationMs")],
-      ["queue_wait_ms", doubleOf("queueWaitMs")],
-      ["error_tag", textOf("errorTag")],
-    ],
-  },
-  {
-    table: "http_events",
-    kind: "http",
-    columns: [
-      ["ts", TS],
-      ["trace_id", textOf("traceId")],
-      ["method", textOf("method")],
-      ["path", textOf("path")],
-      ["app_id", textOf("appId")],
-      ["kind", textOf("handlerKind")],
-      ["name", textOf("name")],
-      ["status", intOf("status", "INTEGER")],
-      ["duration_ms", doubleOf("durationMs")],
-      ["bytes_in", intOf("bytesIn", "BIGINT")],
-      ["bytes_out", intOf("bytesOut", "BIGINT")],
-      ["error_tag", textOf("errorTag")],
-    ],
-  },
-  {
-    table: "queue_events",
-    kind: "queue",
-    columns: [
-      ["ts", TS],
-      ["queue", textOf("queue")],
-      ["depth", intOf("depth", "INTEGER")],
-      ["cap", intOf("cap", "INTEGER")],
-      ["event", textOf("event")],
-      ["dropped", intOf("dropped", "BIGINT")],
-    ],
-  },
-  {
-    table: "backup_events",
-    kind: "backup",
-    columns: [
-      ["ts", TS],
-      ["app_id", textOf("appId")],
-      ["phase", textOf("phase")],
-      ["key", textOf("key")],
-      ["bytes", intOf("bytes", "BIGINT")],
-      ["sha256", textOf("sha256")],
-      ["duration_ms", doubleOf("durationMs")],
-      ["outcome", textOf("outcome")],
-      ["error_tag", textOf("errorTag")],
-    ],
-  },
-  {
-    table: "lifecycle_events",
-    kind: "lifecycle",
-    columns: [
-      ["ts", TS],
-      ["role", textOf("role")],
-      ["pid", intOf("pid", "INTEGER")],
-      ["phase", textOf("phase")],
-      ["detail", jsonOf("detail")],
-    ],
-  },
-];
+/**
+ * Each typed table's columns after `event_id`. Keyed like `TYPED_EVENT_TABLES`, which supplies the kind
+ * each one projects, so a typed table cannot be added to the DDL without a mapping here, or vice versa.
+ */
+const TYPED_COLUMNS: Readonly<Record<keyof typeof TYPED_EVENT_TABLES, TableInsert["columns"]>> = {
+  sql_events: [
+    ["ts", TS],
+    ["trace_id", textOf("traceId")],
+    ["app_id", textOf("appId")],
+    ["engine", textOf("engine")],
+    ["dialect", textOf("dialect")],
+    ["statement_kind", textOf("statementKind")],
+    ["table_name", textOf("tableName")],
+    ["sql_text", textOf("sqlText")],
+    ["bind_count", intOf("bindCount", "INTEGER")],
+    ["duration_ms", doubleOf("durationMs")],
+    ["row_count", intOf("rowCount", "BIGINT")],
+    ["outcome", textOf("outcome")],
+    ["error_tag", textOf("errorTag")],
+  ],
+  tx_events: [
+    ["ts", TS],
+    ["trace_id", textOf("traceId")],
+    ["app_id", textOf("appId")],
+    ["engine", textOf("engine")],
+    ["outcome", textOf("outcome")],
+    ["operations", intOf("operations", "INTEGER")],
+    ["duration_ms", doubleOf("durationMs")],
+    ["queue_wait_ms", doubleOf("queueWaitMs")],
+    ["error_tag", textOf("errorTag")],
+  ],
+  http_events: [
+    ["ts", TS],
+    ["trace_id", textOf("traceId")],
+    ["method", textOf("method")],
+    ["path", textOf("path")],
+    ["app_id", textOf("appId")],
+    ["handler_kind", HANDLER_KIND_OF_FIELD],
+    ["name", textOf("name")],
+    ["status", intOf("status", "INTEGER")],
+    ["duration_ms", doubleOf("durationMs")],
+    ["bytes_in", intOf("bytesIn", "BIGINT")],
+    ["bytes_out", intOf("bytesOut", "BIGINT")],
+    ["error_tag", textOf("errorTag")],
+  ],
+  queue_events: [
+    ["ts", TS],
+    ["queue", textOf("queue")],
+    ["depth", intOf("depth", "INTEGER")],
+    ["cap", intOf("cap", "INTEGER")],
+    ["event", textOf("event")],
+    ["dropped", intOf("dropped", "BIGINT")],
+  ],
+  backup_events: [
+    ["ts", TS],
+    ["app_id", textOf("appId")],
+    ["phase", textOf("phase")],
+    ["emitter", EMITTER],
+    ["run_id", textOf("runId")],
+    ["key", textOf("key")],
+    ["bytes", intOf("bytes", "BIGINT")],
+    ["sha256", textOf("sha256")],
+    ["attempts", intOf("attempts", "INTEGER")],
+    ["duration_ms", doubleOf("durationMs")],
+    ["outcome", textOf("outcome")],
+    ["error_tag", textOf("errorTag")],
+  ],
+  lifecycle_events: [
+    ["ts", TS],
+    ["role", textOf("role")],
+    ["pid", intOf("pid", "INTEGER")],
+    ["phase", textOf("phase")],
+    ["detail", jsonOf("detail")],
+  ],
+};
+
+const TYPED_TABLES: readonly TableInsert[] = (Object.keys(TYPED_COLUMNS) as (keyof typeof TYPED_COLUMNS)[])
+  .map((table) => ({ table, kind: TYPED_EVENT_TABLES[table], columns: [EVENT_ID, ...TYPED_COLUMNS[table]] }));
 
 /** The batch's inserts, `platform_events` first. Run in this order inside the batch transaction. */
 export const insertStatements: readonly { readonly table: string; readonly sql: string }[] = [
   PLATFORM_EVENTS,
   ...TYPED_TABLES,
 ].map((spec) => ({ table: spec.table, sql: insertSql(spec) }));
+
+// ---------------------------------------------------------------------------
+// Schema upgrade: v1 → v2, by rebuild from the retained JSONL (ADR 0006)
+// ---------------------------------------------------------------------------
+
+/*
+ * Why a rebuild and not an in-place schema change: v1's typed rows carry no `event_id` and no source
+ * offset, so no statement can give them their identity back — `ts` and `trace_id` are not join keys.
+ * The JSONL is the source of truth, and the platform's own ingest is the only mapping this build
+ * trusts, so the upgrade re-runs that ingest into a side file and switches only once the side file
+ * provably holds every v1 event.
+ */
+
+export interface EventLogUpgradeOptions {
+  /** How DuckDB files are opened, for the rebuild and the checks. Default: ingest's `eventLogDriver`. */
+  readonly driver?: EventLogDriver;
+  /** The `role` on emitted events. Default `"reader"`, the process that owns the event log. */
+  readonly role?: Role;
+}
+
+/** What `Config.eventLog.duckdbPath` holds: no event log yet, this build's schema, or v1. */
+export type EventLogSchemaStatus = "absent" | "current" | "v1";
+
+export type EventLogUpgradeReport =
+  | { readonly status: "absent" | "current"; readonly version: number }
+  | {
+    readonly status: "upgraded";
+    readonly fromVersion: 1;
+    readonly version: number;
+    /** A byte-for-byte copy of the v1 file, kept beside the new one. */
+    readonly backupPath: string;
+    /** v1 `platform_events` rows proven present, by `event_id`, in the rebuilt tables. */
+    readonly eventsVerified: number;
+    /** `k6_points` rows carried over verbatim: their DDL did not change and they have no JSONL source. */
+    readonly k6PointsCopied: number;
+    /** The rebuild's own ingest run, over every retained source. */
+    readonly rebuild: IngestReport;
+  };
+
+type Phase = IngestError["phase"];
+
+function failure(phase: Phase, detail: string, cause?: unknown): IngestError {
+  return new IngestError({ phase, detail, cause });
+}
+
+function attemptIo<A>(phase: Phase, run: () => Promise<A>): Effect.Effect<A, IngestError> {
+  return Effect.tryPromise({
+    try: run,
+    catch: (cause) => failure(phase, cause instanceof Error ? cause.message : String(cause), cause),
+  });
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await Deno.stat(path);
+    return true;
+  } catch (cause) {
+    if (cause instanceof Deno.errors.NotFound) return false;
+    throw cause;
+  }
+}
+
+/** Removes a scratch file of the upgrade's own making; a file already gone is fine. */
+function discard(path: string): Effect.Effect<void> {
+  return Effect.promise(() => Deno.remove(path).catch(() => undefined));
+}
+
+function closeQuietly(handle: { closeSync(): void }): Effect.Effect<void> {
+  return Effect.try(() => handle.closeSync()).pipe(Effect.ignore);
+}
+
+/** One connection to `path` for the duration of `use`; connection, then instance, closed after. */
+function withConnection<A>(
+  driver: EventLogDriver,
+  path: string,
+  use: (connection: EventLogConnection) => Effect.Effect<A, IngestError>,
+): Effect.Effect<A, IngestError> {
+  return Effect.acquireUseRelease(
+    attemptIo("inventory", () => driver.open(path)),
+    (instance) =>
+      Effect.acquireUseRelease(
+        attemptIo("inventory", () => instance.connect()),
+        use,
+        closeQuietly,
+      ),
+    closeQuietly,
+  );
+}
+
+function rows(
+  connection: EventLogConnection,
+  phase: Phase,
+  sql: string,
+): Effect.Effect<Record<string, unknown>[], IngestError> {
+  return Effect.map(
+    attemptIo(phase, () => connection.runAndReadAll(sql)),
+    (reader) => reader.getRowObjects(),
+  );
+}
+
+function count(value: unknown): number {
+  return typeof value === "bigint" ? Number(value) : Number(value ?? 0);
+}
+
+/** The `main`-schema tables of the database attached as `alias`. */
+function tablesOf(connection: EventLogConnection, alias: string): Effect.Effect<Set<string>, IngestError> {
+  return Effect.map(
+    rows(
+      connection,
+      "inventory",
+      `SELECT table_name FROM duckdb_tables() WHERE database_name = ${
+        sqlString(alias)
+      } AND schema_name = 'main'`,
+    ),
+    (found) => new Set(found.map((row) => String(row.table_name))),
+  );
+}
+
+/** Every table a v1 file can hold. */
+const V1_TABLES: readonly string[] = [
+  "platform_events",
+  ...Object.keys(TYPED_EVENT_TABLES),
+  "k6_points",
+  INGEST_STATE_TABLE,
+];
+
+/**
+ * Reads the schema of the file at `dbPath` without writing it: the file is attached `READ_ONLY` to an
+ * in-memory instance. A file another process holds read-write fails here, explicitly.
+ */
+function inspect(driver: EventLogDriver, dbPath: string): Effect.Effect<EventLogSchemaStatus, IngestError> {
+  return withConnection(driver, ":memory:", (connection) =>
+    Effect.gen(function* () {
+      yield* attemptIo(
+        "inventory",
+        () => connection.run(`ATTACH ${sqlString(dbPath)} AS target (READ_ONLY)`),
+      );
+      const tables = yield* tablesOf(connection, "target");
+      if (tables.has(SCHEMA_TABLE)) {
+        const [row] = yield* rows(
+          connection,
+          "inventory",
+          `SELECT max(version) AS v FROM target.${SCHEMA_TABLE}`,
+        );
+        // An empty version table is a file this build began creating and has yet to stamp.
+        if (
+          row.v === null || row.v === undefined || Number(row.v) === EVENTLOG_SCHEMA_VERSION
+        ) return "current";
+        return yield* Effect.fail(
+          failure(
+            "inventory",
+            `event-log schema v${row.v} at ${dbPath}; this build reads and upgrades to v2 only`,
+          ),
+        );
+      }
+      return V1_TABLES.some((table) => tables.has(table)) ? "v1" : "absent";
+    }));
+}
+
+/**
+ * What the file at `Config.eventLog.duckdbPath` holds. `absent` covers a missing file and one with no
+ * event-log tables. For item 36's ingest startup: ingest itself refuses a v1 file (`EVENTLOG_DDL`'s
+ * guard), and `upgradeEventLog` is the way forward.
+ */
+export function inspectEventLogSchema(
+  options: Pick<EventLogUpgradeOptions, "driver"> = {},
+): Effect.Effect<EventLogSchemaStatus, IngestError, Config> {
+  return Effect.gen(function* () {
+    const dbPath = (yield* Config).eventLog.duckdbPath;
+    if (!(yield* attemptIo("inventory", () => exists(dbPath)))) return "absent";
+    const driver = options.driver ?? (yield* Effect.promise(() => import("./ingest.ts"))).eventLogDriver;
+    return yield* inspect(driver, dbPath);
+  });
+}
+
+interface Verified {
+  readonly eventsVerified: number;
+  readonly k6PointsCopied: number;
+}
+
+/**
+ * Proves the rebuilt file (the connection's own database) holds every event of the v1 copy at
+ * `backupPath`, then carries over `k6_points` and records the rebuild in `_eventlog_schema`. Fails —
+ * having changed only the side file — when any v1 event is missing.
+ *
+ * "Holds every event" means: every v1 `platform_events` row's `event_id` is in the rebuilt
+ * `platform_events`; every v1 typed table has exactly as many rows as v1 `platform_events` has of its
+ * kind (v1 inserted them pairwise); and each of those v1 events has a row, by `event_id`, in the
+ * rebuilt typed table. Values may differ — that is the v2 mapping — but no row is lost.
+ */
+function verifyAndCarry(
+  connection: EventLogConnection,
+  dbPath: string,
+  backupPath: string,
+  at: string,
+): Effect.Effect<Verified, IngestError> {
+  return Effect.gen(function* () {
+    yield* attemptIo("plan", () => connection.run(`ATTACH ${sqlString(backupPath)} AS v1 (READ_ONLY)`));
+    const v1Tables = yield* tablesOf(connection, "v1");
+    const problems: string[] = [];
+    let eventsVerified = 0;
+    if (v1Tables.has("platform_events")) {
+      const missingIds = "FROM v1.platform_events o WHERE NOT EXISTS " +
+        "(SELECT 1 FROM main.platform_events n WHERE n.event_id = o.event_id)";
+      const [totals] = yield* rows(
+        connection,
+        "plan",
+        `SELECT (SELECT count(*) FROM v1.platform_events) AS total, (SELECT count(*) ${missingIds}) AS missing`,
+      );
+      const total = count(totals.total);
+      const missing = count(totals.missing);
+      eventsVerified = total - missing;
+      if (missing > 0) {
+        const sources = yield* rows(
+          connection,
+          "plan",
+          `SELECT DISTINCT o.source_file ${missingIds} ORDER BY 1 LIMIT 6`,
+        );
+        const named = sources.slice(0, 5).map((row) => String(row.source_file));
+        problems.push(
+          `${missing} of ${total} v1 platform_events rows have no event_id in the rebuild (sources: ` +
+            `${named.join(", ")}${sources.length > 5 ? ", …" : ""})`,
+        );
+      }
+    }
+    for (const [table, kind] of Object.entries(TYPED_EVENT_TABLES)) {
+      if (!v1Tables.has(table)) continue;
+      const canonical = v1Tables.has("platform_events")
+        ? `(SELECT count(*) FROM v1.platform_events WHERE kind = ${sqlString(kind)})`
+        : "0";
+      const unmatched = v1Tables.has("platform_events")
+        ? `(SELECT count(*) FROM v1.platform_events o WHERE o.kind = ${sqlString(kind)} AND NOT EXISTS ` +
+          `(SELECT 1 FROM main.${table} n WHERE n.event_id = o.event_id))`
+        : "0";
+      const [row] = yield* rows(
+        connection,
+        "plan",
+        `SELECT (SELECT count(*) FROM v1.${table}) AS typed, ${canonical} AS canonical, ${unmatched} AS missing`,
+      );
+      const typed = count(row.typed);
+      if (typed !== count(row.canonical)) {
+        problems.push(
+          `v1 ${table} has ${typed} rows but v1 platform_events has ${
+            count(row.canonical)
+          } '${kind}' rows, ` +
+            "so its rows cannot all be vouched for",
+        );
+      } else if (count(row.missing) > 0) {
+        problems.push(`${count(row.missing)} v1 '${kind}' events have no row in the rebuilt ${table}`);
+      }
+    }
+    if (problems.length > 0) {
+      return yield* Effect.fail(failure(
+        "plan",
+        `event-log schema upgrade v1 → v2 refused: the retained JSONL cannot rebuild every v1 event: ` +
+          `${problems.join("; ")}. Restore the missing sources under LOG_DIR (gunzip a retention-gzipped ` +
+          `.jsonl.gz in place, ADR 0004) and retry. Nothing was switched: ${dbPath} is unchanged.`,
+      ));
+    }
+    let k6PointsCopied = 0;
+    if (v1Tables.has("k6_points")) {
+      const columns = "ts, run_id, metric, value, scenario, status, trace_id, tags";
+      yield* attemptIo(
+        "insert",
+        () => connection.run(`INSERT INTO main.k6_points (${columns}) SELECT ${columns} FROM v1.k6_points`),
+      );
+      const [copied] = yield* rows(connection, "insert", "SELECT count(*) AS n FROM v1.k6_points");
+      k6PointsCopied = count(copied.n);
+    }
+    const detail = JSON.stringify({ fromVersion: 1, backupPath, eventsVerified, k6PointsCopied });
+    yield* attemptIo("insert", () =>
+      connection.run(
+        `INSERT INTO main.${SCHEMA_TABLE} (version, applied_at, method, detail) ` +
+          `VALUES (${EVENTLOG_SCHEMA_VERSION}, CAST($1 AS TIMESTAMPTZ) AT TIME ZONE 'UTC', 'rebuild-from-v1', CAST($2 AS JSON))`,
+        [at, detail],
+      ));
+    yield* attemptIo("commit", () => connection.run("DETACH v1"));
+    yield* attemptIo("commit", () => connection.run("CHECKPOINT"));
+    return { eventsVerified, k6PointsCopied };
+  });
+}
+
+/**
+ * Upgrades the event-log file at `Config.eventLog.duckdbPath` from v1 to this build's schema, or does
+ * nothing when it is absent or already current. The steps, each of which must succeed before the next:
+ *
+ * 1. **Refuse an unsafe start.** A `<file>.wal` beside the file means its last writer did not close it;
+ *    the upgrade refuses rather than copy a half-checkpointed file. (Opening the file once — even the
+ *    refused v2 ingest connection does — checkpoints it.) The schema is read through a `READ_ONLY`
+ *    attach, which also fails if another process holds the file.
+ * 2. **Preserve the original.** The v1 file is copied byte-for-byte to `<file>.v1-<instant>.duckdb`.
+ * 3. **Rebuild through the real ingest.** `makeEventLogIngest` — the same entry, DDL and mappings every
+ *    run uses — ingests the whole retained JSONL tree into `<file>.v2-rebuild.duckdb`, from offset 0.
+ *    Like any first ingest it quarantines rejected lines and emits its anomalies, so a rebuild appends
+ *    a second copy of each historical reject to `rejected.jsonl` (a duplicate in a diagnostic file).
+ * 4. **Prove it is complete** against the copy (`verifyAndCarry`): no v1 event may be missing. If one
+ *    is, fail `IngestError({ phase: "plan" })`: the side file and the copy are removed and the v1 file,
+ *    with its `_ingest_state` offsets, is exactly as it was. A source that retention gzipped or deleted
+ *    is the usual cause; this never discards the v1 rows that only it still holds.
+ * 5. **Switch** by renaming the rebuilt file over the original — atomic, so the path always names a
+ *    whole v1 or a whole v2 file — and keep the copy.
+ *
+ * Run it while nothing else has the event log open (the reader's ingest is refused on a v1 file anyway).
+ * Item 36 owns calling it from ingest startup; until then it is an explicit operator step.
+ */
+export function upgradeEventLog(
+  options: EventLogUpgradeOptions = {},
+): Effect.Effect<EventLogUpgradeReport, IngestError, Config | EventSink> {
+  return Effect.gen(function* () {
+    const config = yield* Config;
+    const sink = yield* EventSink;
+    const ingest = yield* Effect.promise(() => import("./ingest.ts"));
+    const driver = options.driver ?? ingest.eventLogDriver;
+    const role = options.role ?? "reader";
+    const dbPath = config.eventLog.duckdbPath;
+    const version = EVENTLOG_SCHEMA_VERSION;
+
+    if (!(yield* attemptIo("inventory", () => exists(dbPath)))) return { status: "absent", version } as const;
+    if (yield* attemptIo("inventory", () => exists(`${dbPath}.wal`))) {
+      return yield* Effect.fail(failure(
+        "inventory",
+        `${dbPath}.wal exists: the event log was not closed cleanly. Open it once (a refused ingest ` +
+          "connection checkpoints it) and retry; the upgrade copies only a checkpointed file",
+      ));
+    }
+    const found = yield* inspect(driver, dbPath);
+    if (found !== "v1") return { status: found, version } as const;
+
+    const at = new Date(yield* Clock.currentTimeMillis).toISOString();
+    const backupPath = `${dbPath}.v1-${at.replaceAll(":", "-")}.duckdb`;
+    const rebuildPath = `${dbPath}.v2-rebuild.duckdb`;
+    const scratch = [rebuildPath, `${rebuildPath}.wal`];
+
+    const emit = (level: "info" | "error", phase: string, detail: unknown) =>
+      Effect.flatMap(Clock.currentTimeMillis, (millis) =>
+        sink.emit(lifecycleEvent({
+          eventId: crypto.randomUUID(),
+          ts: new Date(millis).toISOString(),
+          level,
+          role,
+          pid: Deno.pid,
+          traceId: `eventlog-upgrade-${at}`,
+          phase,
+          detail,
+        })));
+
+    const upgrade = Effect.gen(function* () {
+      // Leftovers of an earlier, failed attempt are derived data of the upgrade's own making.
+      yield* Effect.forEach(scratch, discard, { discard: true });
+      yield* attemptIo("inventory", () => Deno.copyFile(dbPath, backupPath));
+      const rebuild = yield* Effect.scoped(
+        Effect.flatMap(ingest.makeEventLogIngest({ driver, role }), (service) => service.ingest),
+      ).pipe(
+        Effect.provideService(Config, {
+          ...config,
+          eventLog: { ...config.eventLog, duckdbPath: rebuildPath },
+        }),
+      );
+      const verified = yield* withConnection(
+        driver,
+        rebuildPath,
+        (connection) => verifyAndCarry(connection, dbPath, backupPath, at),
+      );
+      if (yield* attemptIo("commit", () => exists(`${rebuildPath}.wal`))) {
+        return yield* Effect.fail(failure("commit", `${rebuildPath} did not checkpoint on close`));
+      }
+      yield* attemptIo("commit", () => Deno.rename(rebuildPath, dbPath));
+      return { status: "upgraded", fromVersion: 1, version, backupPath, ...verified, rebuild } as const;
+    });
+
+    const report = yield* upgrade.pipe(
+      Effect.onExit((exit) =>
+        Exit.isSuccess(exit)
+          ? Effect.void
+          : Effect.forEach([...scratch, backupPath], discard, { discard: true })
+      ),
+      Effect.tapError((error) =>
+        emit("error", "eventlog-schema-upgrade-refused", {
+          dbPath,
+          fromVersion: 1,
+          toVersion: version,
+          errorTag: error._tag,
+          ingestPhase: error.phase,
+          errorDetail: error.detail,
+        })
+      ),
+    );
+    yield* emit("info", "eventlog-schema-upgraded", {
+      dbPath,
+      fromVersion: 1,
+      toVersion: version,
+      backupPath,
+      eventsVerified: report.eventsVerified,
+      k6PointsCopied: report.k6PointsCopied,
+      linesIngested: report.rebuild.linesIngested,
+      linesRejected: report.rebuild.linesRejected,
+    });
+    return report;
+  });
+}

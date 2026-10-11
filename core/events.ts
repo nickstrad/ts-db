@@ -33,15 +33,21 @@
  * discriminant (`EventRecord["kind"]`, one of the eight event kinds below), so the handler's
  * query/mutation distinction is carried here as `handlerKind` instead.
  *
- * Column mapping for the DuckDB tables in §4.1 (items 11 and 23 need this stated, not inferred):
- * - `handlerKind` → `http_events.kind` (the handler's `query`/`mutation`; §4.3's
- *   `mutation-vs-query-latency` needs it) and, for handler events, `platform_events.kind`.
- * - The union discriminant `kind` (`"http" | "handler" | "sql" | …`) → `platform_events.kind`
- *   in the generic table.
- * - There is no `attrs` field on `EventRecord`, although §4.1's `platform_events` declares
- *   `attrs JSON` and `core/errors.ts` says analysis queries "drill into `attrs.reason`":
- *   today `reason` (and the rest of an error's payload) lands in `errorDetail`, so item 11
- *   should map `errorDetail` → `attrs`.
+ * Column mapping for the DuckDB tables (event-log schema v2, `core/eventlog/ddl.ts`; ADR 0006 records
+ * why it changed from §4.1). Items 23 and 32 need this stated, not inferred:
+ * - `eventId` → `event_id`, in `platform_events` *and* in the record's typed table. It is the record's
+ *   one identity: every typed row joins to exactly one `platform_events` row on `event_id`. `ts` and
+ *   `traceId` are not join keys — many events share both.
+ * - The union discriminant `kind` (`"http" | "handler" | "sql" | …`) → `platform_events.event_kind`,
+ *   for every kind, `handler` included.
+ * - `handlerKind` → `handler_kind` (in `platform_events` for `http` and `handler` records, and in
+ *   `http_events`), through an explicit `query`/`mutation` mapping; any other value is `NULL`.
+ *   §4.3's `mutation-vs-query-latency` needs it.
+ * - There is no `attrs` field on `EventRecord`, although `platform_events` declares `attrs JSON` and
+ *   `core/errors.ts` says analysis queries "drill into `attrs.reason`": `reason` (and the rest of an
+ *   error's payload) lands in `errorDetail`, so `errorDetail` → `attrs` (`detail` for `lifecycle`).
+ * - `backup` records' `emitter`, `runId` and `attempts` → `backup_events.emitter`, `run_id` and
+ *   `attempts`; see `BackupPayload` for what they count.
  */
 import type { AnyError, BackupPhase, HandlerKind, QueueName } from "./errors.ts";
 
@@ -141,11 +147,34 @@ export interface QueuePayload {
   readonly dropped: number;
 }
 
+/**
+ * Which producer wrote a `backup` record. `backups` (`platform/backup.ts`) writes one orchestration
+ * record per phase of a run; `object-store` (`platform/object_store.ts`) writes one transfer record per
+ * object PUT, whoever asked for it. The two never describe the same thing, so neither double-counts the
+ * other.
+ */
+export type BackupEmitter = "backups" | "object-store";
+
+/**
+ * One backup phase (`emitter: "backups"`) or one object transfer (`emitter: "object-store"`).
+ *
+ * Accounting (ADR 0006): a backup run is one `runId`; its phases are its `backups` records, exactly one
+ * per phase reached; its transfers are its `object-store` records, one per PUT, each linked to the phase
+ * that issued it by `(runId, key)`. Retries are inside a transfer (`attempts - 1`), never extra records.
+ */
 export interface BackupPayload {
   readonly phase: BackupPhase;
+  readonly emitter: BackupEmitter;
+  /** The backup run (one `Backups.take`). Absent on a transfer issued outside any run. */
+  readonly runId?: string;
   readonly key?: string;
   readonly bytes?: number;
   readonly sha256?: string;
+  /**
+   * `object-store` only: requests sent to the backend for this one operation — 1 plus retries, or 0
+   * when the key was rejected before anything was sent.
+   */
+  readonly attempts?: number;
   readonly durationMs: number;
   readonly outcome: Outcome;
   readonly errorTag?: string;
@@ -328,7 +357,19 @@ const KIND_KEYS: Record<EventRecord["kind"], readonly string[]> = {
   ],
   tx: ["engine", "outcome", "operations", "durationMs", "queueWaitMs", "errorTag", "errorDetail"],
   queue: ["queue", "depth", "cap", "event", "dropped"],
-  backup: ["phase", "key", "bytes", "sha256", "durationMs", "outcome", "errorTag", "errorDetail"],
+  backup: [
+    "phase",
+    "emitter",
+    "runId",
+    "key",
+    "bytes",
+    "sha256",
+    "attempts",
+    "durationMs",
+    "outcome",
+    "errorTag",
+    "errorDetail",
+  ],
   lifecycle: ["phase", "detail"],
   ingest: ["sourceFile", "bytesIngested", "runId", "status", "errorTag", "errorDetail"],
 };

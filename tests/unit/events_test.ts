@@ -105,18 +105,36 @@ test("queue event: golden fixture", () => {
   assert.equal(toJsonLine(record), expected);
 });
 
-test("backup event: golden fixture", () => {
+test("backup event: golden fixture (an object-store transfer record)", () => {
   const record = backupEvent({
     ...envelope,
     phase: "put-object",
+    emitter: "object-store",
+    runId: "run-7",
     key: "backups/app-1/2026-10-10.sqlite",
     bytes: 4096,
-    sha256: "deadbeef",
+    attempts: 2,
     durationMs: 120,
     outcome: "ok",
   });
   const expected =
-    '{"eventId":"evt-1","ts":"2026-10-10T12:00:00.000Z","level":"info","role":"server","pid":4242,"traceId":"trace-1","spanId":"span-1","parentSpanId":"span-0","appId":"app-1","kind":"backup","phase":"put-object","key":"backups/app-1/2026-10-10.sqlite","bytes":4096,"sha256":"deadbeef","durationMs":120,"outcome":"ok","errorTag":null,"errorDetail":null}';
+    '{"eventId":"evt-1","ts":"2026-10-10T12:00:00.000Z","level":"info","role":"server","pid":4242,"traceId":"trace-1","spanId":"span-1","parentSpanId":"span-0","appId":"app-1","kind":"backup","phase":"put-object","emitter":"object-store","runId":"run-7","key":"backups/app-1/2026-10-10.sqlite","bytes":4096,"sha256":null,"attempts":2,"durationMs":120,"outcome":"ok","errorTag":null,"errorDetail":null}';
+  assert.equal(toJsonLine(record), expected);
+});
+
+test("backup event: golden fixture (a Backups phase record)", () => {
+  const record = backupEvent({
+    ...envelope,
+    phase: "hash",
+    emitter: "backups",
+    runId: "run-7",
+    bytes: 4096,
+    sha256: "deadbeef",
+    durationMs: 3,
+    outcome: "ok",
+  });
+  const expected =
+    '{"eventId":"evt-1","ts":"2026-10-10T12:00:00.000Z","level":"info","role":"server","pid":4242,"traceId":"trace-1","spanId":"span-1","parentSpanId":"span-0","appId":"app-1","kind":"backup","phase":"hash","emitter":"backups","runId":"run-7","key":null,"bytes":4096,"sha256":"deadbeef","attempts":null,"durationMs":3,"outcome":"ok","errorTag":null,"errorDetail":null}';
   assert.equal(toJsonLine(record), expected);
 });
 

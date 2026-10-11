@@ -1,6 +1,8 @@
 /**
- * Unit tests for the DuckDB event log (plan item 21): `core/eventlog/*` and `EventLogIngestLive`
- * against a real, persistent DuckDB file and a real `LOG_DIR` tree in a temp directory.
+ * Unit tests for the DuckDB event log (plan items 21 and 35): `core/eventlog/*`, `EventLogIngestLive`
+ * and the v1 → v2 schema upgrade, against a real, persistent DuckDB file and a real `LOG_DIR` tree in a
+ * temp directory. Every item-35 assertion about the tables goes through `makeEventLogIngest`, the
+ * entry the reader uses, so a DDL or mapping change that ingest cannot run fails here.
  *
  * DuckDB runs in this (shared) test process. That is safe here, unlike `reader_test.ts`'s
  * in-process half: the hazard ADR 0001 describes is DuckDB's `sqlite` extension sharing an address
@@ -12,12 +14,14 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { DuckDBInstance } from "@duckdb/node-api";
 import { Effect, Either, Layer, Ref, TestClock, TestContext } from "effect";
 import type { IngestError } from "../../core/errors.ts";
 import {
   backupEvent,
+  type BackupEventRecord,
   type EventEnvelope,
   type EventRecord,
   handlerEvent,
@@ -30,7 +34,7 @@ import {
   toJsonLine,
   txEvent,
 } from "../../core/events.ts";
-import { EVENT_TABLES } from "../../core/eventlog/ddl.ts";
+import { EVENT_TABLES, EVENTLOG_SCHEMA_VERSION, TYPED_EVENT_TABLES } from "../../core/eventlog/ddl.ts";
 import { completeLines, decide, type IngestStateRow, parseSourceFile } from "../../core/eventlog/offsets.ts";
 import { ConfigTest } from "../../platform/config.ts";
 import { EventSink, type IngestReport } from "../../platform/services.ts";
@@ -41,7 +45,13 @@ import {
   type EventLogIngestOptions,
   makeEventLogIngest,
 } from "../../platform/eventlog/ingest.ts";
-import { repairLoneSurrogates } from "../../platform/eventlog/tables.ts";
+import {
+  type EventLogSchemaStatus,
+  type EventLogUpgradeReport,
+  inspectEventLogSchema,
+  repairLoneSurrogates,
+  upgradeEventLog,
+} from "../../platform/eventlog/tables.ts";
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -225,9 +235,11 @@ function serverFixture(): EventRecord[] {
     backupEvent({
       ...envelope("s-backup", "server", 6),
       phase: "put-object",
+      emitter: "object-store",
+      runId: "run-1",
       key: "snapshots/column/1.sqlite",
       bytes: 4096,
-      sha256: "ab".repeat(32),
+      attempts: 1,
       durationMs: 12,
       outcome: "ok",
     }),
@@ -335,12 +347,13 @@ test("columns follow the documented mapping from event records", async () => {
 
     const [http] = await query(
       world,
-      "SELECT CAST(ts AS VARCHAR) AS ts, method, kind, name, status, duration_ms, bytes_in, bytes_out FROM http_events",
+      "SELECT event_id, CAST(ts AS VARCHAR) AS ts, method, handler_kind, name, status, duration_ms, bytes_in, bytes_out FROM http_events",
     );
     assert.deepEqual(http, {
+      event_id: "s-http",
       ts: "2026-10-10 12:00:01",
       method: "POST",
-      kind: "mutation",
+      handler_kind: "mutation",
       name: "makeMove",
       status: 200,
       duration_ms: 4.5,
@@ -350,32 +363,44 @@ test("columns follow the documented mapping from event records", async () => {
 
     const generic = await query(
       world,
-      `SELECT event_id, kind, name, outcome, error_tag, CAST(attrs AS VARCHAR) AS attrs, source_offset, pid
+      `SELECT event_id, event_kind, handler_kind, name, outcome, error_tag, CAST(attrs AS VARCHAR) AS attrs,
+         source_offset, pid
        FROM platform_events WHERE source_file = '${SERVER_FILE}' ORDER BY source_offset`,
     );
     const firstLineBytes = new TextEncoder().encode(toJsonLine(serverFixture()[0]) + "\n").length;
     assert.equal(generic[0].source_offset, 0n);
     assert.equal(generic[1].source_offset, BigInt(firstLineBytes));
-    // A handler record's generic `kind` is its handlerKind; attrs carries errorDetail.
+    // A handler record keeps `handler` as its event_kind; its query/mutation is handler_kind. attrs
+    // carries errorDetail.
     assert.deepEqual(
       {
-        kind: generic[1].kind,
+        eventKind: generic[1].event_kind,
+        handlerKind: generic[1].handler_kind,
         name: generic[1].name,
         outcome: generic[1].outcome,
         tag: generic[1].error_tag,
       },
-      { kind: "query", name: "getGame", outcome: "error", tag: "NotFoundError" },
+      { eventKind: "handler", handlerKind: "query", name: "getGame", outcome: "error", tag: "NotFoundError" },
     );
     assert.deepEqual(JSON.parse(String(generic[1].attrs)), { id: "g-1", table: "games" });
     assert.equal(generic[0].pid, 4242);
-    assert.deepEqual(generic.map((row) => row.kind), [
+    assert.deepEqual(generic.map((row) => row.event_kind), [
       "http",
-      "query",
+      "handler",
       "sql",
       "tx",
       "queue",
       "backup",
       "lifecycle",
+    ]);
+    assert.deepEqual(generic.map((row) => row.handler_kind), [
+      "mutation",
+      "query",
+      null,
+      null,
+      null,
+      null,
+      null,
     ]);
     assert.deepEqual(generic.map((row) => row.name), [
       "makeMove",
@@ -403,9 +428,28 @@ test("columns follow the documented mapping from event records", async () => {
     assert.deepEqual(tx, { outcome: "rollback", operations: 1, error_tag: "ReaderError" });
     const [ingested] = await query(
       world,
-      "SELECT kind, name, outcome FROM platform_events WHERE event_id = 'r-ingest'",
+      "SELECT event_kind, handler_kind, name, outcome FROM platform_events WHERE event_id = 'r-ingest'",
     );
-    assert.deepEqual(ingested, { kind: "ingest", name: SERVER_FILE, outcome: "ok" });
+    assert.deepEqual(ingested, {
+      event_kind: "ingest",
+      handler_kind: null,
+      name: SERVER_FILE,
+      outcome: "ok",
+    });
+    const [backup] = await query(
+      world,
+      "SELECT event_id, phase, emitter, run_id, key, bytes, attempts, outcome FROM backup_events",
+    );
+    assert.deepEqual(backup, {
+      event_id: "s-backup",
+      phase: "put-object",
+      emitter: "object-store",
+      run_id: "run-1",
+      key: "snapshots/column/1.sqlite",
+      bytes: 4096n,
+      attempts: 1,
+      outcome: "ok",
+    });
   });
 });
 
@@ -860,6 +904,636 @@ test("integers are exact or NULL, never silently rounded; timestamp offsets are 
     assert.deepEqual(rows.map((row) => row.bytes), [...cases.map(([, expected]) => expected), 1n]);
     assert.equal(rows[0].ts, "2026-10-10 12:00:00");
     assert.equal(rows[cases.length].ts, "2026-10-10 10:00:00");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Item 35: event identity — exact typed-to-canonical joins
+// ---------------------------------------------------------------------------
+
+/**
+ * Per typed table: its rows; those whose `event_id` matches exactly one `platform_events` row, of the
+ * table's kind; the canonical rows of that kind; and those with exactly one typed row.
+ */
+async function joinReport(world: World): Promise<Record<string, number[]>> {
+  const out: Record<string, number[]> = {};
+  for (const [table, kind] of Object.entries(TYPED_EVENT_TABLES)) {
+    const [row] = await query(
+      world,
+      `SELECT
+        (SELECT count(*) FROM ${table}) AS typed,
+        (SELECT count(*) FROM ${table} t WHERE t.event_id IS NOT NULL
+          AND (SELECT count(*) FROM platform_events p WHERE p.event_id = t.event_id) = 1
+          AND (SELECT any_value(p.event_kind) FROM platform_events p WHERE p.event_id = t.event_id) = '${kind}'
+        ) AS typed_exact,
+        (SELECT count(*) FROM platform_events WHERE event_kind = '${kind}') AS canonical,
+        (SELECT count(*) FROM platform_events p WHERE p.event_kind = '${kind}'
+          AND (SELECT count(*) FROM ${table} t WHERE t.event_id = p.event_id) = 1) AS canonical_exact`,
+    );
+    out[table] = [
+      Number(row.typed),
+      Number(row.typed_exact),
+      Number(row.canonical),
+      Number(row.canonical_exact),
+    ];
+  }
+  return out;
+}
+
+/** Asserts every typed row joins one canonical row and vice versa; returns the typed row counts. */
+async function assertExactJoins(world: World): Promise<Record<string, number>> {
+  const report = await joinReport(world);
+  const counts: Record<string, number> = {};
+  for (const [table, [typed, typedExact, canonical, canonicalExact]] of Object.entries(report)) {
+    assert.deepEqual([typedExact, canonical, canonicalExact], [typed, typed, typed], table);
+    counts[table] = typed;
+  }
+  const duplicates = await query(
+    world,
+    "SELECT event_id FROM platform_events GROUP BY 1 HAVING count(*) > 1",
+  );
+  assert.deepEqual(duplicates, [], "no event_id is canonical twice");
+  return counts;
+}
+
+test("every typed row joins exactly one canonical row on event_id; ts and trace_id are not join keys", async () => {
+  await withWorld(async (world) => {
+    // Two SQL events with the same ts, trace and app: only event_id tells them apart.
+    const twin = (id: string, table: string) =>
+      sqlEvent({
+        ...envelope(id, "server", 40),
+        engine: "sqlite",
+        dialect: "sqlite",
+        statementKind: "select",
+        tableName: table,
+        sqlText: `SELECT * FROM ${table}`,
+        bindCount: 0,
+        durationMs: 1,
+        outcome: "ok",
+      });
+    await writeSource(
+      world,
+      SERVER_FILE,
+      lines([...serverFixture(), twin("twin-a", "games"), twin("twin-b", "moves")]),
+    );
+    await writeSource(world, READER_FILE, lines(readerFixture()));
+    await ingest(world, T0);
+
+    assert.deepEqual(await assertExactJoins(world), {
+      sql_events: 4,
+      tx_events: 2,
+      http_events: 1,
+      queue_events: 1,
+      backup_events: 1,
+      lifecycle_events: 1,
+    });
+    const [byTime] = await query(
+      world,
+      `SELECT count(*) AS n FROM sql_events s JOIN platform_events p
+         ON p.ts = s.ts AND p.trace_id = s.trace_id AND p.event_kind = 'sql' WHERE s.event_id = 'twin-a'`,
+    );
+    assert.equal(byTime.n, 2n, "ts + trace_id matches both twins");
+    const [byId] = await query(
+      world,
+      `SELECT p.source_offset, s.table_name FROM sql_events s JOIN platform_events p USING (event_id)
+       WHERE s.event_id = 'twin-a'`,
+    );
+    assert.equal(byId.table_name, "games");
+
+    // Duplicate ingestion: an unchanged re-run reads nothing; a rewrite that brings back old lines, and
+    // repeats a new one inside the batch, lands each event once.
+    assert.equal((await ingest(world, T0 + 1000)).linesIngested, 0);
+    const again = lifecycleEvent({ ...envelope("s-again", "server", 41), phase: "again" });
+    await writeSource(world, SERVER_FILE, lines([serverFixture()[2], again, twin("twin-a", "games"), again]));
+    assert.equal((await ingest(world, T0 + 2000)).linesIngested, 1);
+    assert.equal((await assertExactJoins(world)).lifecycle_events, 2);
+    assert.equal((await counts(world)).platform_events, 13);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Item 35: event_kind / handler_kind taxonomy and outcomes
+// ---------------------------------------------------------------------------
+
+test("event_kind and handler_kind are separate columns, mapped explicitly; rollback and error outcomes survive", async () => {
+  await withWorld(async (world) => {
+    const handler = (
+      id: string,
+      handlerKind: "query" | "mutation",
+      outcome: "ok" | "error",
+      errorTag?: string,
+    ) =>
+      handlerEvent({ ...envelope(id, "server", 1), handlerKind, name: id, outcome, durationMs: 1, errorTag });
+    const http = (id: string, handlerKind: "query" | "mutation", status: number, errorTag?: string) =>
+      httpEvent({
+        ...envelope(id, "server", 2),
+        method: handlerKind === "query" ? "GET" : "POST",
+        path: `/apps/column/${handlerKind}/${id}`,
+        handlerKind,
+        name: id,
+        status,
+        durationMs: 1,
+        bytesIn: 0,
+        bytesOut: 0,
+        errorTag,
+      });
+    const tx = (id: string, outcome: "commit" | "rollback" | "interrupted", errorTag?: string) =>
+      txEvent({
+        ...envelope(id, "server", 3),
+        engine: "sqlite",
+        outcome,
+        operations: 1,
+        durationMs: 1,
+        queueWaitMs: 0,
+        errorTag,
+      });
+    const raw = (id: string, fields: string) =>
+      `{"eventId":"${id}","ts":"2026-10-10T12:00:04.000Z","level":"info","role":"server","pid":1,"traceId":"t",${fields}}\n`;
+    await writeSource(
+      world,
+      SERVER_FILE,
+      lines([
+        handler("h-query", "query", "ok"),
+        handler("h-mutation", "mutation", "error", "ConflictError"),
+        http("w-query", "query", 200),
+        http("w-mutation", "mutation", 409, "ConflictError"),
+        tx("t-commit", "commit"),
+        tx("t-rollback", "rollback", "ConflictError"),
+        tx("t-interrupted", "interrupted"),
+      ]) +
+        // Not a handler kind the platform knows: kept as a handler event, handler_kind NULL.
+        raw(
+          "h-odd",
+          `"kind":"handler","handlerKind":"subscription","name":"h-odd","outcome":"ok","durationMs":1`,
+        ) +
+        // Legacy JSONL shaped after §4.1's original field list: the handler's kind in `kind` itself.
+        raw(
+          "h-legacy",
+          `"kind":"mutation","name":"h-legacy","outcome":"error","durationMs":1,"errorTag":"SchemaError"`,
+        ),
+    );
+    await ingest(world, T0);
+
+    const canonical = await query(
+      world,
+      `SELECT event_id, event_kind, handler_kind, name, outcome, error_tag FROM platform_events ORDER BY source_offset`,
+    );
+    assert.deepEqual(
+      canonical.map((r) => [r.event_id, r.event_kind, r.handler_kind, r.outcome, r.error_tag]),
+      [
+        ["h-query", "handler", "query", "ok", null],
+        ["h-mutation", "handler", "mutation", "error", "ConflictError"],
+        ["w-query", "http", "query", "ok", null],
+        ["w-mutation", "http", "mutation", "error", "ConflictError"],
+        ["t-commit", "tx", null, "commit", null],
+        ["t-rollback", "tx", null, "rollback", "ConflictError"],
+        ["t-interrupted", "tx", null, "interrupted", null],
+        ["h-odd", "handler", null, "ok", null],
+        ["h-legacy", "handler", "mutation", "error", "SchemaError"],
+      ],
+    );
+    assert.equal(canonical.find((r) => r.event_id === "h-legacy")?.name, "h-legacy");
+    assert.deepEqual(
+      await query(
+        world,
+        "SELECT event_id, handler_kind, status, error_tag FROM http_events ORDER BY event_id",
+      ),
+      [
+        { event_id: "w-mutation", handler_kind: "mutation", status: 409, error_tag: "ConflictError" },
+        { event_id: "w-query", handler_kind: "query", status: 200, error_tag: null },
+      ],
+    );
+    assert.deepEqual(
+      (await query(world, "SELECT outcome FROM tx_events ORDER BY event_id")).map((r) => r.outcome),
+      ["commit", "interrupted", "rollback"],
+    );
+    // The per-handler question item 23 asks, answered on handler_kind alone — no kind overloading.
+    const perKind = await query(
+      world,
+      `SELECT handler_kind, count(*) AS n, count(*) FILTER (WHERE outcome <> 'ok') AS failed
+       FROM platform_events WHERE event_kind IN ('handler', 'http') AND handler_kind IS NOT NULL
+       GROUP BY 1 ORDER BY 1`,
+    );
+    assert.deepEqual(perKind, [
+      { handler_kind: "mutation", n: 3n, failed: 3n },
+      { handler_kind: "query", n: 2n, failed: 0n },
+    ]);
+    // Every failure, across kinds: the outcome vocabularies item 23 must treat as failed.
+    const [failures] = await query(
+      world,
+      "SELECT count(*) AS n FROM platform_events WHERE outcome IN ('error', 'rollback', 'interrupted')",
+    );
+    assert.equal(failures.n, 5n);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Item 35: backup records — emitter, run and attempts, old and new side by side
+// ---------------------------------------------------------------------------
+
+test("mixed pre-item-35 and current backup records: emitter is explicit or inferred, and one run counts once", async () => {
+  await withWorld(async (world) => {
+    // What items 18 and 19 wrote: no emitter, no runId, no attempts.
+    const legacy = (id: string, phase: string, extra = "") =>
+      `{"eventId":"${id}","ts":"2026-10-09T12:00:00.000Z","level":"info","role":"server","pid":1,"traceId":"old-trace",` +
+      `"appId":"column","kind":"backup","phase":"${phase}","key":null,"bytes":null,"sha256":null,"durationMs":1,` +
+      `"outcome":"ok","errorTag":null,"errorDetail":null${extra}}\n`;
+    const legacyLines = [
+      "snapshot",
+      "verify",
+      "hash",
+      "put-object",
+      "put-object",
+      "put-manifest",
+      "put-object",
+      "publish-latest",
+    ]
+      .map((phase, i) => legacy(`old-${i}`, phase)).join("") +
+      // Backups' own record of an interrupted upload, which item 19 marked `written: "unknown"`.
+      legacy("old-interrupted", "put-object").replace(
+        `"errorTag":null,"errorDetail":null`,
+        `"errorTag":"Interrupted","errorDetail":{"written":"unknown"}`,
+      );
+    const current = (
+      id: string,
+      phase: BackupEventRecord["phase"],
+      emitter: "backups" | "object-store",
+      attempts?: number,
+    ) =>
+      backupEvent({
+        ...envelope(id, "server", 5),
+        phase,
+        emitter,
+        runId: "run-new",
+        key: `k/${id}`,
+        attempts,
+        durationMs: 1,
+        outcome: "ok",
+      });
+    await writeSource(
+      world,
+      SERVER_FILE,
+      legacyLines +
+        lines([
+          current("new-snapshot", "snapshot", "backups"),
+          current("new-put", "put-object", "backups"),
+          current("new-transfer", "put-object", "object-store", 3),
+        ]) +
+        // An emitter this build does not know is not guessed at.
+        legacy("odd-emitter", "hash", `,"emitter":"robot"`),
+    );
+    const report = await ingest(world, T0);
+    assert.equal(report.linesRejected, 0);
+    const rows = await query(
+      world,
+      "SELECT event_id, phase, emitter, run_id, attempts FROM backup_events ORDER BY event_id",
+    );
+    const emitters = Object.fromEntries(rows.map((r) => [r.event_id, r.emitter]));
+    assert.deepEqual(emitters, {
+      "new-put": "backups",
+      "new-snapshot": "backups",
+      "new-transfer": "object-store",
+      "odd-emitter": null,
+      "old-0": "backups",
+      "old-1": "backups",
+      "old-2": "backups",
+      "old-3": "object-store",
+      "old-4": "object-store",
+      "old-5": "backups",
+      "old-6": "object-store",
+      "old-7": "backups",
+      "old-interrupted": "backups",
+    });
+    assert.ok(rows.filter((r) => String(r.event_id).startsWith("old")).every((r) => r.run_id === null));
+    assert.deepEqual(rows.find((r) => r.event_id === "new-transfer"), {
+      event_id: "new-transfer",
+      phase: "put-object",
+      emitter: "object-store",
+      run_id: "run-new",
+      attempts: 3,
+    });
+    assert.deepEqual(await assertExactJoins(world), {
+      sql_events: 0,
+      tx_events: 0,
+      http_events: 0,
+      queue_events: 0,
+      backup_events: 13,
+      lifecycle_events: 0,
+    });
+    // The new run: one run, two phases, one transfer that took three tries.
+    const [run] = await query(
+      world,
+      `SELECT count(DISTINCT run_id) AS runs,
+         count(*) FILTER (WHERE emitter = 'backups') AS phases,
+         count(*) FILTER (WHERE emitter = 'object-store') AS transfers,
+         sum(attempts - 1) FILTER (WHERE emitter = 'object-store') AS retries
+       FROM backup_events WHERE run_id IS NOT NULL`,
+    );
+    assert.deepEqual(run, { runs: 1n, phases: 2n, transfers: 1n, retries: 2n });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Item 35: schema versions — the v1 guard and the v1 → v2 rebuild
+// ---------------------------------------------------------------------------
+
+/** Item 21's DDL, frozen: what every event-log file written before item 35 holds. */
+const V1_DDL = [
+  `CREATE TABLE platform_events (event_id VARCHAR, ts TIMESTAMP, level VARCHAR, role VARCHAR, pid INTEGER,
+    trace_id VARCHAR, span_id VARCHAR, parent_span_id VARCHAR, app_id VARCHAR, kind VARCHAR, name VARCHAR,
+    outcome VARCHAR, error_tag VARCHAR, duration_ms DOUBLE, attrs JSON, source_file VARCHAR, source_offset BIGINT)`,
+  `CREATE TABLE sql_events (ts TIMESTAMP, trace_id VARCHAR, app_id VARCHAR, engine VARCHAR, dialect VARCHAR,
+    statement_kind VARCHAR, table_name VARCHAR, sql_text VARCHAR, bind_count INTEGER, duration_ms DOUBLE,
+    row_count BIGINT, outcome VARCHAR, error_tag VARCHAR)`,
+  `CREATE TABLE tx_events (ts TIMESTAMP, trace_id VARCHAR, app_id VARCHAR, engine VARCHAR, outcome VARCHAR,
+    operations INTEGER, duration_ms DOUBLE, queue_wait_ms DOUBLE, error_tag VARCHAR)`,
+  `CREATE TABLE http_events (ts TIMESTAMP, trace_id VARCHAR, method VARCHAR, path VARCHAR, app_id VARCHAR,
+    kind VARCHAR, name VARCHAR, status INTEGER, duration_ms DOUBLE, bytes_in BIGINT, bytes_out BIGINT,
+    error_tag VARCHAR)`,
+  `CREATE TABLE queue_events (ts TIMESTAMP, queue VARCHAR, depth INTEGER, cap INTEGER, event VARCHAR,
+    dropped BIGINT)`,
+  `CREATE TABLE backup_events (ts TIMESTAMP, app_id VARCHAR, phase VARCHAR, key VARCHAR, bytes BIGINT,
+    sha256 VARCHAR, duration_ms DOUBLE, outcome VARCHAR, error_tag VARCHAR)`,
+  `CREATE TABLE lifecycle_events (ts TIMESTAMP, role VARCHAR, pid INTEGER, phase VARCHAR, detail JSON)`,
+  `CREATE TABLE k6_points (ts TIMESTAMP, run_id VARCHAR, metric VARCHAR, value DOUBLE, scenario VARCHAR,
+    status VARCHAR, trace_id VARCHAR, tags JSON)`,
+  `CREATE TABLE _ingest_state (source_file VARCHAR PRIMARY KEY, bytes_ingested BIGINT, prefix_sha256 VARCHAR,
+    last_ingested_at TIMESTAMP, dedupe BOOLEAN)`,
+];
+
+const sha256Hex = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+const fileSha = async (path: string) => sha256Hex(await Deno.readFile(path));
+
+/**
+ * Writes `sources` as JSONL and builds the v1 file item 21's ingest would have left for them: one
+ * canonical row per record (`kind` the handler's query/mutation for handler records), one typed row
+ * per typed record (no `event_id`), an `_ingest_state` row covering each whole file, and `k6Points`
+ * k6 rows. Closed cleanly, so no WAL remains.
+ */
+async function writeV1World(
+  world: World,
+  sources: Record<string, EventRecord[]>,
+  k6Points = 0,
+): Promise<void> {
+  await Deno.mkdir(join(world.dbPath, ".."), { recursive: true });
+  const instance = await DuckDBInstance.create(world.dbPath);
+  const connection = await instance.connect();
+  try {
+    for (const ddl of V1_DDL) await connection.run(ddl);
+    for (const [file, records] of Object.entries(sources)) {
+      const text = lines(records);
+      await writeSource(world, file, text);
+      let offset = 0;
+      for (const record of records) {
+        const ts = `CAST(${`'${record.ts}'`} AS TIMESTAMPTZ) AT TIME ZONE 'UTC'`;
+        const kind = record.kind === "handler" ? record.handlerKind : record.kind;
+        await connection.run(
+          `INSERT INTO platform_events (event_id, ts, trace_id, kind, source_file, source_offset)
+           VALUES ($1, ${ts}, $2, $3, $4, $5)`,
+          [record.eventId, record.traceId, kind, file, offset],
+        );
+        const typed = Object.entries(TYPED_EVENT_TABLES).find(([, k]) => k === record.kind)?.[0];
+        if (typed !== undefined) await connection.run(`INSERT INTO ${typed} (ts) VALUES (${ts})`);
+        offset += new TextEncoder().encode(toJsonLine(record) + "\n").length;
+      }
+      const bytes = new TextEncoder().encode(text);
+      await connection.run(
+        "INSERT INTO _ingest_state VALUES ($1, $2, $3, TIMESTAMP '2026-10-10 13:00:00', false)",
+        [file, bytes.length, sha256Hex(bytes)],
+      );
+    }
+    for (let i = 0; i < k6Points; i++) {
+      await connection.run(
+        `INSERT INTO k6_points VALUES (TIMESTAMP '2026-10-10 12:00:00', 'k6-run', 'http_req_duration', ${i}, 'mixed',
+          '200', NULL, '{"i":${i}}')`,
+      );
+    }
+  } finally {
+    connection.closeSync();
+    instance.closeSync();
+  }
+}
+
+async function upgradeEither(
+  world: World,
+  atMillis: number,
+  options: Parameters<typeof upgradeEventLog>[0] = {},
+): Promise<Either.Either<EventLogUpgradeReport, IngestError>> {
+  const program = Effect.gen(function* () {
+    const sunk = yield* Ref.make<EventRecord[]>([]);
+    const sink = Layer.succeed(EventSink, {
+      emit: (event: EventRecord) => Ref.update(sunk, (all) => [...all, event]),
+    });
+    yield* TestClock.setTime(atMillis);
+    const result = yield* Effect.either(upgradeEventLog(options)).pipe(
+      Effect.provide(Layer.merge(
+        ConfigTest({ logging: { dir: world.logDir }, eventLog: { duckdbPath: world.dbPath } }),
+        sink,
+      )),
+    );
+    world.events.push(...(yield* Ref.get(sunk)));
+    return result;
+  });
+  return await Effect.runPromise(program.pipe(Effect.provide(TestContext.TestContext)));
+}
+
+async function schemaStatus(world: World): Promise<EventLogSchemaStatus> {
+  return await Effect.runPromise(
+    inspectEventLogSchema().pipe(
+      Effect.provide(ConfigTest({ logging: { dir: world.logDir }, eventLog: { duckdbPath: world.dbPath } })),
+    ),
+  );
+}
+
+/** The event-log directory's file names: the live file and any copies or side files beside it. */
+async function dbDirectory(world: World): Promise<string[]> {
+  const names: string[] = [];
+  for await (const entry of Deno.readDir(join(world.dbPath, ".."))) names.push(entry.name);
+  return names.sort();
+}
+
+const V1_SOURCES = () => ({ [SERVER_FILE]: serverFixture(), [READER_FILE]: readerFixture() });
+
+test("ingest refuses a pre-change (v1) database before touching it, rather than reuse v1 tables", async () => {
+  await withWorld(async (world) => {
+    await writeV1World(world, V1_SOURCES());
+    const before = await fileSha(world.dbPath);
+    assert.equal(await schemaStatus(world), "v1");
+
+    const refused = await ingestEither(world, T0);
+    assert.ok(Either.isLeft(refused));
+    assert.equal(refused.left.phase, "inventory");
+    assert.match(refused.left.detail ?? "", /schema v1 \(unversioned\).*upgradeEventLog/);
+    assert.equal(await fileSha(world.dbPath), before, "the v1 file is byte-for-byte unchanged");
+    assert.deepEqual(await dbDirectory(world), ["events.duckdb"]);
+    // Its offsets are exactly item 21's.
+    assert.deepEqual((await stateRows(world)).map((r) => r.source_file), [READER_FILE, SERVER_FILE]);
+  });
+});
+
+test("upgrade refuses when the retained JSONL cannot rebuild every v1 event; the v1 file and offsets stay as they were", async () => {
+  await withWorld(async (world) => {
+    await writeV1World(world, V1_SOURCES());
+    // Retention gzipped the reader's file after v1 ingested it: `.gz` is not a source.
+    await Deno.rename(join(world.logDir, READER_FILE), join(world.logDir, `${READER_FILE}.gz`));
+    const before = await fileSha(world.dbPath);
+
+    const refused = await upgradeEither(world, T0);
+    assert.ok(Either.isLeft(refused));
+    assert.equal(refused.left.phase, "plan");
+    assert.match(
+      refused.left.detail ?? "",
+      /3 of 10 v1 platform_events rows have no event_id in the rebuild/,
+    );
+    assert.ok(refused.left.detail?.includes(READER_FILE), refused.left.detail);
+    assert.match(refused.left.detail ?? "", /1 v1 'sql' events have no row in the rebuilt sql_events/);
+    assert.match(refused.left.detail ?? "", /1 v1 'tx' events have no row in the rebuilt tx_events/);
+    assert.equal(await fileSha(world.dbPath), before);
+    assert.deepEqual(await dbDirectory(world), ["events.duckdb"], "no side file or copy is left behind");
+    const event = world.events.at(-1);
+    assert.ok(event?.kind === "lifecycle" && event.phase === "eventlog-schema-upgrade-refused");
+    assert.equal(await schemaStatus(world), "v1");
+    assert.ok(Either.isLeft(await ingestEither(world, T0)), "ingest still refuses the v1 file");
+
+    // The source comes back (gunzipped in place): the same upgrade now succeeds.
+    await Deno.rename(join(world.logDir, `${READER_FILE}.gz`), join(world.logDir, READER_FILE));
+    const upgraded = await upgradeEither(world, T0 + 1000);
+    assert.ok(Either.isRight(upgraded) && upgraded.right.status === "upgraded", JSON.stringify(upgraded));
+    assert.equal(upgraded.right.eventsVerified, 10);
+  });
+});
+
+/** Wraps the real driver; every `COMMIT` fails. */
+function alwaysFailingCommitDriver(): EventLogDriver {
+  return {
+    open: async (path) => {
+      const instance = await eventLogDriver.open(path);
+      return {
+        closeSync: () => instance.closeSync(),
+        connect: async () => {
+          const connection = await instance.connect();
+          return {
+            run: (sql, values) =>
+              sql === "COMMIT"
+                ? Promise.reject(new Error("injected commit failure"))
+                : connection.run(sql, values),
+            runAndReadAll: (sql) => connection.runAndReadAll(sql),
+            closeSync: () => connection.closeSync(),
+          };
+        },
+      };
+    },
+  };
+}
+
+test("a rebuild that fails part-way leaves the v1 file untouched and nothing beside it", async () => {
+  await withWorld(async (world) => {
+    await writeV1World(world, V1_SOURCES());
+    const before = await fileSha(world.dbPath);
+    const failed = await upgradeEither(world, T0, { driver: alwaysFailingCommitDriver() });
+    assert.ok(Either.isLeft(failed));
+    assert.equal(failed.left.phase, "commit");
+    assert.equal(await fileSha(world.dbPath), before);
+    assert.deepEqual(await dbDirectory(world), ["events.duckdb"]);
+    assert.equal(await schemaStatus(world), "v1");
+  });
+});
+
+test("upgrade rebuilds v1 through the real ingest, proves it complete, switches, and keeps the original", async () => {
+  await withWorld(async (world) => {
+    await writeV1World(world, V1_SOURCES(), 2);
+    const original = await fileSha(world.dbPath);
+
+    const result = await upgradeEither(world, T0);
+    assert.ok(Either.isRight(result), JSON.stringify(result));
+    const report = result.right;
+    assert.ok(report.status === "upgraded");
+    assert.deepEqual(
+      [
+        report.fromVersion,
+        report.version,
+        report.eventsVerified,
+        report.k6PointsCopied,
+        report.rebuild.linesIngested,
+      ],
+      [1, EVENTLOG_SCHEMA_VERSION, 10, 2, 10],
+    );
+    const backupName = "events.duckdb.v1-2026-10-10T13-00-00.000Z.duckdb";
+    assert.equal(report.backupPath, join(world.dbPath, "..", backupName));
+    assert.deepEqual(await dbDirectory(world), ["events.duckdb", backupName]);
+    assert.equal(await fileSha(report.backupPath), original, "the original is kept byte-for-byte");
+
+    // The live file is v2: stamped, exact joins, the v1 handler event re-mapped, k6 carried over.
+    assert.equal(await schemaStatus(world), "current");
+    const versions = await query(
+      world,
+      `SELECT version, method, CAST(detail AS VARCHAR) AS detail FROM _eventlog_schema ORDER BY method`,
+    );
+    assert.deepEqual(versions.map((r) => [r.version, r.method]), [[2, "create"], [2, "rebuild-from-v1"]]);
+    assert.equal(JSON.parse(String(versions[1].detail)).eventsVerified, 10);
+    assert.deepEqual(await assertExactJoins(world), {
+      sql_events: 2,
+      tx_events: 2,
+      http_events: 1,
+      queue_events: 1,
+      backup_events: 1,
+      lifecycle_events: 1,
+    });
+    const [handler] = await query(
+      world,
+      "SELECT event_kind, handler_kind FROM platform_events WHERE event_id = 's-handler'",
+    );
+    assert.deepEqual(handler, { event_kind: "handler", handler_kind: "query" });
+    assert.equal((await counts(world)).k6_points, 2);
+    const done = world.events.at(-1);
+    assert.ok(done?.kind === "lifecycle" && done.phase === "eventlog-schema-upgraded");
+
+    // The rebuild's offsets cover every source: the next ingest reads nothing, then only appends.
+    assert.equal((await ingest(world, T0 + 1000)).linesIngested, 0);
+    await appendSource(
+      world,
+      SERVER_FILE,
+      lines([lifecycleEvent({ ...envelope("after", "server", 50), phase: "after" })]),
+    );
+    assert.equal((await ingest(world, T0 + 2000)).linesIngested, 1);
+    // Upgrading again is a no-op.
+    const again = await upgradeEither(world, T0 + 3000);
+    assert.ok(Either.isRight(again));
+    assert.deepEqual(again.right, { status: "current", version: EVENTLOG_SCHEMA_VERSION });
+  });
+});
+
+test("a fresh file is stamped v2 once, a missing one is absent, and a file of another version is refused", async () => {
+  await withWorld(async (world) => {
+    assert.equal(await schemaStatus(world), "absent");
+    const absent = await upgradeEither(world, T0);
+    assert.ok(Either.isRight(absent) && absent.right.status === "absent");
+
+    await ingest(world, T0);
+    await ingest(world, T0 + 1000);
+    assert.deepEqual(
+      (await query(world, "SELECT version, method FROM _eventlog_schema")).map((r) => [r.version, r.method]),
+      [[EVENTLOG_SCHEMA_VERSION, "create"]],
+    );
+    for (const table of Object.keys(TYPED_EVENT_TABLES)) {
+      const [first] = await query(
+        world,
+        `SELECT column_name FROM duckdb_columns() WHERE table_name = '${table}' ORDER BY column_index LIMIT 1`,
+      );
+      assert.equal(first.column_name, "event_id", table);
+    }
+    assert.equal(await schemaStatus(world), "current");
+
+    await query(
+      world,
+      "INSERT INTO _eventlog_schema VALUES (3, TIMESTAMP '2027-01-01 00:00:00', 'create', NULL)",
+    );
+    const refused = await ingestEither(world, T0 + 2000);
+    assert.ok(Either.isLeft(refused));
+    assert.match(refused.left.detail ?? "", /schema v3 found; this build reads v2 only/);
+    const upgrade = await upgradeEither(world, T0 + 3000);
+    assert.ok(Either.isLeft(upgrade));
+    assert.match(upgrade.left.detail ?? "", /schema v3/);
   });
 });
 

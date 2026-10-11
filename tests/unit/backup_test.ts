@@ -5,7 +5,9 @@
  * local and inline (owned by this item, per the plan): a `Storage` whose `snapshot` writes a small real
  * SQLite file (or garbage, or blocks on a gate), and an in-memory `ObjectStore` with per-key failure and
  * gate injection. The event-ordering and round-trip tests use the real `StorageLive` and the real
- * `ObjectStoreLocal`, because the no-duplicate-`put-object` contract is about the real store's events.
+ * `ObjectStoreLocal`, because the phase-versus-transfer accounting (item 35, ADR 0006) is about the real
+ * store's events. The accounting test at the end goes further: it serializes a run's events, ingests
+ * them through `makeEventLogIngest`, and counts backups, phases, transfers and retries in DuckDB.
  *
  * The three behaviours the plan calls out get the most attention: a failed snapshot-object upload leaves
  * `latest.json` unchanged; interrupting `take` mid-upload releases the per-app guard and removes the
@@ -20,6 +22,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { DuckDBInstance } from "@duckdb/node-api";
 import { AwsClient } from "aws4fetch";
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Option } from "effect";
 import {
@@ -29,7 +32,7 @@ import {
   SnapshotIntegrityError,
   StorageError,
 } from "../../core/errors.ts";
-import type { BackupEventRecord, EventRecord } from "../../core/events.ts";
+import { type BackupEventRecord, type EventRecord, toJsonLine } from "../../core/events.ts";
 import {
   BackupsLive,
   integrityCheck,
@@ -38,6 +41,7 @@ import {
   verifySnapshot,
 } from "../../platform/backup.ts";
 import { ConfigTest } from "../../platform/config.ts";
+import { makeEventLogIngest } from "../../platform/eventlog/ingest.ts";
 import { makeObjectStoreLocal, makeObjectStoreS3, sha256 } from "../../platform/object_store.ts";
 import {
   Backups,
@@ -257,25 +261,37 @@ test("BackupsLive over real Storage + local ObjectStore: ordered puts, restorabl
     }
 
     const events = backupEvents(run.events);
+    // The store records each transfer as it settles; Backups records the phase that issued it right after.
     assert.deepEqual(
-      events.map((e) => [e.phase, e.key]),
+      events.map((e) => [e.emitter, e.phase, e.key]),
       [
-        ["snapshot", undefined],
-        ["verify", undefined],
-        ["hash", undefined],
-        ["put-object", manifest.key],
-        ["put-object", `${manifest.key}.json`],
-        ["put-manifest", `${manifest.key}.json`],
-        ["put-object", "apps/app/latest.json"],
-        ["publish-latest", "apps/app/latest.json"],
+        ["backups", "snapshot", undefined],
+        ["backups", "verify", undefined],
+        ["backups", "hash", undefined],
+        ["object-store", "put-object", manifest.key],
+        ["backups", "put-object", manifest.key],
+        ["object-store", "put-object", `${manifest.key}.json`],
+        ["backups", "put-manifest", `${manifest.key}.json`],
+        ["object-store", "put-object", "apps/app/latest.json"],
+        ["backups", "publish-latest", "apps/app/latest.json"],
       ],
     );
-    // No duplicates: exactly one event per Backups phase, and one store put-object per object written.
-    for (const phase of ["snapshot", "verify", "hash", "put-manifest", "publish-latest"]) {
-      assert.equal(events.filter((e) => e.phase === phase).length, 1, phase);
+    // One run; exactly one Backups record per phase; one transfer per object written, one attempt each.
+    assert.equal(new Set(events.map((e) => e.runId)).size, 1);
+    assert.ok(events[0].runId !== undefined && events[0].runId !== events[0].traceId);
+    const phases = events.filter((e) => e.emitter === "backups").map((e) => e.phase);
+    assert.deepEqual(phases, ["snapshot", "verify", "hash", "put-object", "put-manifest", "publish-latest"]);
+    const transfers = events.filter((e) => e.emitter === "object-store");
+    assert.deepEqual(transfers.map((e) => e.attempts), [1, 1, 1]);
+    // Each transfer links to the phase that issued it by (runId, key).
+    for (const transfer of transfers) {
+      assert.equal(
+        events.filter((e) => e.emitter === "backups" && e.runId === transfer.runId && e.key === transfer.key)
+          .length,
+        1,
+        transfer.key,
+      );
     }
-    const putKeys = events.filter((e) => e.phase === "put-object").map((e) => e.key);
-    assert.equal(new Set(putKeys).size, 3);
     assert.ok(events.every((e) => e.outcome === "ok" && e.level === "info" && e.durationMs >= 0));
     // Every event of the run, the store's included, joins on appId and one traceId.
     assert.ok(events.every((e) => e.appId === "app"));
@@ -323,7 +339,14 @@ test("a put failure on the snapshot object leaves latest.json unchanged", async 
   assert.equal(store.puts.length, 1, "nothing is uploaded after the failed object put");
   assert.deepEqual([...store.objects.keys()], ["apps/app/latest.json"]);
   assert.ok(!existsSync(dirname(storage.paths[0])));
-  assert.deepEqual(backupEvents(events).map((e) => e.phase), ["snapshot", "verify", "hash"]);
+  // The failed phase is recorded once, by Backups (this stub store records no transfers).
+  assert.deepEqual(backupEvents(events).map((e) => [e.phase, e.outcome]), [
+    ["snapshot", "ok"],
+    ["verify", "ok"],
+    ["hash", "ok"],
+    ["put-object", "error"],
+  ]);
+  assert.equal(backupEvents(events)[3].errorTag, "ObjectStoreError");
 
   // The guard was released: a retry with a healthy store succeeds and only then advances latest.json.
   store.failWhen(() => false);
@@ -467,8 +490,9 @@ test("interrupting take mid-upload releases the per-app guard and removes the te
   ]);
   assert.equal(trace[3].errorTag, "Interrupted");
   assert.equal(trace[3].level, "warn");
-  // An interrupt can land after the store wrote the object, so the record does not claim it was not.
-  assert.deepEqual(trace[3].errorDetail, { written: "unknown" });
+  assert.equal(trace[3].emitter, "backups");
+  // Whether the object was written is the store's transfer record to say; this phase record makes no claim.
+  assert.equal(trace[3].errorDetail, undefined);
   assert.match(trace[3].key ?? "", /^apps\/app\/.*\.sqlite$/);
   // Guard released: the next take is admitted and completes.
   store.unhang();
@@ -502,7 +526,8 @@ test("interrupted upload over the real ObjectStoreLocal records exactly one put-
       }).pipe(Effect.provide(Layer.mergeAll(store, run.deps))),
     );
     const puts = backupEvents(run.events).filter((e) => e.phase === "put-object");
-    assert.equal(puts.length, 1, "the store emits nothing on interrupt; Backups emits the one event");
+    assert.equal(puts.length, 1, "the store emits no transfer on interrupt; Backups records the one phase");
+    assert.equal(puts[0].emitter, "backups");
     assert.equal(puts[0].errorTag, "Interrupted");
     assert.ok(!existsSync(join(dir, "apps/app/latest.json")));
   } finally {
@@ -604,6 +629,107 @@ test("the guard is a race-free claim: N simultaneous takes while one is in fligh
 });
 
 // ---------------------------------------------------------------------------
+// Accounting through the event log (item 35, ADR 0006)
+// ---------------------------------------------------------------------------
+
+test("ingested, two backups under one caller trace with a retried upload count as 2 runs, 12 phases, 6 transfers, 1 retry", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ts-db-backup-accounting-"));
+  try {
+    const run = collector();
+    // The very first request (the first run's snapshot-object PUT) is throttled once, then everything succeeds.
+    let requests = 0;
+    const s3 = (() => {
+      requests += 1;
+      return Promise.resolve(
+        requests === 1 ? new Response("SlowDown", { status: 503 }) : new Response(null, { status: 200 }),
+      );
+    }) as unknown as typeof fetch;
+    const config = ConfigTest({
+      objectStore: {
+        s3BaseUrl: "https://s3.example.test/bucket",
+        accessKeyId: "AKIDEXAMPLE",
+        secretAccessKey: "secret-example-key",
+        region: "us-east-1",
+      },
+    });
+    const store = makeObjectStoreS3({ fetch: s3, retryBase: "1 millis" }).pipe(
+      Layer.provide(Layer.mergeAll(config, run.deps)),
+    );
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const runner = yield* makeBackupRunner();
+        yield* runner.take("app", stubStorage());
+        yield* runner.take("app", stubStorage());
+      }).pipe(Effect.annotateLogs({ traceId: "nightly" }), Effect.provide(Layer.mergeAll(store, run.deps))),
+    );
+    assert.equal(requests, 7, "six PUTs, one of them twice");
+
+    // Through the real JSONL → DuckDB path, as item 23's queries will see them.
+    const logDir = join(dir, "logs");
+    const source = join(logDir, "server/2026-10-10/events-12-4242-001.jsonl");
+    await Deno.mkdir(dirname(source), { recursive: true });
+    await Deno.writeTextFile(source, run.events.map((event) => toJsonLine(event) + "\n").join(""));
+    const dbPath = join(dir, "events.duckdb");
+    const report = await Effect.runPromise(
+      Effect.scoped(Effect.flatMap(makeEventLogIngest(), (service) => service.ingest)).pipe(
+        Effect.provide(Layer.merge(
+          ConfigTest({ logging: { dir: logDir }, eventLog: { duckdbPath: dbPath } }),
+          Layer.succeed(EventSink, { emit: () => Effect.void }),
+        )),
+      ),
+    );
+    assert.equal(report.linesIngested, 18);
+
+    const instance = await DuckDBInstance.create(dbPath);
+    try {
+      const connection = await instance.connect();
+      try {
+        const read = async (sql: string) => (await connection.runAndReadAll(sql)).getRowObjects();
+        const [totals] = await read(`SELECT
+            count(DISTINCT run_id) AS runs,
+            count(*) FILTER (WHERE emitter = 'backups') AS phases,
+            count(*) FILTER (WHERE emitter = 'backups' AND phase = 'publish-latest' AND outcome = 'ok') AS completed,
+            count(*) FILTER (WHERE emitter = 'object-store') AS transfers,
+            sum(attempts - 1) FILTER (WHERE emitter = 'object-store') AS retries,
+            count(*) FILTER (WHERE phase = 'put-object') AS put_object_rows
+          FROM backup_events`);
+        // `put_object_rows` is what a query blind to `emitter` would count as uploads: 8, for 6 objects.
+        assert.deepEqual(totals, {
+          runs: 2n,
+          phases: 12n,
+          completed: 2n,
+          transfers: 6n,
+          retries: 1n,
+          put_object_rows: 8n,
+        });
+        // The trace cannot tell the two backups apart; run_id can.
+        const [traces] = await read(
+          "SELECT count(DISTINCT p.trace_id) AS n FROM backup_events b JOIN platform_events p USING (event_id)",
+        );
+        assert.equal(traces.n, 1n);
+        // The retried transfer links to exactly the phase that issued it.
+        const retried = await read(`SELECT b.phase, t.attempts, t.outcome
+          FROM backup_events t JOIN backup_events b
+            ON b.run_id = t.run_id AND b.key = t.key AND b.emitter = 'backups'
+          WHERE t.emitter = 'object-store' AND t.attempts > 1`);
+        assert.deepEqual(retried, [{ phase: "put-object", attempts: 2, outcome: "ok" }]);
+        const [perRun] = await read(`SELECT count(*) AS runs FROM (
+            SELECT run_id FROM backup_events GROUP BY run_id
+            HAVING count(*) FILTER (WHERE emitter = 'backups') = 6
+               AND count(*) FILTER (WHERE emitter = 'object-store') = 3)`);
+        assert.equal(perRun.runs, 2n);
+      } finally {
+        connection.closeSync();
+      }
+    } finally {
+      instance.closeSync();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // verifySnapshot / integrityCheck
 // ---------------------------------------------------------------------------
 
@@ -677,7 +803,7 @@ test("real S3: backup round trip over ObjectStoreS3 publishes latest.json last a
   );
   assert.equal(dec.decode(result.latest), JSON.stringify(result.manifest, null, 2));
   assert.equal(await sha256(result.object), result.manifest.sha256);
-  const puts = backupEvents(run.events).filter((e) => e.phase === "put-object").map((e) => e.key);
+  const puts = backupEvents(run.events).filter((e) => e.emitter === "object-store").map((e) => e.key);
   assert.deepEqual(puts, [result.manifest.key, `${result.manifest.key}.json`, `apps/${s3AppId}/latest.json`]);
   const dir = mkdtempSync(join(tmpdir(), "ts-db-s3-restore-"));
   try {
