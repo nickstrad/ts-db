@@ -6,6 +6,7 @@ import { Clock, Effect, Either } from "effect";
 import { AuthError, type StorageError, type TenantError } from "../../core/errors.ts";
 import { type App, Config, type ConfigService, TenantRegistry } from "../services.ts";
 import type { Tenant, TenantRegistryService } from "../tenants/registry.ts";
+import { sessionTenant } from "../auth/service.ts";
 import { TenantContext } from "../tenants/routing.ts";
 
 /** The documented default for every token (`platform/config.ts`). */
@@ -160,6 +161,16 @@ export function resolveRequestTenant(headers: Headers, appId: string) {
     const fail = (reason: AuthError["reason"]) => new AuthError({ scope: "app", appId, reason });
     if (presented._tag !== "token") return yield* fail(presented._tag);
     if (!/^[^\s]+$/.test(presented.token)) return yield* fail("malformed");
+    const configured = yield* Effect.serviceOption(Config);
+    const config = configured._tag === "Some" ? configured.value : undefined;
+    if (config?.tenancy.mode === "better-auth" && !presented.token.startsWith("tsdb_")) {
+      const id = yield* sessionTenant(config.tenancy, presented.token, appId);
+      const tenant = yield* registry.getTenant(id).pipe(
+        Effect.catchIf((error) => error._tag !== "StorageError", () => Effect.fail(fail("mismatch"))),
+      );
+      if (tenant.status !== "active") return yield* fail("mismatch");
+      return tenant.id;
+    }
     const hash = yield* Effect.promise(async () => {
       const digest = await crypto.subtle.digest("SHA-256", encoder.encode(presented.token));
       return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");

@@ -54,6 +54,7 @@ import {
 } from "../../core/errors.ts";
 import { fromPlatformError, httpEvent, type Level } from "../../core/events.ts";
 import { Config, EventSink, IdGen } from "../services.ts";
+import { withAuthDatabase } from "../auth/service.ts";
 import * as handlers from "./handlers.ts";
 import type { Handler, HandlerRequirements, RequestContext } from "./handlers.ts";
 
@@ -270,6 +271,62 @@ export function handle(request: Request): Effect.Effect<Response, never, RouterR
 
     let bytesIn = 0;
     const config = yield* Config;
+    if (config.tenancy.mode === "better-auth" && path.startsWith("/api/auth/")) {
+      // Apply the platform body bound before handing the request to Better Auth.
+      // Never put credential-bearing bodies, headers, or query strings in event logs.
+      const response = yield* Effect.gen(function* () {
+        let authRequest = request;
+        if (request.body !== null) {
+          const parsed = yield* readJsonBody(
+            request,
+            config.server.maxRequestBytes,
+            (n) => void (bytesIn += n),
+          );
+          const headers = new Headers(request.headers);
+          headers.delete("content-length");
+          authRequest = new Request(request.url, {
+            method: request.method,
+            headers,
+            body: JSON.stringify(parsed),
+          });
+        }
+        const response = yield* withAuthDatabase(config.tenancy, (auth) => auth.handler(authRequest));
+        response.headers.set(TRACE_HEADER, traceId);
+        return response;
+      }).pipe(
+        Effect.catchAll((error) => {
+          const status = toHttpStatus(error);
+          return Effect.succeed(Response.json(
+            { error: { tag: error._tag, message: errorMessage(error, status, traceId) } },
+            { status, headers: { [TRACE_HEADER]: traceId } },
+          ));
+        }),
+        Effect.catchAllCause(() =>
+          Effect.succeed(Response.json(
+            { error: { tag: "Defect", message: "internal error" } },
+            { status: 500 },
+          ))
+        ),
+      );
+      const finished = yield* Clock.currentTimeNanos;
+      yield* (yield* EventSink).emit(httpEvent({
+        eventId: yield* (yield* IdGen).next,
+        ts: new Date(Number(finished / 1_000_000n)).toISOString(),
+        level: levelOf(response.status),
+        role: "server",
+        pid: Deno.pid,
+        traceId,
+        method: request.method,
+        path: "/api/auth/*",
+        name: "auth",
+        handlerKind: request.method === "GET" ? "query" : "mutation",
+        status: response.status,
+        durationMs: Number(finished - started) / 1e6,
+        bytesIn,
+        bytesOut: (yield* Effect.promise(() => response.clone().arrayBuffer())).byteLength,
+      }));
+      return response;
+    }
     const body = yield* Effect.cached(
       readJsonBody(request, config.server.maxRequestBytes, (n) => void (bytesIn += n)),
     );
