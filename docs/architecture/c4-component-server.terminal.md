@@ -13,8 +13,8 @@ Audited against landed main `643b706` on 2026-10-11 (item 27). Both formats are 
 ╎  │ [Component]                  │   │ [Component]                  │ ╎
 ╎  │ platform/http/;              │   │ platform/server.ts           │ ╎
 ╎  │ platform/auth/               │   │ Scoped listener, backup and  │ ╎
-╎  │ Named routes, traces,        │   │ ingest timers, reader-exit   │ ╎
-╎  │ tenant/API-key/session       │   │ watch                        │ ╎
+╎  │ Named routes, traces,        │   │ ingest timers, reader        │ ╎
+╎  │ tenant/API-key/session       │   │ supervision                  │ ╎
 ╎  │ authentication               │   └──────────────────────────────┘ ╎
 ╎  └──────────────────────────────┘                                    ╎
 ╎                                                                      ╎
@@ -112,8 +112,8 @@ Audited against landed main `643b706` on 2026-10-11 (item 27). Both formats are 
 | 13 | Backups / ObjectStore        | Storage                      | Consistent VACUUM INTO snapshot                                |
 | 14 | Backups / ObjectStore        | Object storage               | Verified snapshot and manifest publication                     |
 | 15 | TenantRegistry               | Central registry             | Parameterized registry SQL; lazy scoped pool                   |
-| 16 | Server lifecycle             | ReaderClient / ReaderProcess | Ping; hourly ingest; reader-exit watch and finalizer           |
-| 17 | ReaderClient / ReaderProcess | Reader child                 | JSONL RPC; scoped child shutdown                               |
+| 16 | Server lifecycle             | ReaderClient / ReaderProcess | Ping; hourly ingest; reader supervision (restart/backoff)      |
+| 17 | ReaderClient / ReaderProcess | Reader child                 | JSONL RPC; supervised child (restart on exit)                  |
 | 18 | Storage                      | Logger / EventSink           | SQL/tx/queue events                                            |
 | 19 | HTTP API / auth              | Logger / EventSink           | HTTP/handler spans and failures                                |
 | 20 | Server lifecycle             | Logger / EventSink           | Startup/shutdown and timer events                              |
@@ -136,4 +136,5 @@ requests lease handles, and shutdown drains leases before closing them. Retentio
 in the reader, never as server-side DuckDB components. Item 26 removes compatibility wrappers and
 platform/compiler.ts; pure compilation now lives in core/compile/ and introduces no new runtime component.
 HTTP status mapping lives in core/errors.ts. Better Auth connections are bounded to each request/CLI
-operation, separate from the lazy registry pool.
+operation, separate from the lazy registry pool. Reader supervision: unexpected reader exit restarts the child
+with backoff (1s-8s, 502s during the window); more than 5 restarts in 10 minutes gives up and shuts down.

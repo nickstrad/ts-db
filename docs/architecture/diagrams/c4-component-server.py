@@ -17,7 +17,7 @@ NODES = [('http',
   'Server lifecycle',
   'Component',
   'platform/server.ts',
-  'Scoped listener, backup and ingest timers, reader-exit watch',
+  'Scoped listener, backup and ingest timers, reader supervision',
   True),
  ('apps',
   'AppRegistry / AppServices',
@@ -118,8 +118,8 @@ EDGES = [('http', 'apps', 'Resolve app and named handler'),
  ('backup', 'storage', 'Consistent VACUUM INTO snapshot'),
  ('backup', 'objects', 'Verified snapshot and manifest publication'),
  ('tenant', 'pg', 'Parameterized registry SQL; lazy scoped pool'),
- ('life', 'rpc', 'Ping; hourly ingest; reader-exit watch and finalizer'),
- ('rpc', 'reader', 'JSONL RPC; scoped child shutdown'),
+ ('life', 'rpc', 'Ping; hourly ingest; reader supervision (restart/backoff)'),
+ ('rpc', 'reader', 'JSONL RPC; supervised child (restart on exit)'),
  ('storage', 'logging', 'SQL/tx/queue events'),
  ('http', 'logging', 'HTTP/handler spans and failures'),
  ('life', 'logging', 'Startup/shutdown and timer events'),
@@ -129,7 +129,7 @@ EDGES = [('http', 'apps', 'Resolve app and named handler'),
  ('config', 'tenant', 'DATABASE_URL and scope-owned cache'),
  ('config', 'route', 'TENANTS_DIR and router selection'),
  ('config', 'logging', 'Level, queue, flush and rotation settings')]
-NOTES = 'Config is acquired before logging, then IdGen, ObjectStore/AppRegistry, TenantRegistry, AppServices\nand ReaderClient. Shutdown drains HTTP, stops timers, closes reader and DB handles, emits the final\nlifecycle event, then drains logging. Every partial startup releases acquired resources.\nAuth derives TenantContext before consuming app arguments; the trusted reader location is prepared\nbehind a shared initialization barrier. Tenant key revocation invalidates the local cache; other\ninstances converge within its TTL. Tenant-mode writers use a bounded scope-owned handle cache (default 64 handles, 60-second idle expiry);\nrequests lease handles, and shutdown drains leases before closing them.\nRetention and named analysis execute in the reader, never as server-side DuckDB components.\nItem 26 removes compatibility wrappers and platform/compiler.ts; pure compilation now lives in\ncore/compile/ and introduces no new runtime component. HTTP status mapping lives in core/errors.ts.\nBetter Auth connections are bounded to each request/CLI operation, separate from the lazy registry pool.'
+NOTES = 'Config is acquired before logging, then IdGen, ObjectStore/AppRegistry, TenantRegistry, AppServices\nand ReaderClient. Shutdown drains HTTP, stops timers, closes reader and DB handles, emits the final\nlifecycle event, then drains logging. Every partial startup releases acquired resources.\nAuth derives TenantContext before consuming app arguments; the trusted reader location is prepared\nbehind a shared initialization barrier. Tenant key revocation invalidates the local cache; other\ninstances converge within its TTL. Tenant-mode writers use a bounded scope-owned handle cache (default 64 handles, 60-second idle expiry);\nrequests lease handles, and shutdown drains leases before closing them.\nRetention and named analysis execute in the reader, never as server-side DuckDB components.\nItem 26 removes compatibility wrappers and platform/compiler.ts; pure compilation now lives in\ncore/compile/ and introduces no new runtime component. HTTP status mapping lives in core/errors.ts.\nBetter Auth connections are bounded to each request/CLI operation, separate from the lazy registry pool.\nReader supervision: unexpected reader exit restarts the child with backoff (1s-8s, 502s during the window);\nmore than 5 restarts in 10 minutes gives up and shuts down.'
 NAME = 'c4-component-server'
 
 

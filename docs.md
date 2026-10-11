@@ -365,8 +365,8 @@ Each entry follows symptom → cause → fix:
 - **503** → a bounded writer/reader queue is full → reduce concurrency and retry with backoff and
   application-level idempotency; inspect queue-depth analysis.
 - **Reader exited / 502** → reader process or IPC failed (object-store failures also map to 502) → inspect the
-  trace and lifecycle logs. A reader exit makes the server shut down and exit 1; correct the cause and restart
-  the server, or let your supervisor restart both processes together.
+  trace and lifecycle logs. The server restarts an unexpectedly-exited reader with backoff (502s during the
+  few-second window); only after more than 5 restarts in 10 minutes does it give up, shut down and exit 1.
 - **Port already in use / `ListenError`** → another listener owns the address → choose an unused `PORT` or
   stop the conflicting listener you own, then restart.
 - **Offline logs command fails with a lock error** → the live reader owns the derived DuckDB file → use admin
