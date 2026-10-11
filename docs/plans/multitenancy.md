@@ -516,11 +516,12 @@ exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy a
      `docker-compose.yml` (a check in `postgres.ts` fails the run on drift), data on `tmpfs` (no volumes at
      all), the host port published as `127.0.0.1::5432` (ephemeral, read back with `docker compose port`), and
      the same `pg_isready` healthcheck. `postgres.ts` runs it under a unique project name
-     (`tsdb-e2e-<pid>-<seed>`) with `docker compose up -d --wait`, creates one database per scenario, applies
-     `platform/tenants/schema.sql` to each with `docker compose exec -T postgres psql` (the `make db-migrate`
-     recipe, re-pointed — no Makefile edit), applies MT-08's Better Auth migration when the auth gate is open,
-     and tears down with `docker compose down --remove-orphans --volumes`. Docker absent or unhealthy within
-     60 s → the run fails with a clear message; it never skips to green.
+     (`tsdb-e2e-<pid>-<seed>`) with `docker compose up -d --wait`, creates one database per scenario, runs the
+     migration runner (`scripts/db/migrate.ts`, MT-01b) against each with `DATABASE_URL` pointed at the
+     scenario database (the `make db-migrate` recipe, re-pointed — no Makefile edit), applies MT-08's Better
+     Auth migration when the auth gate is open, and tears down with
+     `docker compose down --remove-orphans --volumes`. Docker absent or unhealthy within 60 s → the run fails
+     with a clear message; it never skips to green.
   3. **Harness (`harness.ts`), one server per scenario.** Each scenario gets its own subdirectory of one run
      temp root (`Deno.makeTempDir({ prefix: "tsdb-e2e-" })`) and its own server on a free `127.0.0.1` port,
      spawned with the command the `serve` task runs. Spawn with `clearEnv: true` and an explicit env: `PATH`,
