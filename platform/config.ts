@@ -35,6 +35,7 @@ import {
 const EVENT_LEVELS = ["debug", "info", "warn", "error"] as const;
 const TENANCY_MODES = ["off", "api-key", "better-auth"] as const;
 const ROUTER_KINDS = ["local", "control-plane"] as const;
+const READER_BACKENDS = ["duckdb", "sqlite"] as const;
 const DEV_TOKEN_DEFAULT = "dev-only";
 
 /**
@@ -295,6 +296,16 @@ export const OPTIONS = [
   },
 
   // --- reader ---
+  {
+    name: "readerBackend",
+    envVar: "READER_BACKEND",
+    type: "enum",
+    enumValues: READER_BACKENDS,
+    default: "duckdb",
+    defaultLabel: "duckdb",
+    description:
+      "Temporary migration scaffold to build and prove SQLite parity before removing the DuckDB path; the end state is SQLite only.",
+  },
   {
     name: "readerCallTimeoutMs",
     envVar: "READER_CALL_TIMEOUT_MS",
