@@ -7,7 +7,10 @@
  *
  * 1. The child process, under `Effect.acquireRelease`. Release closes stdin, waits up to
  *    `shutdownTimeout` for a graceful exit, then sends SIGTERM, waits again, then SIGKILL; it
- *    always awaits `child.status`, so closing the scope never leaves a stray process.
+ *    always awaits `child.status`, so closing the scope never leaves a stray process. The child
+ *    runs in its own session (`detached`), so a signal sent to the parent's process group (Ctrl-C,
+ *    `kill -INT -<pgid>`) does not reach it: this scope alone decides when it stops, after
+ *    everything acquired later has released.
  * 2. One `forkScoped` writer fiber draining a `Queue` of request frames into stdin — the only
  *    writer, which is what keeps lines whole without a promise chain.
  * 3. One `forkScoped` receiver fiber decoding stdout with the pure `core/ipc/framing.ts` decoder
@@ -29,12 +32,11 @@
  * - The 1000-call cap is `QueueFullError({ queue: "reader" })`; each call has a timeout
  *   (`IpcError({ reason: "timeout" })`); a timed-out or interrupted call removes its pending entry.
  *
- * The per-call timeout is a layer option: `ConfigService` (owned by item 08, `platform/services.ts`)
- * has no reader-timeout field yet, so the composition root (item 22) passes it in.
+ * The per-call timeout is a layer option; the composition root (`platform/layers.ts`) passes in
+ * `Config.reader.callTimeoutMs` (`READER_CALL_TIMEOUT_MS`).
  *
- * `lines()` and the `ReaderRPC` class are compatibility surfaces for code not yet ported:
- * `platform/reader.ts` (item 16) and `tests/unit/framing_test.ts` use `lines()`, and
- * `platform/server.ts` uses `ReaderRPC` until item 22 composes `ReaderClientLive`.
+ * `lines()` is a compatibility surface for code not yet ported: `platform/reader.ts` (item 16) and
+ * `tests/unit/framing_test.ts` use it.
  */
 import {
   Cause,
@@ -43,14 +45,13 @@ import {
   Duration,
   Effect,
   Either,
-  Exit,
   Fiber,
   HashMap,
   Layer,
   Option,
   Queue,
   Ref,
-  Scope,
+  type Scope,
 } from "effect";
 import { decoder } from "../core/ipc/framing.ts";
 import {
@@ -81,7 +82,6 @@ import {
   lifecycleEvent,
   queueEvent,
   type Role,
-  toJsonLine,
 } from "../core/events.ts";
 import {
   EventSink,
@@ -278,6 +278,8 @@ export function makeReaderConnection(
           stdin: "piped",
           stdout: "piped",
           stderr: "inherit",
+          // Own process group: group signals stop the parent, which then stops the child in order.
+          detached: true,
         }).spawn();
         return {
           child,
@@ -596,53 +598,4 @@ function eventEmitter(sink: EventSinkService, role: Role, traceId: string) {
           traceId,
         }))),
   };
-}
-
-// ===========================================================================
-// ReaderRPC — TEMPORARY BRIDGE for `platform/server.ts` until item 22 composes `ReaderClientLive`
-// ===========================================================================
-
-/** Bridge sink: no `EventSink` exists in the unported server, so warnings go to stderr as JSONL. */
-const stderrSink: EventSinkService = {
-  emit: (event) =>
-    Effect.sync(() => {
-      if (event.level === "warn" || event.level === "error") console.error(toJsonLine(event));
-    }),
-};
-
-/** Today's `Error` messages, so the server's `e.message` → HTTP 400 body is unchanged. */
-function legacyError(error: CallError): Error {
-  switch (error._tag) {
-    case "ReaderExitedError":
-      return new Error(`Reader exited: ${error.code}`, { cause: error });
-    case "QueueFullError":
-      return new Error("Reader queue full", { cause: error });
-    case "IpcError":
-      return new Error(error.detail ?? `IPC ${error.reason}`, { cause: error });
-    default:
-      return error.message ? error : new Error(error._tag, { cause: error });
-  }
-}
-
-export class ReaderRPC {
-  private readonly scope = Effect.runSync(Scope.make());
-  private readonly connection: Promise<ReaderConnection>;
-  constructor(module: string) {
-    this.connection = Effect.runPromise(
-      makeReaderConnection({ module }).pipe(
-        Scope.extend(this.scope),
-        Effect.provideService(EventSink, stderrSink),
-      ),
-    );
-  }
-  async call(request: ReaderRequest): Promise<unknown> {
-    const connection = await this.connection;
-    const result = await Effect.runPromise(Effect.either(connection.call(request)));
-    if (Either.isLeft(result)) throw legacyError(result.left);
-    return result.right;
-  }
-  async close(): Promise<void> {
-    await this.connection;
-    await Effect.runPromise(Scope.close(this.scope, Exit.void));
-  }
 }

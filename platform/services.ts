@@ -198,9 +198,15 @@ export interface EventLogConfig {
   readonly duckdbPath: string;
 }
 
+/** The server's side of the reader IPC (item 17's `ReaderClientLive`, wired by item 22). */
+export interface ReaderConfig {
+  /** `READER_CALL_TIMEOUT_MS`. Per-call deadline; a call with no reply by then fails `IpcError("timeout")`. */
+  readonly callTimeoutMs: number;
+}
+
 /**
  * The whole configuration, read once at layer construction. `platform/config.ts` is the only module
- * permitted to touch `Deno.env` after item 22 lands.
+ * permitted to read the process environment.
  */
 export interface ConfigService {
   readonly server: ServerConfig;
@@ -209,6 +215,7 @@ export interface ConfigService {
   readonly logging: LoggingConfig;
   readonly objectStore: ObjectStoreConfig;
   readonly eventLog: EventLogConfig;
+  readonly reader: ReaderConfig;
 }
 
 /** Live: `ConfigLive` (env, item 08). Test: `ConfigTest(overrides)`. */

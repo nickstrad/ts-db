@@ -1,31 +1,124 @@
+/**
+ * The deployment registry (plan item 22, work 1): which apps this process serves, where their files
+ * live, and the per-app services built over them.
+ *
+ * - `AppRegistryLive` is the `AppRegistry` service over `Config`. The registry is a deployment
+ *   decision, never a path supplied by an HTTP caller; `Config.apps` lists the apps and their
+ *   tokens, and each app's SQLite file sits under `Config.server.dataDir`.
+ * - `AppServices` is the per-app half: one `Storage` (and the `Backups` bound to it) per app, because
+ *   the writer owns one `DatabaseSync` handle per file (`platform/services.ts`, `Storage`). The live
+ *   layer is built in `platform/layers.ts`; the HTTP router only sees this tag, so a test supplies
+ *   in-memory stacks and a later tenancy layer (multitenancy plan MT-03/MT-07) can resolve stacks by
+ *   tenant behind the same `get`.
+ *
+ * The pre-port `trace()` helper is gone: SQL tracing is the `sql` event kind at the `TRACE_SQL`
+ * level (`Config.logging.traceSql`), written by the event log rather than to stderr.
+ */
 import { resolve } from "node:path";
-import { schema } from "../app/schema.ts";
+import { Context, Effect, Layer } from "effect";
+import { UnknownAppError } from "../core/errors.ts";
+import { withStorage } from "../core/schema.ts";
 import { functions } from "../app/functions.ts";
-import { withStorage } from "../sdk/schema.ts";
-import type { SQL } from "./compiler.ts";
+import { schema } from "../app/schema.ts";
+import { ConfigLive } from "./config.ts";
+import {
+  type App,
+  AppRegistry,
+  type AppRegistryService,
+  type BackupsService,
+  Config,
+  type ConfigService,
+  type StorageService,
+} from "./services.ts";
 
-// A deployment registry, not a path supplied by an HTTP caller.
-// These two independent apps happen to run exactly the same application code.
-export function loadApps() {
-  const data = resolve(Deno.env.get("DATA_DIR") ?? "./data");
-  return new Map([
-    ["tic-tac-toe", {
-      id: "tic-tac-toe",
-      file: resolve(data, "tic-tac-toe.sqlite"),
-      schema,
-      functions,
-      token: Deno.env.get("COLUMN_APP_TOKEN") ?? "dev-only",
-    }],
-    ["tic-tac-toe-json", {
-      id: "tic-tac-toe-json",
-      file: resolve(data, "tic-tac-toe-json.sqlite"),
-      schema: withStorage(schema, "json"),
-      functions,
-      token: Deno.env.get("JSON_APP_TOKEN") ?? "dev-only",
-    }],
-  ]);
+/**
+ * The registered apps, in `Config.apps` order. Both apps run the same tic-tac-toe code; they differ
+ * only in physical layout (`columns` or `json`), file, and token.
+ */
+export function appsFromConfig(config: ConfigService): readonly App[] {
+  return config.apps.map((app) => ({
+    id: app.id,
+    file: resolve(config.server.dataDir, `${app.id}.sqlite`),
+    schema: withStorage(schema, app.storage),
+    functions,
+    token: app.token,
+  }));
 }
-export function trace(engine: "sqlite" | "duckdb", sql: SQL) {
-  // stderr: stdout in the reader is reserved for the RPC protocol.
-  if (Deno.env.get("TRACE_SQL") === "1") console.error(JSON.stringify({ engine, ...sql }));
+
+/** An `AppRegistryService` over a fixed list. Ids are matched exactly; the first entry for an id wins. */
+export function makeAppRegistry(apps: readonly App[]): AppRegistryService {
+  const byId = new Map<string, App>();
+  for (const app of apps) if (!byId.has(app.id)) byId.set(app.id, app);
+  const all = Effect.succeed([...byId.values()] as readonly App[]);
+  return {
+    get: (id) => {
+      const app = byId.get(id);
+      return app ? Effect.succeed(app) : Effect.fail(new UnknownAppError({ appId: id }));
+    },
+    all,
+  };
+}
+
+/** Live: the apps `Config` declares. Reads no environment of its own. */
+export const AppRegistryLive: Layer.Layer<AppRegistry, never, Config> = Layer.effect(
+  AppRegistry,
+  Effect.map(Config, (config) => makeAppRegistry(appsFromConfig(config))),
+);
+
+/** A fixed registry, for tests and for compositions that do not read `Config`. */
+export function AppRegistryTest(apps: readonly App[]): Layer.Layer<AppRegistry> {
+  return Layer.succeed(AppRegistry, makeAppRegistry(apps));
+}
+
+// ===========================================================================
+// AppServices — the per-app service stacks
+// ===========================================================================
+
+/** One app's write-side services. `backups.take` snapshots exactly this `storage`. */
+export interface AppStack {
+  readonly app: App;
+  readonly storage: StorageService;
+  readonly backups: BackupsService;
+}
+
+export interface AppServicesService {
+  /** The stack for `appId`, or `UnknownAppError` if this process serves no such app. */
+  get(appId: string): Effect.Effect<AppStack, UnknownAppError>;
+  /** Every stack, in registry order. The backup timer sweeps these one at a time. */
+  readonly all: readonly AppStack[];
+}
+
+/**
+ * Live: built per app by `AppServicesLive` in `platform/layers.ts` (one scoped `StorageLive` +
+ * `BackupsLive` per app). Test: `makeAppServices` over `StorageTest`-backed stacks.
+ */
+export class AppServices extends Context.Tag("ts-db/AppServices")<AppServices, AppServicesService>() {}
+
+/** An `AppServicesService` over already-built stacks. */
+export function makeAppServices(stacks: readonly AppStack[]): AppServicesService {
+  const byId = new Map(stacks.map((stack) => [stack.app.id, stack] as const));
+  return {
+    get: (appId) => {
+      const stack = byId.get(appId);
+      return stack ? Effect.succeed(stack) : Effect.fail(new UnknownAppError({ appId }));
+    },
+    all: stacks,
+  };
+}
+
+// ===========================================================================
+// COMPATIBILITY WRAPPER — for `platform/reader.ts` (item 16) until it reads `AppRegistry`
+// ===========================================================================
+
+/**
+ * The pre-port `Map` of apps, from `ConfigLive` rather than from the environment directly. Throws the
+ * `ConfigError` if the environment does not decode; the reader process has already built
+ * `ConfigLive` successfully by the time it calls this.
+ *
+ * @deprecated Use the `AppRegistry` tag (`AppRegistryLive`). Kept only because `platform/reader.ts`
+ * is outside item 22's file set.
+ */
+export function loadApps(): Map<string, App> {
+  const config = Effect.runSync(Effect.provide(Config, ConfigLive));
+  return new Map(appsFromConfig(config).map((app) => [app.id, app] as const));
 }

@@ -47,10 +47,7 @@ import {
   BackupAlreadyRunning,
   BackupError,
   type BackupPhase,
-  InvalidKeyError,
-  ObjectStoreError,
   SnapshotIntegrityError,
-  StorageError,
 } from "../core/errors.ts";
 import {
   backupEvent,
@@ -61,9 +58,7 @@ import {
   lifecycleEvent,
   type Role,
 } from "../core/events.ts";
-import type { Schema } from "../sdk/schema.ts";
-import { type ObjectStore as PromiseObjectStore, sha256 } from "./object_store.ts";
-import type { SQLiteWriter } from "./sqlite.ts";
+import { sha256 } from "./object_store.ts";
 import {
   Backups as BackupsTag,
   type BackupsService,
@@ -71,7 +66,6 @@ import {
   IdGen,
   type Manifest,
   ObjectStore,
-  type ObjectStoreService,
   Storage,
   type StorageService,
 } from "./services.ts";
@@ -412,64 +406,3 @@ export function makeBackupsLive(
 
 export const BackupsLive: Layer.Layer<BackupsTag, never, Storage | ObjectStore | EventSink | IdGen> =
   makeBackupsLive();
-
-// ===========================================================================
-// COMPATIBILITY WRAPPER — removed by item 22 once `platform/server.ts` is ported
-// ===========================================================================
-
-/** The `ObjectStore` service over the transitional Promise facade. Rejections keep their tagged error. */
-function fromPromiseStore(store: PromiseObjectStore): ObjectStoreService {
-  const catcher = (operation: "put" | "get", key: string) => (cause: unknown) =>
-    cause instanceof ObjectStoreError || cause instanceof InvalidKeyError
-      ? cause
-      : new ObjectStoreError({ operation, key, cause, detail: messageOf(cause) });
-  return {
-    put: (key, bytes) => Effect.tryPromise({ try: () => store.put(key, bytes), catch: catcher("put", key) }),
-    get: (key) => Effect.tryPromise({ try: () => store.get(key), catch: catcher("get", key) }),
-  };
-}
-
-/** Renders a typed failure as the `Error` the pre-port class threw. */
-function legacyError(failure: unknown): Error {
-  if (failure instanceof BackupAlreadyRunning) {
-    return new Error("Backup already running for this app", { cause: failure });
-  }
-  if (failure instanceof SnapshotIntegrityError) {
-    return new Error("Snapshot failed integrity check", { cause: failure });
-  }
-  if (failure instanceof BackupError) {
-    return new Error(`Backup failed at ${failure.phase}: ${failure.detail ?? "unknown"}`, { cause: failure });
-  }
-  return failure instanceof Error ? failure : new Error(String(failure));
-}
-
-/**
- * The pre-port API over `makeBackupRunner`: one guard per instance, the writer passed per call, Promise
- * results. Emits no events (the facade store has no `EventSink` either).
- *
- * @deprecated Use `BackupsLive` and the `Backups` tag from `platform/services.ts`.
- */
-export class Backups {
-  private readonly runner: BackupRunner;
-  constructor(store: PromiseObjectStore) {
-    this.runner = Effect.runSync(
-      makeBackupRunner().pipe(
-        Effect.provideService(ObjectStore, fromPromiseStore(store)),
-        Effect.provideService(EventSink, { emit: () => Effect.void }),
-        Effect.provideService(IdGen, { next: Effect.sync(() => crypto.randomUUID()) }),
-      ),
-    );
-  }
-  async take(appId: string, writer: SQLiteWriter<Schema>): Promise<Manifest> {
-    const storage: SnapshotSource = {
-      snapshot: (path) =>
-        Effect.tryPromise({
-          try: () => writer.snapshot(path),
-          catch: (cause) => new StorageError({ operation: "snapshot", detail: messageOf(cause), cause }),
-        }),
-    };
-    const exit = await Effect.runPromiseExit(this.runner.take(appId, storage));
-    if (Exit.isSuccess(exit)) return exit.value;
-    throw legacyError(Cause.squash(exit.cause));
-  }
-}
