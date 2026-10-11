@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
-import { Effect, Either } from "effect";
+import { Deferred, Effect, Either, Fiber, Option } from "effect";
 import { compileDDL } from "../../core/compile/ddl.ts";
 import { compileInsert } from "../../core/compile/write.ts";
 import { schema } from "../../app/schema.ts";
@@ -10,7 +10,11 @@ import { functions } from "../../app/functions.ts";
 import { withStorage } from "../../sdk/schema.ts";
 import { ConfigTest } from "../../platform/config.ts";
 import { AppRegistryTest } from "../../platform/registry.ts";
-import { makeDocumentReaderClient, querySqlite } from "../../platform/document_reader.ts";
+import {
+  DOCUMENT_READ_CONCURRENCY_CAP,
+  makeDocumentReaderClient,
+  querySqlite,
+} from "../../platform/document_reader.ts";
 import { type App, EventSink, type ReaderRequest } from "../../platform/services.ts";
 import { defineFunctions } from "../../sdk/functions.ts";
 
@@ -28,6 +32,105 @@ const game = {
   status: "playing",
   winner: null,
 };
+
+test("document execution is capped, queued reads are interruptible, and health pings stay responsive", async () => {
+  const root = await Deno.makeTempDir({ prefix: "sp05-concurrency-" });
+  const file = join(root, "app.sqlite");
+  const writer = new DatabaseSync(file);
+  try {
+    writer.exec("PRAGMA journal_mode=WAL");
+    for (const ddl of right(compileDDL(schema))) writer.exec(ddl);
+    const insert = right(compileInsert(schema, "games", game, { _id: "game-1", _creationTime: 1 }));
+    writer.prepare(insert.text).run(...insert.values);
+    await Effect.runPromise(
+      Effect.scoped(Effect.gen(function* () {
+        const full = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        let active = 0;
+        let maximum = 0;
+        let entered = 0;
+        const blocking = defineFunctions(schema).query({
+          args: {},
+          handler: ({ db }) =>
+            Effect.acquireUseRelease(
+              Effect.sync(() => {
+                active++;
+                entered++;
+                maximum = Math.max(maximum, active);
+              }),
+              () =>
+                Effect.gen(function* () {
+                  // Simulate a blocking lookup, then keep the handler alive across a yield.
+                  // Purely synchronous JS sections cannot overlap on the same thread.
+                  yield* Effect.sync(() => {
+                    const until = performance.now() + 2;
+                    while (performance.now() < until) { /* blocking SQLite work */ }
+                  });
+                  const row = yield* db.get("games", "game-1");
+                  if (active === DOCUMENT_READ_CONCURRENCY_CAP) yield* Deferred.succeed(full, undefined);
+                  yield* Deferred.await(release);
+                  return { id: row?._id };
+                }),
+              () =>
+                Effect.sync(() => {
+                  active--;
+                }),
+            ),
+        });
+        const app: App = { id: "test", file, schema, functions: { blocking }, token: "" };
+        yield* Effect.gen(function* () {
+          const client = yield* makeDocumentReaderClient({
+            call: (request) => {
+              assert.equal(request.kind, "ping", "document query reached IPC");
+              return Effect.succeed("ready");
+            },
+          });
+          const request = { kind: "query", appId: app.id, name: "blocking", args: {} } as const;
+          const reads = yield* Effect.forkScoped(Effect.all(
+            Array.from({ length: 100 }, () => client.call(request)),
+            { concurrency: "unbounded" },
+          ));
+          yield* Deferred.await(full).pipe(Effect.timeout("2 seconds"));
+          // A timer and the health endpoint's ping must run while the cap is saturated.
+          const ping = yield* Effect.sleep("1 millis").pipe(
+            Effect.zipRight(client.call({ kind: "ping" })),
+            Effect.timeout("1 second"),
+          );
+          assert.equal(ping, "ready");
+          assert.equal(active, DOCUMENT_READ_CONCURRENCY_CAP);
+          assert.equal(entered, DOCUMENT_READ_CONCURRENCY_CAP);
+
+          const waiting = yield* client.call(request).pipe(Effect.timeoutOption("20 millis"));
+          assert.ok(Option.isNone(waiting), "a parked read must be interruptible by a deadline");
+          assert.equal(entered, DOCUMENT_READ_CONCURRENCY_CAP, "cancelled waiter entered the handler");
+          yield* Deferred.succeed(release, undefined);
+          const results = yield* Fiber.join(reads);
+          assert.equal(results.length, 100);
+          assert.ok(results.every((result) => (result as { id: string }).id === "game-1"));
+          assert.ok(maximum > 1, "execution was accidentally serialized");
+          assert.ok(maximum <= DOCUMENT_READ_CONCURRENCY_CAP);
+          assert.equal(active, 0);
+          assert.equal(entered, 100, "cancelled waiter never entered the handler");
+          assert.deepEqual(yield* client.call(request), { id: "game-1" });
+          // Second full wave: proves permits and admission slots fully recovered
+          // after the cancellation above (a leaked `pending` slot would fail here).
+          const wave2 = yield* Effect.all(
+            Array.from({ length: 100 }, () => client.call(request)),
+            { concurrency: "unbounded" },
+          );
+          assert.equal(wave2.length, 100);
+          assert.ok(wave2.every((result) => (result as { id: string }).id === "game-1"));
+        }).pipe(Effect.provide(AppRegistryTest([app])));
+      })).pipe(
+        Effect.provide(ConfigTest({ reader: { callTimeoutMs: 5000 } })),
+        Effect.provideService(EventSink, { emit: () => Effect.void }),
+      ),
+    );
+  } finally {
+    writer.close();
+    await Deno.remove(root, { recursive: true });
+  }
+});
 
 for (const tenancy of ["off", "api-key"] as const) {
   for (const layout of ["columns", "json"] as const) {

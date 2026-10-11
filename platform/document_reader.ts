@@ -41,6 +41,15 @@ import { DEFAULT_READER_CAP } from "./ipc.ts";
 import { currentTraceContext, isTraceToken } from "./http/trace.ts";
 import { parseTenantId } from "./tenants/registry.ts";
 
+/**
+ * Allow 32 active document handlers: enough overlap for millisecond point lookups,
+ * while bounding fibers cycling through blocking SQLite calls. This event-loop
+ * scheduling bound is an implementation detail, not deployment configuration:
+ * raising it risks starvation and lowering it adds queueing latency. The separate
+ * 1000-pending admission cap remains the public backpressure contract.
+ */
+export const DOCUMENT_READ_CONCURRENCY_CAP = 32;
+
 function native<A>(operation: ReaderError["operation"], run: () => A, table?: string) {
   return Effect.try({
     try: run,
@@ -250,10 +259,11 @@ export function makeDocumentReaderClient(ipc: ReaderClientService) {
     const config = yield* Config;
     const apps = yield* AppRegistry;
     const services = yield* Effect.context<Config | EventSink>();
+    const semaphore = yield* Effect.makeSemaphore(DOCUMENT_READ_CONCURRENCY_CAP);
     let pending = 0;
     // Preserve the IPC client's observable admission contract
     // (QueueFullError{queue:"reader", cap:1000}). Admission guard only;
-    // SP-05 owns the real concurrency story for in-process reads.
+    // The execution semaphore below bounds admitted document handlers separately.
     const cap = DEFAULT_READER_CAP;
     const client: ReaderClientService = {
       call: (request) => {
@@ -315,7 +325,7 @@ export function makeDocumentReaderClient(ipc: ReaderClientService) {
               const caller = Option.getOrUndefined(current);
               const traceId = isTraceToken(request.traceId) ? request.traceId : caller?.traceId;
               const sameTrace = traceId === caller?.traceId;
-              return query.pipe(Effect.annotateLogs({
+              return semaphore.withPermits(1)(query).pipe(Effect.annotateLogs({
                 traceId,
                 spanId: isTraceToken(request.spanId)
                   ? request.spanId
