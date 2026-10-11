@@ -130,14 +130,18 @@ test run) and commits the lockfile delta in the same commit. Reviewers reject un
 | MT-C  | MT-05, MT-06 | Admin CRUD endpoints; admin CLI                   | MT-06 after MT-05 (CLI dogfoods the endpoints)                   |
 | MT-D  | MT-07, MT-08 | Tenant resolution in request path; Better Auth    | MT-08 after MT-07 (needs the tenant-context seam)                |
 | MT-E  | MT-09        | Property tests for tenant routing invariants      | after MT-03 and MT-04 (needs the registry and router interfaces) |
+| MT-F  | MT-10        | End-to-end platform test suite (`deno task e2e`)  | **SYNC**, alone; after MT-06, MT-07, MT-08 land; before item 27  |
 
 Model policy (same as the main plan): **Opus** for security boundaries and resource lifetimes; **Sonnet** for
 bounded, mechanical items with checkable acceptance.
 
-**Build order with the main plan** (from the ordering analysis — do not reorder): `22 →
-(23+24+25+MT-01+MT-02) → (26+MT-03) → (MT-04+MT-05) → (MT-07+MT-09) → (MT-06+MT-08) → 27 → (28+29)`.
+**Build order with the main plan** (from the ordering analysis — do not reorder):
+`22 →
+(23+24+25+MT-01+MT-02) → (26+MT-03) → (MT-04+MT-05) → (MT-07+MT-09) → (MT-06+MT-08) → MT-10 → 27 →
+(28+29)`.
 Parenthesized items run concurrently, subject to the batch gates above; MT-06's CLI work still starts only
-after MT-05's endpoints exist.
+after MT-05's endpoints exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy and
+auth item landed, and item 27 documents it, so it can neither move earlier nor run beside 27.
 
 ---
 
@@ -371,6 +375,191 @@ after MT-05's endpoints exist.
     suite fail with a minimal counterexample; `PROP_SEED=<the printed seed> deno task test:prop` reproduces
     the exact same failure.
   - `deno task test:prop` completes in under 60 s on this droplet.
+
+#### MT-10 — End-to-end platform test suite (`deno task e2e`)
+
+- **Scoping:** **SYNC. Single item in batch MT-F.** Runs after `(MT-06+MT-08)` and before main-plan item 27:
+  `… → (MT-06+MT-08) → MT-10 → 27 → (28+29)`. Must have landed first: main-plan 19 (backups), 22 (server,
+  admin routes, error mapping), 23 (analysis catalog, `scripts/logs.ts`), 25 (Effect-ported integration test,
+  `tests/e2e/observability_test.ts`), 26 (wrapper-free client API); MT-01 (Postgres service, `schema.sql`),
+  MT-02 (tenancy config rows), MT-05 (admin endpoints), MT-06 (admin CLI), MT-07 (tenant resolution,
+  `createTenantClient`) and MT-08 (Better Auth, or its recorded headless-infeasible outcome — the
+  auth-scenario gate below needs to know which). **Placement justification:** the suite exercises tenant
+  isolation, the admin CLI lifecycle and Better Auth, so its hard dependencies are MT-05 through MT-08 — the
+  last MT items in the build order. A main-plan item 30 would make the main plan depend on this plan,
+  inverting the recorded direction (this plan builds on the main plan, never the reverse), and extending item
+  25 is impossible because 25 runs in the batch right after 22, before any tenancy code exists. MT-10
+  therefore appends to this plan with no renumbering, and the interleaved build order that only this plan's §3
+  records gains exactly one slot. The slot is before item 27 rather than concurrent with it: 27's
+  `docs/testing.md` describes the real-process test tier and must execute every command it quotes, so the
+  suite has to exist (and be green) before 27 documents it; and running it as the platform's final acceptance
+  gate means a defect it finds is fixed before 27, 28 and 29 describe the platform as finished.
+- **Model:** **Opus.** The item owns resource lifetimes across three kinds of process — a Docker Compose
+  project, a server per scenario with its reader child, and CLI subprocesses — with teardown that must survive
+  failures and signals, and its core assertions are security properties (cross-tenant reads and writes behave
+  as missing, revocation and deactivation are enforced). Like item 25, diagnosing a red run means reasoning
+  across every layer.
+- **Owns:** `package.json` (additive only: a `scripts.e2e` entry — no other key changes, no dependencies),
+  `tests/e2e/platform/main.ts`, `tests/e2e/platform/harness.ts`, `tests/e2e/platform/postgres.ts`,
+  `tests/e2e/platform/compose.yml`, `tests/e2e/platform/seed.ts`, `tests/e2e/platform/suite_test.ts`, and
+  `tests/e2e/platform/scenarios/{documents,queries,backup_restore,tenant_isolation,auth,log_analysis,admin_lifecycle}.ts`.
+  Disjoint from item 25's `tests/integration.ts` and `tests/e2e/observability_test.ts`, and from MT-07's
+  tenancy tests (including any `tests/e2e/tenancy_test.ts`); the suite may import exported helpers from those
+  files but never edits them. Not `deno.json`, not `deno.lock`, not `docker-compose.yml`, not `Makefile`.
+- **Reads:** `platform/config.ts` (`OPTIONS`, including the MT-02 rows and the tenant-key cache TTL option if
+  MT-07 added one), `platform/http/router.ts`, `platform/http/auth.ts`, `core/errors.ts` (`toHttpStatus`),
+  `sdk/client.ts` (`createClient`, `createTenantClient`), `app/schema.ts`, `app/functions.ts`,
+  `platform/analysis/catalog.ts`, `scripts/logs.ts`, `scripts/restore.ts`, `scripts/tenants.ts`,
+  `scripts/auth.ts` and `platform/auth/*` (if MT-08 passed its spike), `platform/tenants/schema.sql`,
+  `docker-compose.yml` (the `postgres` image tag), `Makefile` (the `db-migrate` recipe),
+  `tests/property/arbitraries.ts` (`SEED`, `titled` — the seed harness), `tests/integration.ts`,
+  `tests/e2e/observability_test.ts`, `docs/observability.md`, `deno.lock` (existing pins only), and the
+  main-plan items 22, 23, 25 and 28 plus MT-02 through MT-08 in this plan.
+- **Work:**
+  1. **One command without touching `deno.json`.** Main-plan §2.2 freezes `deno.json`, so the task lives in
+     `package.json`, which no item owns and which Deno 2's `deno task` already reads: `deno task` lists
+     package.json scripts next to the deno.json table (verified with deno 2.9.5 on this droplet, 2026-10-11).
+     Add `"scripts": { "e2e": "deno run -A tests/e2e/platform/main.ts" }` and nothing else, so the root import
+     map and `deno.lock` still apply. Arguments after `--` pass through to `deno test` (e.g.
+     `deno task e2e -- --filter e2e/4`, `-- --reporter=junit`). Docs that must satisfy item 29's
+     deno.json-only task check cite the direct `deno run -A tests/e2e/platform/main.ts` form.
+  2. **Dependencies: Postgres only.** The suite needs Postgres for the registry (scenario 1's tenant-key leg
+     and scenarios 4, 5 and 7). It does **not** need SeaweedFS: backups go to `LOCAL_OBJECT_DIR` (the same
+     layer the integration test uses), and the S3 layer is already covered by
+     `tests/integration/object_store_s3_test.ts`. The suite does not call `make up`, because that stack has
+     fixed host ports (5432, 8333) and persistent named volumes shared with the developer — not hermetic, and
+     `docker compose down -v` against the root compose file could delete `seaweedfs-data`. Instead
+     `tests/e2e/platform/compose.yml` declares a single `postgres` service: the same image tag as the root
+     `docker-compose.yml` (a check in `postgres.ts` fails the run on drift), data on `tmpfs` (no volumes at
+     all), the host port published as `127.0.0.1::5432` (ephemeral, read back with `docker compose port`), and
+     the same `pg_isready` healthcheck. `postgres.ts` runs it under a unique project name
+     (`tsdb-e2e-<pid>-<seed>`) with `docker compose up -d --wait`, creates one database per scenario, applies
+     `platform/tenants/schema.sql` to each with `docker compose exec -T postgres psql` (the `make db-migrate`
+     recipe, re-pointed — no Makefile edit), applies MT-08's Better Auth migration when the auth gate is open,
+     and tears down with `docker compose down --remove-orphans --volumes`. Docker absent or unhealthy within
+     60 s → the run fails with a clear message; it never skips to green.
+  3. **Harness (`harness.ts`), one server per scenario.** Each scenario gets its own subdirectory of one run
+     temp root (`Deno.makeTempDir({ prefix: "tsdb-e2e-" })`) and its own server on a free `127.0.0.1` port,
+     spawned with the command the `serve` task runs. Spawn with `clearEnv: true` and an explicit env: `PATH`,
+     `HOME` and `DENO_DIR` from the parent, plus only option names from the `OPTIONS` table — `PORT`,
+     `BIND_HOST`, `DATA_DIR`, `LOG_DIR`, `LOCAL_OBJECT_DIR`, `EVENTLOG_DUCKDB`, `S3_BASE_URL=""`,
+     `BACKUP_INTERVAL_MS=0`, per-run random admin and app tokens, and the MT-02 rows (`TENANCY`, database URL,
+     tenants dir, Better Auth secret) as each scenario needs. A developer's `AWS_*` or `S3_BASE_URL` can
+     therefore never leak in. Poll `GET /health` with a bounded timeout, and fail fast if the child exits.
+     Every resource is acquired with `Effect.acquireRelease`: SIGTERM, await the server and its reader child,
+     remove the scenario dir. CLI subprocesses (`scripts/tenants.ts`, `scripts/logs.ts`, `scripts/restore.ts`,
+     `scripts/auth.ts`) get the same clean env plus the scenario server's URL in whatever form MT-06 accepts.
+     If MT-06's CLI cannot target a non-default port, stop and report rather than editing it.
+  4. **Seed and ordering (`seed.ts`).** Reuse the repo's single seed mechanism: `SEED` from
+     `tests/property/arbitraries.ts` (`PROP_SEED` env, default `DEFAULT_SEED`) and `titled()` for every test
+     name. Do not add a second seed variable. The seed drives the scenario execution order (a seeded
+     permutation, applied by `suite_test.ts` dynamically importing the scenario modules in that order) and all
+     generated data: player names, tenant names and slugs, move sequences, and which games are left
+     unfinished, via `fc.sample(arb, { seed })`. `main.ts` prints `order=<scenario list> seed=<n>` before the
+     run, and on failure it prints `Replay: PROP_SEED=<n> deno task e2e`. Every test is named
+     `e2e/<n>-<slug>: <case> [seed=<n>]` so `--filter e2e/<n>` runs a single scenario.
+  5. **Scenarios.** Each asserts outcomes rather than printing them, and none depends on another's state.
+     - **1 documents:** through the typed Effect client, on both `tic-tac-toe` (columns) and
+       `tic-tac-toe-json` (json), first in `TENANCY=off` with the app token, then in `TENANCY=api-key` with a
+       tenant key via `createTenantClient`. Cover `createGame`, then `getGame` (`_version` 1, numeric
+       `_creationTime`), seeded `makeMove` updates with read-after-write equality, `deleteGame` then `getGame`
+       → `null`, a stale `expectedVersion` → typed `ConflictError` (409), and a bad argument → typed
+       `SchemaError` (400).
+     - **2 queries:** for a seeded set of finished and unfinished games, `listGames` per status, `moveHistory`
+       length, and `winsByMark` (`countBy`) equal a reference computed in the test from the moves it sent.
+       Both layouts return identical results, ignoring `_id` and `_creationTime`.
+     - **3 backup/restore** (`TENANCY=off`; per-tenant backup is deferred, see §4): play a game, then call
+       `POST /admin/backup/<app>` for both apps. Each `latest.json` manifest's object has the manifest's
+       SHA-256. Make one more move after the backup, stop the server, and run `scripts/restore.ts` into
+       `<scenario>/restored/`; the restored file's checksum equals the manifest's. Start a second server on
+       the restored `DATA_DIR`: the game has the backed-up `_version`, not the post-backup one, and queries
+       through the DuckDB reader succeed on the restored data.
+     - **4 tenant isolation** (`TENANCY=api-key`, two tenants created with the admin CLI): tenant A creates a
+       game. Tenant B, addressing that same document id, gets `getGame` → `null`, `makeMove` → 404, and
+       `deleteGame` → 404. Each matches the status and error tag returned for a never-existing id, and A's
+       document is unchanged at its version afterwards. Each tenant's `listGames` and `winsByMark` count only
+       its own games. A request with B's key and a forged `x-tenant-id: <A's id>` header is still scoped to B.
+       The literal case of two tenant files holding the same `_id` stays covered at the storage layer by MT-04
+       (no HTTP route lets a client choose `_id`).
+     - **5 auth:** **(a) API keys, always run:** a missing `Authorization` header, a malformed bearer, an
+       unknown `tsdb_…` key and a wrong admin token are each 401 on `/apps/*` and `/admin/*`; in
+       `TENANCY=off`, one app's token is 401 on the other app. **(b) Better Auth, gated:** the gate is open
+       iff MT-08's step-2 deliverables exist (`scripts/auth.ts` and `platform/auth/`). Open → run headless
+       `signUp.email`/`signIn.email` through `better-auth/client` at the version MT-08 pinned (no new
+       specifier), link the user to tenant A with `scripts/auth.ts`, then: the session token reads A's
+       documents; it reads B's documents as missing; a wrong password is 401; an unknown user is 401. Any
+       failure while the gate is open fails the run. Closed → register these cases with `ignore: true` and a
+       name carrying `[skipped: MT-08 headless-infeasible]`, so `deno test` reports them as ignored, never
+       passed.
+     - **6 log ingest → DuckDB analysis:** run a seeded workload with a caller-supplied `X-Trace-Id` on one
+       request, one deliberate 409, one unknown-handler 404 and one backup. Call `POST /admin/logs/ingest`,
+       retrying for at most 10 s until the trace id is queryable (the sink flushes asynchronously). Then
+       through `POST /admin/logs/analysis/:name`: `handler-throughput` lists the handlers the workload called;
+       `error-rate-by-handler` shows the 409 and the 404 with their error tags; `slowest-sql` and
+       `tx-outcomes` return rows; `backup-history` shows the backup; and `trace` for the supplied id returns
+       an ordered timeline containing both `server` and `reader` roles.
+       `scripts/logs.ts query <name> --format
+       json`, run against the same `LOG_DIR`/`EVENTLOG_DUCKDB`,
+       returns the same rows as the endpoint for at least `handler-throughput`. An unknown query name is
+       rejected with `UnknownAnalysisQuery`. No k6 — the k6 join stays item 25's.
+     - **7 admin CLI tenant lifecycle:** `scripts/tenants.ts create` prints the key exactly once (with the
+       "save this" warning), and the key works on `/apps/*`. `issue-key` adds a second working key. After
+       `revoke-key` on the first, it is 401 while the second still works. After `deactivate`, both are 401,
+       and `show` reports the tenant deactivated. Neither `list` nor `show` ever prints a plaintext key. The
+       CLI with a wrong `ADMIN_TOKEN` exits non-zero. If MT-07's tenant-key cache delays revocation, each "→
+       401" step polls up to the configured TTL plus 1 s and fails past that bound; the bound comes from
+       config, not a hardcoded sleep.
+  6. **Runner (`main.ts`) and hermeticity self-check.** Record `git status --porcelain` and the set of
+     `tsdb-e2e-*` containers, start Postgres, and run `deno test -A tests/e2e/platform/suite_test.ts` (plus
+     passthrough args) with the connection details in env. Tear down on exit, on failure, and on
+     SIGINT/SIGTERM. Then re-check: no container, network or volume of this run's project; no live child pid
+     this run spawned; the temp root gone; `git status --porcelain` unchanged; no `./data`, `./logs` or
+     `./object-store` created. Any violation fails the run even when every test passed. `E2E_KEEP=1` skips
+     teardown for debugging and prints what it left. The last line is
+     `E2E PASS seed=<n> scenarios=7 skipped=<none|5b(better-auth: MT-08 headless-infeasible)>` or `E2E FAIL …`
+     with the replay line. CI wiring: the repo has no CI configuration, and `deno task ci` deliberately
+     excludes the suite (it needs Docker). The suite is CI-ready as is — one command, no TTY or prompts,
+     non-zero exit on failure, junit via passthrough, bounded runtime — and adding a CI workflow is out of
+     scope.
+  7. **A red scenario that exposes a platform defect is reported, not worked around.** Stop with the replay
+     seed and the failing assertion. The coordinator opens a fix against the owning item. Never weaken an
+     assertion or mark a case ignored to get green (the only ignore is the MT-08 gate in scenario 5b).
+- **Acceptance criteria:**
+  - `deno task` lists `e2e (package.json)`. From a state with no ts-db containers running (`make down`),
+    `deno task e2e` exits 0 and its last line is `E2E PASS seed=20261010 scenarios=7 skipped=…`.
+    `deno run -A tests/e2e/platform/main.ts` behaves identically.
+  - With a fresh developer stack up (`make up && make db-migrate`, holding host ports 5432 and 8333),
+    `deno task e2e` again exits 0, and the dev stack is untouched: `docker compose ps`, `docker volume ls` and
+    the dev Postgres's `psql -l` are identical before and after.
+  - Coverage: the `deno test` output has `ok` lines for every one of `e2e/1-documents`, `e2e/2-queries`,
+    `e2e/3-backup-restore`, `e2e/4-tenant-isolation`, `e2e/5-auth` (5a), `e2e/6-log-analysis` and
+    `e2e/7-admin-lifecycle`. The 5b cases are `ok` if MT-08 passed its spike and `ignored` with the
+    `[skipped: MT-08 headless-infeasible]` reason if it did not — the reviewer confirms the state matches
+    MT-08's recorded outcome — and the final line's `skipped=` field agrees.
+  - The suite asserts. The reviewer makes one local break per check and confirms `E2E FAIL` each time: MT-07's
+    middleware honoring `x-tenant-id` → scenario 4 fails; `resolveTenantByKeyHash` ignoring `revoked_at` →
+    scenario 7 fails; `EventSinkLive` swapped for a no-op sink → scenario 6 fails; the restored-`_version`
+    expectation flipped → scenario 3 fails.
+  - Hermetic, after a passing run, after a failing run (one injected failed assertion), and after an
+    interrupted run (`timeout -s INT 30 deno task e2e`): `docker ps -a -q --filter name=tsdb-e2e` and
+    `docker volume ls -q --filter name=tsdb-e2e` print nothing; `ls -d /tmp/tsdb-e2e-*` matches nothing;
+    `pgrep -f "platform/(server|reader).ts"` prints nothing (no other ts-db server running);
+    `git status --porcelain` is unchanged; no `./data`, `./logs` or `./object-store` exists that did not exist
+    before.
+  - Two concurrent runs (`deno task e2e & PROP_SEED=7 deno task e2e & wait`) both exit 0 — the run projects,
+    ports and directories are independent.
+  - Seed replay: every test name carries `[seed=<n>]`. Two runs with the same `PROP_SEED` print the same
+    `order=…` line and the same generated tenant slugs and player names; a different `PROP_SEED` changes the
+    order. A failing run prints `Replay: PROP_SEED=<n> deno task e2e`, and running that command reproduces the
+    same failure in the same scenario order.
+  - Docker stopped (or `docker` off `PATH`): `deno task e2e` exits non-zero with a message naming the missing
+    dependency and never prints `E2E PASS`.
+  - `deno task e2e` completes in under 240 s on this droplet, excluding the first `postgres` image pull.
+  - `deno check tests/e2e/platform/*.ts tests/e2e/platform/scenarios/*.ts`, `deno task fmt:check`,
+    `deno task lint` and `deno task ci` pass.
+  - `git diff --name-only <base>..HEAD` lists only `package.json` and paths under `tests/e2e/platform/`;
+    `git diff <base>..HEAD -- deno.json deno.lock` is empty; and the `package.json` diff adds only
+    `scripts.e2e`.
 
 ## 4. Out of scope / deferred
 
