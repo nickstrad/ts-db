@@ -4,7 +4,7 @@
  * The point of these is that validation is now *total*: every rejection is a `SchemaError` value
  * with a structured `reason`/`path`, and nothing in `core/` throws. So the assertions below check
  * the tag and the path, not a message. The legacy message rendering lives in `sdk/schema.ts` and is
- * covered in the last section — those strings are what `tests/core_test.ts` matches on.
+ * covered in the last section.
  */
 import assert from "node:assert/strict";
 import { Either } from "effect";
@@ -423,36 +423,36 @@ Deno.test("withStorage: reprojects every table onto one layout, preserving field
 });
 
 // ---------------------------------------------------------------------------
-// sdk/schema.ts: the throwing compatibility layer and its messages
+// sdk/schema.ts: the legacy message rendering
 //
-// These strings are the pre-port `Error` messages. `tests/core_test.ts` matches `/Unknown field/`
-// and `/expected integer/` against them through `platform/compiler.ts` and `sdk/functions.ts`.
+// These strings are the pre-port `Error` messages. `formatSchemaError` renders them from the
+// tagged `SchemaError`; `defineTable`/`defineSchema`/`AppTable.index` still throw them because
+// they run at module load, where no `Either` can go.
 // ---------------------------------------------------------------------------
 
-Deno.test("sdk: the *OrThrow wrappers pass values through unchanged", () => {
-  assert.equal(Sdk.identifierOrThrow("by_status"), "by_status");
-  assert.equal(Sdk.validateOrThrow(v.integer().node, 3, "cell"), 3);
-  assert.deepEqual(Sdk.parseObjectOrThrow(fields, { name: "a", age: 1, nickname: null }), {
+Deno.test("sdk: the Either forms pass values through unchanged", () => {
+  assert.equal(expectRight(identifier("by_status")), "by_status");
+  assert.equal(expectRight(validate(v.integer().node, 3, "cell")), 3);
+  assert.deepEqual(expectRight(parseObject(fields, { name: "a", age: 1, nickname: null })), {
     name: "a",
     age: 1,
     nickname: null,
   });
-  assert.deepEqual(Sdk.parseObjectOrThrow(fields, { age: 1 }, true), { age: 1 });
-  // The legacy aliases are the same functions under the names `platform/` imports.
-  assert.equal(Sdk.validate, Sdk.validateOrThrow);
-  assert.equal(Sdk.parseObject, Sdk.parseObjectOrThrow);
-  assert.equal(Sdk.identifier, Sdk.identifierOrThrow);
+  assert.deepEqual(expectRight(parseObject(fields, { age: 1 }, true)), { age: 1 });
 });
 
 Deno.test("sdk: every failure renders the pre-port message", () => {
-  assert.throws(() => Sdk.validateOrThrow(v.integer().node, 0.5, "cell"), /^Error: cell: expected integer$/);
-  assert.throws(
-    () => Sdk.validateOrThrow(nullableOf(v.enum("X", "O")), "D", "board[3]"),
-    /^Error: board\[3\]: expected enum or null$/,
+  const rendered = (either: Either.Either<unknown, SchemaError>): string =>
+    Sdk.formatSchemaError(expectLeft(either)).message;
+  assert.equal(rendered(validate(v.integer().node, 0.5, "cell")), "cell: expected integer");
+  assert.equal(
+    rendered(validate(nullableOf(v.enum("X", "O")), "D", "board[3]")),
+    "board[3]: expected enum or null",
   );
-  assert.throws(() => Sdk.parseObjectOrThrow(fields, { extra: 1 }), /^Error: Unknown field: extra$/);
-  assert.throws(() => Sdk.parseObjectOrThrow(fields, []), /^Error: Expected an object$/);
-  assert.throws(() => Sdk.identifierOrThrow("bad name"), /^Error: Invalid identifier: bad name$/);
+  assert.equal(rendered(parseObject(fields, { extra: 1 })), "Unknown field: extra");
+  assert.equal(rendered(parseObject(fields, [])), "Expected an object");
+  assert.equal(rendered(identifier("bad name")), "Invalid identifier: bad name");
+  // The module-load declarations still throw the same messages.
   assert.throws(() => Sdk.defineTable({ _id: v.string() }), /^Error: Reserved field: _id$/);
   assert.throws(
     () => Sdk.defineSchema({ sqlite_master: Sdk.defineTable({ a: v.string() }) }),
@@ -467,17 +467,16 @@ Deno.test("sdk: every failure renders the pre-port message", () => {
   );
 });
 
-Deno.test("sdk: a thrown wrapper error carries the structured SchemaError as its cause", () => {
+Deno.test("sdk: a module-load throw carries the structured SchemaError as its cause", () => {
   try {
-    Sdk.parseObjectOrThrow(fields, { name: "a", age: "x", nickname: null });
+    Sdk.defineTable({ board: v.array(v.string(), 9) }).index("by_board", ["board"]);
     assert.fail("expected a throw");
   } catch (error) {
     assert.ok(error instanceof Error);
     const cause = error.cause as SchemaError;
     assert.equal(cause._tag, "SchemaError");
-    assert.equal(cause.reason, "type-mismatch");
-    assert.equal(cause.path, "age");
-    assert.equal(cause.actual, "x");
+    assert.equal(cause.reason, "unindexable-field");
+    assert.equal(cause.path, "board");
   }
 });
 

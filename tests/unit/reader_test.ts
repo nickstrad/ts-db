@@ -35,6 +35,12 @@ import { ConfigTest } from "../../platform/config.ts";
 import { EventSink, Reader, type ReaderReply } from "../../platform/services.ts";
 import type { DuckDriver, ReaderApp } from "../../platform/duckdb.ts";
 
+/** Unwrap a right, failing the test with the rendered left on a left. */
+function expectRight<A, E>(either: Either.Either<A, E>): A {
+  if (Either.isRight(either)) return either.right;
+  assert.fail(`expected a right, got left ${JSON.stringify(either.left)}`);
+}
+
 const FIXTURE_ENV = "TS_DB_READER_FIXTURE";
 const fixture = Deno.env.get(FIXTURE_ENV);
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -62,8 +68,8 @@ async function writeFixture(dir: string): Promise<void> {
   for (const [file, layout] of layouts) {
     const db = new DatabaseSync(join(dir, file));
     try {
-      for (const statement of Either.getOrThrow(compileDDL(layout))) db.exec(statement);
-      const insert = Either.getOrThrow(
+      for (const statement of expectRight(compileDDL(layout))) db.exec(statement);
+      const insert = expectRight(
         compileInsert(layout, "games", GAME, { _id: "game-1", _creationTime: 1 }),
       );
       db.prepare(insert.text).run(...insert.values);

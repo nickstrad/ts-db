@@ -97,7 +97,6 @@ const rows = [...byProject.entries()]
   );
 
 console.log(`claude usage for ${date} (UTC) — tokens`);
-// deno-lint-ignore no-console
 const header = "project".padEnd(34) + "  sessions" + "      input" + "   cache-write" +
   "    cache-read" + "     output" + "      total";
 console.log(header);

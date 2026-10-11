@@ -1,29 +1,28 @@
 /**
  * App-facing schema surface.
  *
- * The descriptors and the validation logic now live in `core/schema.ts`, where they are total:
- * every rejection comes back as a `SchemaError` in an `Either`. This module is the compatibility
- * seam for the pre-port, throwing API (plan item 04, work 3): it re-exports the core types and
- * builders, and adds `*OrThrow` wrappers that render a `SchemaError` back into the exact `Error`
- * message the old code produced. `platform/compiler.ts`, `platform/sqlite.ts` and
- * `sdk/functions.ts` therefore compile untouched, via the legacy aliases at the bottom.
+ * The descriptors and the validation logic live in `core/schema.ts`, where they are total:
+ * every rejection comes back as a `SchemaError` in an `Either`. This module re-exports the core
+ * types and builders, plus `formatSchemaError`, which renders a `SchemaError` back into the exact
+ * `Error` message the pre-port code produced (`sdk/functions.ts` and `platform/sqlite.ts` use it
+ * at their legacy boundaries).
  *
- * `AppTable.index` and `defineTable`/`defineSchema` keep throwing for the same reason: they run at
- * module load in `app/schema.ts`, which has nowhere to put an `Either`. Later items in the Effect
- * port move those callers onto the core API and delete the wrappers.
+ * `AppTable.index` and `defineTable`/`defineSchema` still throw: they run at module load in
+ * `app/schema.ts`, which has nowhere to put an `Either`. Item 26 deleted the throwing wrappers
+ * (plan items 04 and 09); every other caller is on the `Either` forms in `core/schema.ts` now.
  */
 import { Either, Function as EffectFunction } from "effect";
 import type { SchemaError } from "../core/errors.ts";
 import * as Core from "../core/schema.ts";
-import { type Fields, type Infer, type Node, type Schema, type Storage, Table } from "../core/schema.ts";
+import { type Fields, type Schema, type Storage, Table } from "../core/schema.ts";
 
 export { Table, v, withStorage } from "../core/schema.ts";
 export type { Body, Document, Field, Fields, Index, Infer, Node, Schema, Storage } from "../core/schema.ts";
 
 /**
- * Renders a structured `SchemaError` into the pre-port message, verbatim — `tests/core_test.ts`
- * asserts `/Unknown field/` and `/expected integer/` against these strings. The switch is total
- * over `SchemaFailure`: adding a reason without a case here is a compile error.
+ * Renders a structured `SchemaError` into the pre-port message, verbatim —
+ * `tests/unit/schema_test.ts` pins these strings. The switch is total over `SchemaFailure`:
+ * adding a reason without a case here is a compile error.
  */
 export function formatSchemaError(error: SchemaError): Error {
   const message = ((): string => {
@@ -53,23 +52,14 @@ export function formatSchemaError(error: SchemaError): Error {
   return new Error(message, { cause: error });
 }
 
-const orThrow = <A>(either: Either.Either<A, SchemaError>): A =>
-  Either.getOrThrowWith(either, formatSchemaError);
-
-/** `core/schema.ts`'s `identifier`, throwing `Invalid identifier: <name>` instead of returning a left. */
-export function identifierOrThrow(name: string): string {
-  return orThrow(Core.identifier(name));
-}
-
-/** `core/schema.ts`'s `validate`, throwing `<path>: expected <kind>[ or null]` instead of returning a left. */
-export function validateOrThrow(node: Node, value: unknown, path: string): unknown {
-  return orThrow(Core.validate(node, value, path));
-}
-
-/** `core/schema.ts`'s `parseObject`, throwing `Unknown field: <key>` and friends instead of returning a left. */
-export function parseObjectOrThrow<F extends Fields>(fields: F, input: unknown, partial = false): Infer<F> {
-  return orThrow(Core.parseObject(fields, input, partial));
-}
+/**
+ * Unwrap for the module-load declarations below: they run where no `Either` can go, so a
+ * rejection throws the rendered legacy `Error` instead of returning a left.
+ */
+const unwrap = <A>(either: Either.Either<A, SchemaError>): A => {
+  if (Either.isLeft(either)) throw formatSchemaError(either.left);
+  return either.right;
+};
 
 /**
  * A `Table` whose `index` throws, for schemas declared at module load. Identical data to
@@ -78,7 +68,7 @@ export function parseObjectOrThrow<F extends Fields>(fields: F, input: unknown, 
  */
 export class AppTable<F extends Fields = Fields> extends Table<F> {
   index(name: string, fields: readonly (keyof F & string)[]): AppTable<F> {
-    const next = orThrow(this.addIndex(name, fields));
+    const next = unwrap(this.addIndex(name, fields));
     return new AppTable(next.fields, next.storage, next.indexes);
   }
 
@@ -89,7 +79,7 @@ export class AppTable<F extends Fields = Fields> extends Table<F> {
 
 /** Declares a table, throwing on a bad or reserved field name. */
 export function defineTable<F extends Fields>(fields: F): AppTable<F> {
-  return orThrow(
+  return unwrap(
     Either.map(
       Core.defineTable(fields),
       (table) => new AppTable(table.fields, table.storage, table.indexes),
@@ -99,9 +89,5 @@ export function defineTable<F extends Fields>(fields: F): AppTable<F> {
 
 /** Validates a schema's table names, throwing on a bad or reserved one, and returns it unchanged. */
 export function defineSchema<S extends Schema>(schema: S): S {
-  return orThrow(Core.defineSchema(schema));
+  return unwrap(Core.defineSchema(schema));
 }
-
-// Legacy aliases: the names `platform/` and `sdk/functions.ts` still import. Both the throwing
-// behaviour and the messages are unchanged from before the port.
-export { identifierOrThrow as identifier, parseObjectOrThrow as parseObject, validateOrThrow as validate };

@@ -251,12 +251,22 @@ export function makeFileSink(options: FileSinkOptions): Effect.Effect<FileSink> 
           let written = 0;
           while (written < bytes.byteLength) {
             const n = await handle.write(bytes.subarray(written));
-            if (n <= 0) throw new Error(`short write: ${written}/${bytes.byteLength} bytes`);
+            if (n <= 0) {
+              // A zero write means the handle is broken; fail typed rather than looping forever.
+              // Thrown inside `tryPromise` this would be a defect, so the `catch` below lets a
+              // `SinkIoError` through unwrapped.
+              throw new SinkIoError({
+                operation: "write",
+                path,
+                cause: `short write: ${written}/${bytes.byteLength} bytes`,
+              });
+            }
             written += n;
           }
           return written;
         },
-        catch: (cause) => new SinkIoError({ operation: "write", path, cause }),
+        catch: (cause) =>
+          cause instanceof SinkIoError ? cause : new SinkIoError({ operation: "write", path, cause }),
       });
 
     const append = (lines: readonly string[], now: Date): Effect.Effect<void, SinkIoError> =>

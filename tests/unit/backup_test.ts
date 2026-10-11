@@ -198,7 +198,9 @@ const backupEvents = (events: EventRecord[]) =>
 
 const failureOf = <A, E>(exit: Exit.Exit<A, E>): unknown => {
   assert.ok(Exit.isFailure(exit), "expected a failure");
-  return Option.getOrThrow(Cause.failureOption(exit.cause));
+  const failure = Cause.failureOption(exit.cause);
+  assert.ok(Option.isSome(failure), "expected a failure option");
+  return failure.value;
 };
 
 const OLD_LATEST = enc.encode('{"format":1,"appId":"app","note":"previous good backup"}');
@@ -472,7 +474,8 @@ test("interrupting take mid-upload releases the per-app guard and removes the te
     assert.ok(existsSync(join(temp, "snapshot.sqlite")));
     const blocked = yield* Effect.exit(runner.take("app", storage));
     assert.ok(Exit.isFailure(blocked));
-    assert.ok(Option.getOrThrow(Cause.failureOption(blocked.cause)) instanceof BackupAlreadyRunning);
+    const failure = Cause.failureOption(blocked.cause);
+    assert.ok(Option.isSome(failure) && failure.value instanceof BackupAlreadyRunning);
 
     const exit = yield* Fiber.interrupt(fiber);
     assert.ok(Exit.isFailure(exit) && Cause.isInterruptedOnly(exit.cause));
@@ -758,7 +761,12 @@ test("verifySnapshot accepts a healthy file and rejects a non-database as Snapsh
     const error = failureOf(await Effect.runPromiseExit(verifySnapshot(bad)));
     assert.ok(error instanceof SnapshotIntegrityError);
     assert.equal(error.file, bad);
-    assert.throws(() => integrityCheck(bad), /Snapshot failed integrity check/);
+    // The deprecated sync wrapper throws the tagged failure, not an untyped Error.
+    assert.throws(() => integrityCheck(bad), (error) => {
+      assert.ok(error instanceof SnapshotIntegrityError);
+      assert.equal(error.file, bad);
+      return true;
+    });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

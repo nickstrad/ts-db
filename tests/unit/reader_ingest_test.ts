@@ -35,6 +35,13 @@ import { schema } from "../../app/schema.ts";
 import { withStorage } from "../../sdk/schema.ts";
 import { ConfigTest } from "../../platform/config.ts";
 import { EventSink, type ReaderReply } from "../../platform/services.ts";
+
+/** Unwrap a right, failing the test with the rendered left on a left. */
+function expectRight<A, E>(either: Either.Either<A, E>): A {
+  if (Either.isRight(either)) return either.right;
+  assert.fail(`expected a right, got left ${JSON.stringify(either.left)}`);
+}
+
 import type {
   EventLogConnection,
   EventLogDriver,
@@ -95,8 +102,8 @@ async function writeAppFixture(dir: string): Promise<void> {
   for (const [file, layout] of layouts) {
     const db = new DatabaseSync(join(dir, file));
     try {
-      for (const statement of Either.getOrThrow(compileDDL(layout))) db.exec(statement);
-      const insert = Either.getOrThrow(
+      for (const statement of expectRight(compileDDL(layout))) db.exec(statement);
+      const insert = expectRight(
         compileInsert(layout, "games", game, { _id: "game-1", _creationTime: 1 }),
       );
       db.prepare(insert.text).run(...insert.values);

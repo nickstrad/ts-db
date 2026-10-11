@@ -42,6 +42,12 @@ import { type Schema, Table, v, withStorage } from "../../core/schema.ts";
 import type { SelectPlan } from "../../core/plan.ts";
 import type { DbError } from "../../core/errors.ts";
 
+/** Unwrap a right, failing the test with the rendered left on a left. */
+function expectRight<A, E>(either: Either.Either<A, E>): A {
+  if (Either.isRight(either)) return either.right;
+  assert.fail(`expected a right, got left ${JSON.stringify(either.left)}`);
+}
+
 const ROLE_ENV = "TS_DB_NUMBER_DIALECTS_ROLE";
 const DIR_ENV = "TS_DB_NUMBER_DIALECTS_DIR";
 const role = Deno.env.get(ROLE_ENV);
@@ -301,14 +307,14 @@ if (role === "sqlite") {
     const schema = schemaFor(layout);
     const db = new DatabaseSync(join(dir, `${layout}.sqlite`));
     try {
-      for (const statement of Either.getOrThrow(compileDDL(schema))) db.exec(statement);
+      for (const statement of expectRight(compileDDL(schema))) db.exec(statement);
       for (const { _id, _creationTime, n, i } of documents()) {
-        const sql = Either.getOrThrow(compileInsert(schema, "nums", { n, i }, { _id, _creationTime }));
+        const sql = expectRight(compileInsert(schema, "nums", { n, i }, { _id, _creationTime }));
         db.prepare(sql.text).run(...sql.values);
       }
       report.layouts[layout] = plans().map((plan) => {
         try {
-          const sql = Either.getOrThrow(compileSelect(schema, plan, "sqlite"));
+          const sql = expectRight(compileSelect(schema, plan, "sqlite"));
           return answer(decode(schema, plan, db.prepare(sql.text).all(...sql.values)));
         } catch (error) {
           return { error: String(error) };

@@ -5,7 +5,7 @@
  * and `./errors.ts`, and nothing else — no `platform/`, no `sdk/`, no `node:*`, no `npm:*`, no
  * `Deno.*`. Nothing in here raises. Every rejection is a `SchemaError` in the left channel of an
  * `Either`, carrying the structured `path`/`expected`/`actual` fields rather than a formatted
- * message; rendering a human string is the caller's job (`sdk/schema.ts`'s `*OrThrow` wrappers).
+ * message; rendering a human string is the caller's job (`sdk/schema.ts`'s `formatSchemaError`).
  *
  * Note on the type parameter order: the plan writes these signatures error-first
  * (`Either<SchemaError, unknown>`), but Effect 3's `Either` is value-first — `Either<A, E>`. The

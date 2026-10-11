@@ -3,8 +3,10 @@
  *
  * The compiler is now *total*: every rejection is a `CompileError`, `DecodeError` or `SchemaError`
  * value, and nothing in `core/compile/` raises. So the assertions below check tags and reasons, not
- * messages — except in the last section, which covers `platform/compiler.ts`'s `*OrThrow` wrappers,
- * whose messages are the pre-port strings `tests/core_test.ts` matches on.
+ * messages — except in the last section, which pins the legacy message rendering
+ * (`formatCompileError`/`formatDecodeError` in `platform/sqlite.ts`, `formatSchemaError` in
+ * `sdk/schema.ts`): those strings are the pre-port `Error` messages the compatibility boundaries
+ * still throw.
  *
  * The matrix that matters most is `expression`: each node kind x each physical layout x each
  * dialect. That function decides whether `moveNumber > 3` compares numbers or strings, and it is
@@ -31,7 +33,8 @@ import { compileDDL } from "../../core/compile/ddl.ts";
 import { compileDelete, compileInsert, compileReplace } from "../../core/compile/write.ts";
 import { decode, decodeValue, safeNumber } from "../../core/compile/decode.ts";
 import type { SelectPlan as SdkSelectPlan } from "../../sdk/db.ts";
-import * as Compiler from "../../platform/compiler.ts";
+import { formatSchemaError } from "../../sdk/schema.ts";
+import { formatCompileError, formatDecodeError } from "../../platform/sqlite.ts";
 
 const test = Deno.test;
 
@@ -464,7 +467,7 @@ test("normalise accepts the limit range and rejects everything outside it", () =
 test("normalise drops the order of an aggregate plan and leaves other plans alone", () => {
   const order = { field: "s", direction: "asc" } as const;
   assert.equal(
-    normalise({ ...base, order, aggregate: { kind: "count" } }).pipe(Either.getOrThrow).order,
+    expectRight(normalise({ ...base, order, aggregate: { kind: "count" } })).order,
     undefined,
   );
   const grouped = expectRight(normalise({ ...base, order, aggregate: { kind: "countBy", field: "e" } }));
@@ -542,8 +545,8 @@ test("compileDDL refuses an enum with zero values instead of emitting an unconst
   const error = expectCompile(compileDDL(empty), "empty-enum");
   assert.equal(error.field, "e");
   assert.equal(error.table, "t");
-  // The throwing wrapper renders the new reason too.
-  assert.throws(() => Compiler.compileDDL(empty), { message: "Enum has no values: e" });
+  // The legacy renderer covers the new reason too.
+  assert.equal(formatCompileError(error).message, "Enum has no values: e");
 });
 
 test("compileDDL omits the CHECK when an enum node has no values at all", () => {
@@ -628,7 +631,7 @@ test("safeNumber narrows driver integers and refuses to lose precision", () => {
 });
 
 test("decodeValue reverses encode for every node kind", () => {
-  assert.equal(decodeValue(fields.nil.node, null).pipe(Either.getOrThrow), null);
+  assert.equal(expectRight(decodeValue(fields.nil.node, null)), null);
   assert.equal(expectRight(decodeValue(fields.i.node, 7n)), 7);
   assert.equal(expectRight(decodeValue(fields.n.node, "1.5")), 1.5);
   // SQLite stores 0/1; DuckDB's BOOLEAN cast can return a real boolean, and BIGINT a bigint.
@@ -712,7 +715,7 @@ test("decode reports a missing column explicitly instead of coercing it downstre
 });
 
 // ---------------------------------------------------------------------------
-// The IR mirror, and `platform/compiler.ts`'s legacy messages
+// The IR mirror, and the legacy message rendering
 // ---------------------------------------------------------------------------
 
 type Mirrors<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
@@ -724,69 +727,68 @@ test("core/plan.ts's SelectPlan mirrors sdk/db.ts's exactly", () => {
   assert.equal(mirrored, true);
 });
 
-test("the *OrThrow wrappers reproduce the pre-port messages verbatim", () => {
+test("the legacy renderers reproduce the pre-port messages verbatim", () => {
   const plan = (over: Partial<SelectPlan>): SdkSelectPlan => ({ ...base, ...over });
-  const cases: [() => unknown, string][] = [
-    [() => Compiler.tableFor(columns, "nope"), "Unknown collection: nope"],
-    [() => Compiler.compileSelect(columns, plan({ limit: 0 }), "sqlite"), "Invalid limit"],
+  const compileCases: [Either.Either<unknown, AnyError>, string][] = [
+    [tableFor(columns, "nope"), "Unknown collection: nope"],
+    [compileSelect(columns, plan({ limit: 0 }), "sqlite"), "Invalid limit"],
     [
-      () =>
-        Compiler.compileSelect(columns, plan({ filters: [{ field: "nope", op: "eq", value: 1 }] }), "sqlite"),
+      compileSelect(columns, plan({ filters: [{ field: "nope", op: "eq", value: 1 }] }), "sqlite"),
       "Unknown field: nope",
     ],
     [
-      () =>
-        Compiler.compileSelect(columns, plan({ filters: [{ field: "arr", op: "eq", value: [] }] }), "sqlite"),
+      compileSelect(columns, plan({ filters: [{ field: "arr", op: "eq", value: [] }] }), "sqlite"),
       "Array predicates/ordering are not supported: arr",
     ],
     [
-      () =>
-        Compiler.compileSelect(
-          columns,
-          plan({ filters: [{ field: "s", op: "lt" as "eq", value: "x" }] }),
-          "sqlite",
-        ),
+      compileSelect(
+        columns,
+        plan({ filters: [{ field: "s", op: "lt" as "eq", value: "x" }] }),
+        "sqlite",
+      ),
       "Unsupported operator",
     ],
     [
-      () =>
-        Compiler.compileSelect(columns, plan({ filters: [{ field: "s", op: "gt", value: "x" }] }), "sqlite"),
+      compileSelect(columns, plan({ filters: [{ field: "s", op: "gt", value: "x" }] }), "sqlite"),
       "gt requires a non-null numeric field and value",
     ],
     [
-      () =>
-        Compiler.compileSelect(columns, plan({ order: { field: "s", direction: "x" as "asc" } }), "sqlite"),
+      compileSelect(columns, plan({ order: { field: "s", direction: "x" as "asc" } }), "sqlite"),
       "Invalid ordering",
     ],
-    [
-      () => Compiler.decode(columns, plan({}), [{ ...row, _version: 2n ** 70n }]),
-      "Integer result exceeds JavaScript safe range",
-    ],
-    // Schema failures keep `sdk/schema.ts`'s rendering, unchanged.
-    [() => Compiler.compileInsert(columns, "probe", { ...body, extra: 1 }, meta), "Unknown field: extra"],
-    [() => Compiler.quote('a"b'), 'Invalid identifier: a"b'],
   ];
-  for (const [run, message] of cases) assert.throws(run, { message }, message);
+  for (const [either, message] of compileCases) {
+    assert.equal(formatCompileError(expectLeft(either) as CompileError).message, message);
+  }
+  // Decode failures render through `formatDecodeError`.
+  assert.equal(
+    formatDecodeError(expectLeft(decode(columns, plan({}), [{ ...row, _version: 2n ** 70n }])) as DecodeError)
+      .message,
+    "Integer result exceeds JavaScript safe range",
+  );
+  // Schema failures keep `sdk/schema.ts`'s rendering, unchanged.
+  assert.equal(
+    formatSchemaError(expectLeft(compileInsert(columns, "probe", { ...body, extra: 1 }, meta)) as SchemaError)
+      .message,
+    "Unknown field: extra",
+  );
+  assert.equal(
+    formatSchemaError(expectLeft(quote('a"b')) as SchemaError).message,
+    'Invalid identifier: a"b',
+  );
 });
 
-test("the legacy exports still produce SQL, and carry the tagged error as the cause", () => {
-  assert.equal(Compiler.quote("probe"), '"probe"');
-  assert.equal(Compiler.literal("O'Hara"), "'O''Hara'");
-  assert.equal(
-    Compiler.compileSelect(columns, base, "sqlite").text,
-    Compiler.compileSelectEither(columns, base, "sqlite").pipe(Either.getOrThrow).text,
-  );
-  assert.equal(Compiler.compileDDL(columns).length, 2);
-  assert.equal(Compiler.compileDelete(columns, "probe", "d").text, 'DELETE FROM "probe" WHERE "_id" = ?');
-  assert.equal(Compiler.compileReplace(columns, "probe", "d", body).values.at(-1), "d");
-  assert.equal((Compiler.decode(columns, base, [row]) as unknown[]).length, 1);
+test("the Either compiler API produces SQL, and the renderers carry the tagged error as the cause", () => {
+  assert.equal(expectRight(quote("probe")), '"probe"');
+  assert.equal(literal("O'Hara"), "'O''Hara'");
+  assert.match(expectRight(compileSelect(columns, base, "sqlite")).text, /^SELECT /);
+  assert.equal(expectRight(compileDDL(columns)).length, 2);
+  assert.equal(expectRight(compileDelete(columns, "probe", "d")).text, 'DELETE FROM "probe" WHERE "_id" = ?');
+  assert.equal(expectRight(compileReplace(columns, "probe", "d", body)).values.at(-1), "d");
+  assert.equal((expectRight(decode(columns, base, [row])) as unknown[]).length, 1);
   // The structured error survives as `cause`, so callers can still branch on the reason.
-  try {
-    Compiler.tableFor(columns, "nope");
-    assert.fail("expected a raised error");
-  } catch (error) {
-    const cause = (error as Error).cause as CompileError;
-    assert.equal(cause._tag, "CompileError");
-    assert.equal(cause.reason, "unknown-collection");
-  }
+  const rendered = formatCompileError(expectLeft(tableFor(columns, "nope")) as CompileError);
+  const cause = rendered.cause as CompileError;
+  assert.equal(cause._tag, "CompileError");
+  assert.equal(cause.reason, "unknown-collection");
 });

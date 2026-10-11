@@ -21,6 +21,13 @@ import { compileDDL } from "../../core/compile/ddl.ts";
 import { compileInsert } from "../../core/compile/write.ts";
 import { schema } from "../../app/schema.ts";
 import { IdGen, type ReaderReply } from "../../platform/services.ts";
+
+/** Unwrap a right, failing the test with the rendered left on a left. */
+function expectRight<A, E>(either: Either.Either<A, E>): A {
+  if (Either.isRight(either)) return either.right;
+  assert.fail(`expected a right, got left ${JSON.stringify(either.left)}`);
+}
+
 import {
   fallbackTraceId,
   readTraceContext,
@@ -230,7 +237,7 @@ async function withFixture(run: (dir: string) => Promise<void>): Promise<void> {
     const { DatabaseSync } = await import("node:sqlite");
     const db = new DatabaseSync(join(dir, "tic-tac-toe.sqlite"));
     try {
-      for (const statement of Either.getOrThrow(compileDDL(schema))) db.exec(statement);
+      for (const statement of expectRight(compileDDL(schema))) db.exec(statement);
       const game = {
         xPlayer: "alice",
         oPlayer: "bob",
@@ -239,7 +246,7 @@ async function withFixture(run: (dir: string) => Promise<void>): Promise<void> {
         status: "playing",
         winner: null,
       };
-      const insert = Either.getOrThrow(
+      const insert = expectRight(
         compileInsert(schema, "games", game, { _id: "game-1", _creationTime: 1 }),
       );
       db.prepare(insert.text).run(...insert.values);
