@@ -31,7 +31,6 @@ import {
 } from "../../core/errors.ts";
 import type { BackupEventRecord, EventRecord } from "../../core/events.ts";
 import {
-  Backups as LegacyBackups,
   BackupsLive,
   integrityCheck,
   makeBackupRunner,
@@ -49,7 +48,7 @@ import {
   type ObjectStoreService,
   Storage,
 } from "../../platform/services.ts";
-import { SQLiteWriter, StorageLive } from "../../platform/sqlite.ts";
+import { StorageLive } from "../../platform/sqlite.ts";
 import { schema } from "../../app/schema.ts";
 import { functions } from "../../app/functions.ts";
 
@@ -623,55 +622,6 @@ test("verifySnapshot accepts a healthy file and rejects a non-database as Snapsh
     assert.equal(error.file, bad);
     assert.throws(() => integrityCheck(bad), /Snapshot failed integrity check/);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-// ---------------------------------------------------------------------------
-// Deprecated compatibility class (platform/server.ts until item 22)
-// ---------------------------------------------------------------------------
-
-test("legacy Backups class: takes a real SQLiteWriter snapshot and rejects a concurrent second take", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "ts-db-legacy-backup-"));
-  const writer = new SQLiteWriter(join(dir, "app.sqlite"), schema);
-  try {
-    const objects = new Map<string, Uint8Array>();
-    const entered = Promise.withResolvers<void>();
-    const uploadGate = Promise.withResolvers<void>();
-    const backups = new LegacyBackups({
-      put: async (key, bytes) => {
-        if (key.endsWith(".sqlite")) {
-          entered.resolve();
-          await uploadGate.promise;
-        }
-        objects.set(key, bytes);
-      },
-      get: (key) => Promise.resolve(objects.get(key)!),
-    });
-    await writer.mutation(functions.createGame, { xPlayer: "a", oPlayer: "b" });
-    const first = backups.take("app", writer);
-    await entered.promise;
-    await assert.rejects(backups.take("app", writer), /Backup already running for this app/);
-    uploadGate.resolve();
-    const manifest = await first;
-    assert.equal(dec.decode(objects.get("apps/app/latest.json")), JSON.stringify(manifest, null, 2));
-    assert.equal(await sha256(objects.get(manifest.key)!), manifest.sha256);
-
-    // Upload failures surface as an Error naming the phase; latest.json stays put.
-    const before = objects.get("apps/app/latest.json")!;
-    const failing = new LegacyBackups({
-      put: (key, bytes) => {
-        if (key.endsWith(".sqlite")) return Promise.reject(new Error("boom"));
-        objects.set(key, bytes);
-        return Promise.resolve();
-      },
-      get: (key) => Promise.resolve(objects.get(key)!),
-    });
-    await assert.rejects(failing.take("app", writer), /Backup failed at put-object: .*boom/);
-    assert.equal(objects.get("apps/app/latest.json"), before);
-    assert.equal([...objects.keys()].length, 3, "nothing new was written");
-  } finally {
-    await writer.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });

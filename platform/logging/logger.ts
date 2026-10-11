@@ -39,9 +39,9 @@
  * whatever closes this layer's scope, and the server/reader entrypoints (items 16 and 22) own the
  * SIGTERM/SIGINT wiring that gets there (sq-01 pitfall 4).
  *
- * `console.error` appears exactly once in this directory, in `noteFailure`: the documented
- * degradation path for when the event log itself cannot be written, rate-limited to one line per
- * minute of wall time (plan item 11 step 3). There is no `console.log` anywhere.
+ * stderr is written exactly once in this directory, in `noteFailure`: the documented degradation
+ * path for when the event log itself cannot be written, rate-limited to one line per minute of wall
+ * time (plan item 11 step 3). Nothing here uses the console (item 22's `platform/` grep).
  */
 import {
   Cause,
@@ -83,6 +83,7 @@ const MAX_FLUSH_MS = 60_000;
 const MIN_CAPACITY = 1;
 /** At most one stderr degradation line per minute of wall time. */
 const STDERR_THROTTLE_MS = 60_000;
+const stderrText = new TextEncoder();
 /** `traceId` on sink-internal records: they belong to no request. */
 const SINK_TRACE_ID = "event-sink";
 /** `phase` on a log record that carries no `Effect.withLogSpan` label. */
@@ -342,10 +343,14 @@ function makeSink(role: LogRole): Effect.Effect<SinkParts, never, Config | Scope
       const nowMs = Date.now();
       if (nowMs - counters.lastStderrMs < STDERR_THROTTLE_MS) return;
       counters.lastStderrMs = nowMs;
-      console.error(
-        `ts-db event sink (${role}): ${counters.failed} record(s) lost to I/O failure; ` +
-          `latest: ${describeFailure(cause)}`,
-      );
+      try {
+        Deno.stderr.writeSync(stderrText.encode(
+          `ts-db event sink (${role}): ${counters.failed} record(s) lost to I/O failure; ` +
+            `latest: ${describeFailure(cause)}\n`,
+        ));
+      } catch {
+        // stderr is gone too; the loss is still counted.
+      }
     };
 
     /** Runs one append, converting any failure or defect into a counted, reported loss. */

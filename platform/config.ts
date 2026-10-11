@@ -27,6 +27,7 @@ import {
   type EventLogConfig,
   type LoggingConfig,
   type ObjectStoreConfig,
+  type ReaderConfig,
   type ServerConfig,
 } from "./services.ts";
 
@@ -289,6 +290,17 @@ export const OPTIONS = [
     description:
       "Persistent DuckDB file backing the ingested event log, resolved to an absolute path. Defaults to eventlog.duckdb inside DATA_DIR.",
   },
+
+  // --- reader ---
+  {
+    name: "readerCallTimeoutMs",
+    envVar: "READER_CALL_TIMEOUT_MS",
+    type: "number",
+    default: 30_000,
+    defaultLabel: "30000",
+    description:
+      "Per-call deadline in milliseconds for a request to the reader process; a call with no reply by then fails with HTTP 502. Must be finite and > 0.",
+  },
 ] as const satisfies readonly OptionSpec[];
 
 /** Renders `OPTIONS` as the exact markdown table the README "Configuration" section must contain. */
@@ -398,6 +410,17 @@ function assemble(values: Decoded): Effect.Effect<ConfigService, ConfigError> {
     );
   }
 
+  const readerCallTimeoutMs = num(values, "readerCallTimeoutMs");
+  if (!Number.isFinite(readerCallTimeoutMs) || readerCallTimeoutMs <= 0) {
+    return Effect.fail(
+      configError(
+        "READER_CALL_TIMEOUT_MS",
+        "out-of-range",
+        `READER_CALL_TIMEOUT_MS must be finite and > 0, got ${readerCallTimeoutMs}`,
+      ),
+    );
+  }
+
   const s3BaseUrl = optStr(values, "s3BaseUrl");
   const awsAccessKeyId = optStr(values, "awsAccessKeyId");
   const awsSecretAccessKey = optStr(values, "awsSecretAccessKey");
@@ -420,19 +443,9 @@ function assemble(values: Decoded): Effect.Effect<ConfigService, ConfigError> {
   const adminToken = str(values, "adminToken");
   const columnAppToken = str(values, "columnAppToken");
   const jsonAppToken = str(values, "jsonAppToken");
-  if (
-    adminToken === DEV_TOKEN_DEFAULT || columnAppToken === DEV_TOKEN_DEFAULT ||
-    jsonAppToken === DEV_TOKEN_DEFAULT
-  ) {
-    // HOOK(item-07, item-22): emit a lifecycle warn-level event
-    // { kind: "lifecycle", level: "warn", phase: "config", detail: "default dev-only token in use" }
-    // via core/events.ts's EventSink once item 07 lands. OWNERSHIP: item 22 (server port) owns
-    // this as a named acceptance follow-up — when item 22 ports server.ts onto this Config it
-    // must emit this warning whenever a dev-only token default is in effect, replacing today's
-    // unconditional console.error banner (platform/server.ts:84). Not emitted here: EventSinkLive
-    // is item 11 and consumes Config, so emitting from inside ConfigLive would be a layer cycle.
-    // The dev-token defaults themselves keep working either way.
-  }
+  // A dev-only token still in effect is reported by `platform/server.ts` at startup, as one
+  // `lifecycle` warn event (phase `config`), not here: the event sink consumes Config, so emitting
+  // from inside ConfigLive would be a layer cycle. The defaults themselves keep working either way.
 
   const server: ServerConfig = {
     hostname: str(values, "bindHost"),
@@ -467,8 +480,9 @@ function assemble(values: Decoded): Effect.Effect<ConfigService, ConfigError> {
     localDir: resolve(str(values, "localObjectDir")),
   };
   const eventLog: EventLogConfig = { duckdbPath: eventlogDuckdbPath };
+  const reader: ReaderConfig = { callTimeoutMs: readerCallTimeoutMs };
 
-  return Effect.succeed({ server, apps, backup, logging, objectStore, eventLog });
+  return Effect.succeed({ server, apps, backup, logging, objectStore, eventLog, reader });
 }
 
 function buildConfig(env: EnvRecord): Effect.Effect<ConfigService, ConfigError> {
@@ -494,6 +508,7 @@ export interface ConfigOverrides {
   readonly logging?: Partial<LoggingConfig>;
   readonly objectStore?: Partial<ObjectStoreConfig>;
   readonly eventLog?: Partial<EventLogConfig>;
+  readonly reader?: Partial<ReaderConfig>;
 }
 
 /** Test: ignores the environment; merges `overrides` over the documented defaults. */
@@ -505,6 +520,7 @@ export function ConfigTest(overrides: ConfigOverrides = {}): Layer.Layer<Config>
     logging: { ...DEFAULT_CONFIG.logging, ...overrides.logging },
     objectStore: { ...DEFAULT_CONFIG.objectStore, ...overrides.objectStore },
     eventLog: { ...DEFAULT_CONFIG.eventLog, ...overrides.eventLog },
+    reader: { ...DEFAULT_CONFIG.reader, ...overrides.reader },
   };
   return Layer.succeed(Config, value);
 }

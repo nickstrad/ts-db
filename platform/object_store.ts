@@ -440,10 +440,11 @@ export const ObjectStoreLive: ObjectStoreLayer<ConfigError> = makeObjectStoreLiv
 // ===========================================================================
 
 /**
- * The Promise-shaped interface `platform/backup.ts` and `scripts/restore.ts` still consume.
+ * The Promise-shaped interface `scripts/restore.ts` still consumes (its last caller: item 22 moved
+ * `platform/server.ts` and `platform/backup.ts` onto the `ObjectStore` tag).
  *
- * @deprecated Transitional. Items 19 (`Backups`) and 22 (server composition) move those callers onto
- * the `ObjectStore` tag from `platform/services.ts`; this interface and `objectStore()` go with them.
+ * @deprecated Transitional. Delete this interface and `objectStore()` once `scripts/restore.ts` is
+ * ported onto the `ObjectStore` tag from `platform/services.ts`.
  */
 export interface ObjectStore {
   put(key: string, bytes: Uint8Array): Promise<void>;
