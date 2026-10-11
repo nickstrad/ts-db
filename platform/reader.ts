@@ -1,6 +1,6 @@
 /**
- * The reader process entrypoint (plan item 16): JSON-lines requests on stdin, JSON-lines replies on
- * stdout, one query at a time.
+ * The reader process entrypoint (plan items 16 and 33): JSON-lines requests on stdin, JSON-lines
+ * replies on stdout, one request at a time.
  *
  * It deliberately never imports Node's built-in SQLite module — see `platform/duckdb.ts`.
  *
@@ -9,22 +9,35 @@
  * cannot start or dies.
  *
  * Shape of the program:
+ * - the services come from the reader-only root, `ReaderRootLive` (`platform/reader_layers.ts`):
+ *   `Config`, the reader's log sink, `IdGen`, and `EventLogIngest` over the persistent event-log
+ *   DuckDB file;
  * - a scoped stdin consumer decodes frames with `core/ipc/framing` and serves them strictly in order,
- *   writing each reply before reading the next request (serialized execution, as before the port);
+ *   writing each reply before reading the next request, so a query and an ingest never run at the
+ *   same time (serialized execution, as before the port);
+ * - `reader_context.ts` receives each frame: it validates the optional caller trace properties, then
+ *   the frame itself, and annotates the request's Effect with the caller's trace or the reader-local
+ *   fallback;
  * - per-app readers come from `makeReaderPool` (`platform/duckdb.ts`), opened lazily into the
  *   program's scope and closed with it; a failed open is not cached, and a reader whose `BEGIN`
  *   failed is dropped, so the next request retries on a fresh connection;
+ * - `ingest` is item 36's ingest-then-sweep coordinator: an ingest run and, only after it committed,
+ *   the retention sweep. Its handle opens on the first `ingest`, stays open, and closes
+ *   connection-then-instance with the root; a failed open fails only that request;
  * - every failure a request can produce is answered as a `ReaderErrorFrame` (`platform/services.ts`),
  *   so the parent can rehydrate the tag. A malformed frame is a protocol violation and ends the
- *   process, as it did before the port;
- * - stdin EOF, SIGINT or SIGTERM closes the scope: readers close connection-then-instance, then the
+ *   process, as it did before the port; an invalid trace property is not;
+ * - stdin EOF closes the scope once every request already received has been answered; SIGINT or
+ *   SIGTERM closes it at once, interrupting an in-flight request (an ingest rolls back its open
+ *   batch). Then app readers close connection-then-instance, then the event-log handle, then the
  *   log sink drains and closes.
+ *
+ * `analysis` stays unavailable until item 23's catalog.
  */
-import { Cause, Effect, Exit, Layer, Logger, Option } from "effect";
+import { Cause, Effect, Exit, Logger, Option } from "effect";
 import {
   ConfigError,
   HandlerKindMismatch,
-  IngestError,
   IpcError,
   ReaderError,
   type RemoteReaderError,
@@ -33,52 +46,25 @@ import {
   UnknownHandlerError,
 } from "../core/errors.ts";
 import { decoder } from "../core/ipc/framing.ts";
-import { ConfigLive } from "./config.ts";
 import { emitLifecycle, makeReaderPool } from "./duckdb.ts";
-import { LoggingReaderLive } from "./logging/logger.ts";
-import { loadApps } from "./registry.ts";
-import { EventSink, type ReaderErrorFrame, type ReaderReply, type ReaderRequestFrame } from "./services.ts";
+import { type ReceivedRequest, receiveFrame, withRequestContext } from "./reader_context.ts";
+import { ReaderRootLive } from "./reader_layers.ts";
+import { appsFromConfig } from "./registry.ts";
+import {
+  Config,
+  EventLogIngest,
+  EventSink,
+  type IdGen,
+  type ReaderErrorFrame,
+  type ReaderReply,
+  type ReaderRequestFrame,
+} from "./services.ts";
 
 const encoder = new TextEncoder();
 
 // ---------------------------------------------------------------------------
 // Wire format
 // ---------------------------------------------------------------------------
-
-/** Validates one request line against the frozen `ReaderRequestFrame` shape. */
-function parseFrame(line: string): Effect.Effect<ReaderRequestFrame, IpcError> {
-  return Effect.gen(function* () {
-    const value: unknown = yield* Effect.try({
-      try: () => JSON.parse(line),
-      catch: (cause) => new IpcError({ reason: "malformed-frame", detail: "request is not JSON", cause }),
-    });
-    const frame = value as Record<string, unknown> | null;
-    const malformed = (detail: string) => Effect.fail(new IpcError({ reason: "malformed-frame", detail }));
-    if (typeof frame !== "object" || frame === null || Array.isArray(frame)) {
-      return yield* malformed("request is not an object");
-    }
-    if (typeof frame.id !== "number" || !Number.isSafeInteger(frame.id)) {
-      return yield* malformed("request id is not an integer");
-    }
-    switch (frame.kind) {
-      case "ping":
-      case "ingest":
-        return frame as ReaderRequestFrame;
-      case "query":
-        if (typeof frame.appId !== "string" || typeof frame.name !== "string") {
-          return yield* malformed("query request needs string appId and name");
-        }
-        return frame as ReaderRequestFrame;
-      case "analysis":
-        if (typeof frame.name !== "string" || typeof frame.params !== "object" || frame.params === null) {
-          return yield* malformed("analysis request needs a name and params");
-        }
-        return frame as ReaderRequestFrame;
-      default:
-        return yield* malformed(`unknown request kind ${JSON.stringify(frame.kind)}`);
-    }
-  });
-}
 
 /** JSON that cannot throw on the values tagged errors carry (`DecodeError.actual` may be a bigint). */
 function stringify(value: unknown): string {
@@ -148,8 +134,9 @@ function encodeReply(reply: ReaderReply): Uint8Array {
 
 const program = Effect.gen(function* () {
   const sink = yield* EventSink;
+  const eventLog = yield* EventLogIngest;
   const readerFor = yield* makeReaderPool();
-  const apps = loadApps();
+  const apps = new Map(appsFromConfig(yield* Config).map((app) => [app.id, app] as const));
   const pid = Deno.pid;
   const lifecycle = (phase: string, detail?: unknown) => emitLifecycle(sink, phase, detail);
 
@@ -175,25 +162,25 @@ const program = Effect.gen(function* () {
           }
           return yield* readerFor(app).query(definition, frame.args);
         });
-      // Items 21 and 23 implement these over the event-log DuckDB file.
       case "ingest":
-        return Effect.fail(
-          new IngestError({ phase: "inventory", detail: "event-log ingest is not available" }),
-        );
+        return eventLog.ingest;
+      // Item 23 implements this over the event-log DuckDB file.
       case "analysis":
         return Effect.fail(new UnknownAnalysisQuery({ name: frame.name, known: [] }));
     }
   };
 
-  const serve = (frame: ReaderRequestFrame): Effect.Effect<ReaderReply> =>
-    answer(frame).pipe(
+  /** Answers one request under its trace context (`reader_context.ts`). Cannot fail. */
+  const serve = (received: ReceivedRequest): Effect.Effect<ReaderReply, never, IdGen> => {
+    const { frame } = received;
+    return answer(frame).pipe(
       Effect.map((result): ReaderReply => ({ id: frame.id, result })),
       Effect.catchAll((error) => Effect.succeed<ReaderReply>({ id: frame.id, error: toFrame(error) })),
       // A defect is a bug (in the platform or in app handler code). Log it in full here; the
       // caller gets a 500-class `ReaderError` without the stack.
       Effect.catchAllCause((cause) =>
         Effect.as(
-          Effect.logError("query handler defect", cause),
+          Effect.logError(`${frame.kind} handler defect`, cause),
           {
             id: frame.id,
             error: toFrame(
@@ -205,11 +192,9 @@ const program = Effect.gen(function* () {
           },
         )
       ),
-      Effect.annotateLogs({
-        traceId: `reader-${pid}-${frame.id}`,
-        ...(frame.kind === "query" ? { appId: frame.appId } : {}),
-      }),
+      (served) => withRequestContext(received, pid, served),
     );
+  };
 
   const output = yield* Effect.acquireRelease(
     Effect.sync(() => Deno.stdout.writable.getWriter()),
@@ -235,7 +220,7 @@ const program = Effect.gen(function* () {
     const text = new TextDecoder();
     const frames = decoder();
     const handle = (lines: readonly string[]) =>
-      Effect.forEach(lines, (line) => Effect.flatMap(Effect.flatMap(parseFrame(line), serve), write), {
+      Effect.forEach(lines, (line) => Effect.flatMap(Effect.flatMap(receiveFrame(line), serve), write), {
         discard: true,
       });
     while (true) {
@@ -268,10 +253,7 @@ const program = Effect.gen(function* () {
   yield* lifecycle("stopping", { reason: stopped });
 });
 
-/** Config from the environment, and the reader's own JSONL sink + `Effect.log*` replacement. */
-const ReaderProcessLive = LoggingReaderLive.pipe(Layer.provideMerge(ConfigLive));
-
-const main = program.pipe(Effect.scoped, Effect.provide(ReaderProcessLive));
+const main = program.pipe(Effect.scoped, Effect.provide(ReaderRootLive));
 
 // Effect's default logger writes to stdout, which belongs to the RPC protocol. A failure that ends
 // the process — including a `ConfigError` raised before the JSONL sink exists — goes to stderr.

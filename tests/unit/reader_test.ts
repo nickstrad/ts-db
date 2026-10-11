@@ -177,7 +177,8 @@ if (fixture === undefined) {
       assert.equal(tag(5), "UnknownHandlerError");
       assert.equal(tag(6), "HandlerKindMismatch");
       assert.equal(tag(7), "SchemaError");
-      assert.equal(tag(8), "IngestError");
+      // Item 33: `ingest` is answered by the event-log ingest-then-sweep coordinator.
+      assert.equal(typeof (result(8) as { filesScanned?: unknown }).filesScanned, "number");
       assert.equal(result(9), null);
       const frame = (replies[6] as { error: { message: string; fields: Record<string, unknown> } }).error;
       assert.equal(frame.fields.path, "gameId");
@@ -194,7 +195,8 @@ if (fixture === undefined) {
       assert.ok(records.every((r) => r.role === "reader"));
       const phases = records.flatMap((r) => r.kind === "lifecycle" ? [r.phase] : []);
       assert.equal(phases[0], "ready");
-      assert.equal(phases.at(-1), "stopping");
+      // Item 33: the event-log handle opened by the ingest closes after serving stops.
+      assert.deepEqual(phases.slice(-2), ["stopping", "eventlog-closed"]);
       const txs = records.filter((r): r is TxEventRecord => r.kind === "tx");
       assert.ok(
         txs.some((r) => r.outcome === "commit" && r.engine === "duckdb" && r.appId === "tic-tac-toe"),
