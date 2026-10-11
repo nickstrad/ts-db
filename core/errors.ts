@@ -368,6 +368,45 @@ export class UnknownAnalysisQuery extends Data.TaggedError("UnknownAnalysisQuery
 }> {}
 
 // ---------------------------------------------------------------------------
+// Tenancy (MT-03)
+// ---------------------------------------------------------------------------
+
+/**
+ * A tenant id that is not a strictly-parsed canonical-lowercase UUID. Raised by
+ * `platform/tenants/registry.ts:parseTenantId` (and `parseApiKeyId`) on anything else:
+ * uppercase, `urn:uuid:` forms, NUL, whitespace, percent-encoded forms, separators.
+ * The brand on `TenantId` guarantees the parse already happened, so this never escapes
+ * a parsed id.
+ */
+export class MalformedTenantId extends Data.TaggedError("MalformedTenantId")<{
+  /** The offending input, verbatim. Ids are UUIDs, never secrets. */
+  readonly input: string;
+}> {}
+
+/**
+ * No tenant is addressed by this id — or no usable API key hashes to one.
+ * `resolveTenantByKeyHash` fails this for unknown keys, revoked keys, and inactive
+ * tenants alike, so callers cannot distinguish the three (no key-guessing oracle).
+ */
+export class UnknownTenant extends Data.TaggedError("UnknownTenant")<{
+  /** The tenant id that missed, when one was supplied (absent for key-hash lookups). */
+  readonly tenantId?: string;
+}> {}
+
+/** The tenant exists but is deactivated. Its keys stay revoked even if it is reactivated. */
+export class TenantDeactivated extends Data.TaggedError("TenantDeactivated")<{
+  readonly tenantId: string;
+}> {}
+
+/**
+ * The tenant domain's failures (MT-03). Deliberately NOT in `PlatformError` yet: no HTTP
+ * surface serves these until MT-05/MT-07 land, and the frozen tag inventory in
+ * `tests/errors_exhaustiveness.ts` (item 02) must stay green until the item that adds the
+ * surface promotes them with their `toHttpStatus` cases.
+ */
+export type TenantError = MalformedTenantId | UnknownTenant | TenantDeactivated;
+
+// ---------------------------------------------------------------------------
 // Startup and client
 // ---------------------------------------------------------------------------
 
@@ -468,7 +507,7 @@ export type CliError = RestoreError;
 export type ClientError = RemoteError;
 
 /** Every error this repo defines. Useful for `core/events.ts`'s `error_tag` column. */
-export type AnyError = PlatformError | StartupError | CliError | ClientError;
+export type AnyError = PlatformError | StartupError | CliError | ClientError | TenantError;
 
 // ---------------------------------------------------------------------------
 // HTTP status mapping
