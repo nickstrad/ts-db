@@ -297,21 +297,33 @@ deno task perf:ingest   # k6 JSON output -> DuckDB k6_points
 
 ## 3. Batches and items
 
-29 items in 11 batches (0–10). Summary first; full item specs follow.
+37 items in 12 batches (0–11). Batch 11 is appended below but executes immediately after 22 and the item-24
+prerequisite, before 23 and every MT item. Summary first; full item specs follow.
 
-| Batch | Items              | Concurrency                                           | Gate to next batch                                 |
-| ----- | ------------------ | ----------------------------------------------------- | -------------------------------------------------- |
-| 0     | 01                 | single item, **SYNC**                                 | lockfile + tasks exist                             |
-| 1     | 02, 03             | 2 concurrent; **both SYNC prerequisites** for batch 2 | error taxonomy + service tags frozen; k6 installed |
-| 2     | 04, 05, 06, 07, 08 | 5 concurrent                                          | pure core modules exist                            |
-| 3     | 09, 10             | 2 concurrent; **both SYNC prerequisites** for batch 4 | compiler + SDK Effect types frozen                 |
-| 4     | 11, 12, 13, 14     | 4 concurrent                                          | logger + property suites + k6 scenarios            |
-| 5     | 15, 16, 17, 18     | 4 concurrent                                          | all four adapters are Effect services              |
-| 6     | 19, 20, 21         | 3 concurrent                                          | backups, test layers, DuckDB ingest                |
-| 7     | 22                 | single item, **SYNC**                                 | server runs entirely on layers                     |
-| 8     | 23, 24, 25         | 3 concurrent                                          | analysis CLI, retention sweeper, integration       |
-| 9     | 26, 27             | 2 concurrent                                          | wrappers removed, docs true                        |
-| 10    | 28, 29             | 2 concurrent; starts only after batch 9 lands         | runnable demos, platform user guide                |
+| Batch         | Items              | Concurrency                                           | Gate to next batch                                 |
+| ------------- | ------------------ | ----------------------------------------------------- | -------------------------------------------------- |
+| 0             | 01                 | single item, **SYNC**                                 | lockfile + tasks exist                             |
+| 1             | 02, 03             | 2 concurrent; **both SYNC prerequisites** for batch 2 | error taxonomy + service tags frozen; k6 installed |
+| 2             | 04, 05, 06, 07, 08 | 5 concurrent                                          | pure core modules exist                            |
+| 3             | 09, 10             | 2 concurrent; **both SYNC prerequisites** for batch 4 | compiler + SDK Effect types frozen                 |
+| 4             | 11, 12, 13, 14     | 4 concurrent                                          | logger + property suites + k6 scenarios            |
+| 5             | 15, 16, 17, 18     | 4 concurrent                                          | all four adapters are Effect services              |
+| 6             | 19, 20, 21         | 3 concurrent                                          | backups, test layers, DuckDB ingest                |
+| 7             | 22                 | single item, **SYNC**                                 | server runs entirely on layers                     |
+| 8 (early)     | 24                 | prerequisite implementation, **SYNC**                 | retention base for 36                              |
+| 11            | 30–37              | staged SYNC gate; see batch 11                        | correctness fixes before 23 and MT                 |
+| 8 (remaining) | 23, 25             | 2 concurrent, after batch 11                          | analysis CLI and integration                       |
+| 9             | 26, 27             | 2 concurrent                                          | wrappers removed, docs true                        |
+| 10            | 28, 29             | 2 concurrent; starts only after batch 9 lands         | runnable demos, platform user guide                |
+
+**Non-reorderable build order (overrides historical batch-8 concurrency):**
+`22 → 24 → batch 11: (30+35) → 31 → 36 → 32 → 33 → 34 → 37 →
+(23+25+MT-01+MT-02) → (26+MT-03) → (MT-04+MT-05) → (MT-07+MT-09) → (MT-06+MT-08) → MT-10 → 27 → (28+29)`.
+Item 24 moves out of the old batch-8 concurrent slot; its implementation is a prerequisite for 36. Its CLI
+acceptance needs item 23's `scripts/logs.ts`: record that check as pending until 23, while requiring its
+direct retention unit tests before 36. Never claim the missing CLI passed. Batch 11 must fully pass before
+item 23 or any MT item starts; these fixes must not queue behind multitenancy. The MT continuation and its
+existing gates remain as recorded in `multitenancy.md` §3.
 
 ---
 
@@ -320,8 +332,8 @@ deno task perf:ingest   # k6 JSON output -> DuckDB k6_points
 #### Item 01 — Dependency pins, import map, complete task table, lockfile
 
 - **Scoping:** SYNC. Single item in its batch. Everything else depends on the lockfile and tasks.
-- **Model:** **Sonnet.** Mechanical configuration with an exactly specified target and a command-checkable
-  outcome.
+- **Model:** **Sonnet / luna.** Mechanical configuration with an exactly specified target and a
+  command-checkable outcome.
 - **Owns:** `deno.json`, `deno.lock` (new), `.gitignore`.
 - **Reads:** nothing.
 - **Work:**
@@ -353,9 +365,9 @@ Items 02 and 03 run **concurrently** (one touches only TypeScript, the other onl
 #### Item 02 — Error taxonomy and service tags (declarations only)
 
 - **Scoping:** CONCURRENT with 03. SYNC prerequisite for batches 2–9.
-- **Model:** **Opus.** This is the contract every other item codes against; the tag union, the error payload
-  shapes and the service interface signatures are the one thing in this plan that is expensive to change
-  later.
+- **Model:** **Opus / sol.** This is the contract every other item codes against; the tag union, the error
+  payload shapes and the service interface signatures are the one thing in this plan that is expensive to
+  change later.
 - **Owns:** `core/errors.ts`, `platform/services.ts`, `docs/adr/0001-effect-port.md`,
   `docs/adr/0002-error-taxonomy.md`.
 - **Reads:** all existing sources (to enumerate every current `throw` site).
@@ -385,8 +397,8 @@ Items 02 and 03 run **concurrently** (one touches only TypeScript, the other onl
 #### Item 03 — k6 install and smoke scenario against the current server
 
 - **Scoping:** CONCURRENT with 02. Touches no TypeScript.
-- **Model:** **Sonnet.** Install a binary, write one k6 script against an HTTP API that already exists and is
-  documented in `README.md`.
+- **Model:** **Sonnet / luna.** Install a binary, write one k6 script against an HTTP API that already exists
+  and is documented in `README.md`.
 - **Owns:** `perf/smoke.js`, `perf/lib/api.js`, `perf/README.md`, `docs/adr/0003-k6-perf.md`.
 - **Reads:** `README.md`, `platform/server.ts` (routes, auth header), `scripts/demo.ts` (call order).
 - **Work:**
@@ -419,7 +431,7 @@ compatibility wrapper so the existing 20 tests stay green within the same commit
 #### Item 04 — `core/schema.ts`: total validation
 
 - **Scoping:** CONCURRENT with 05–08.
-- **Model:** **Opus.** Converting `validate`/`parseObject` to total `Either`-returning functions while
+- **Model:** **Opus / sol.** Converting `validate`/`parseObject` to total `Either`-returning functions while
   preserving exact semantics (nullable handling, `Number.isSafeInteger` for integers, fixed array length,
   recursive array validation, unknown-field rejection, partial mode for patches) is a semantics-preserving
   refactor where a subtle change silently weakens validation.
@@ -450,8 +462,8 @@ compatibility wrapper so the existing 20 tests stay green within the same commit
 #### Item 05 — `core/ipc/framing.ts`: pure JSON-lines decoder
 
 - **Scoping:** CONCURRENT with 04, 06, 07, 08.
-- **Model:** **Sonnet.** Small, self-contained state machine with an obvious contract; the current `lines()`
-  implementation is 14 lines and already correct.
+- **Model:** **Sonnet / luna.** Small, self-contained state machine with an obvious contract; the current
+  `lines()` implementation is 14 lines and already correct.
 - **Owns:** `core/ipc/framing.ts`, `tests/unit/framing_test.ts`, `platform/ipc.ts`.
 - **Reads:** `core/errors.ts`.
 - **Work:**
@@ -474,7 +486,7 @@ compatibility wrapper so the existing 20 tests stay green within the same commit
 #### Item 06 — `core/logging/rotation.ts`: pure rotation and retention policy
 
 - **Scoping:** CONCURRENT with 04, 05, 07, 08.
-- **Model:** **Sonnet.** Pure date/path arithmetic against a specified policy; the risky part (actually
+- **Model:** **Sonnet / luna.** Pure date/path arithmetic against a specified policy; the risky part (actually
   deleting files) is deliberately not in this item.
 - **Owns:** `core/logging/rotation.ts`, `tests/unit/rotation_test.ts`.
 - **Reads:** `core/errors.ts`.
@@ -503,8 +515,8 @@ compatibility wrapper so the existing 20 tests stay green within the same commit
 #### Item 07 — `core/events.ts`: event taxonomy, constructors, redaction
 
 - **Scoping:** CONCURRENT with 04, 05, 06, 08.
-- **Model:** **Sonnet.** Type and constructor definitions against the schema fixed in §4.1 of this plan; no
-  I/O.
+- **Model:** **Sonnet / luna.** Type and constructor definitions against the schema fixed in §4.1 of this
+  plan; no I/O.
 - **Owns:** `core/events.ts`, `tests/unit/events_test.ts`.
 - **Reads:** `core/errors.ts`.
 - **Work:**
@@ -528,8 +540,8 @@ compatibility wrapper so the existing 20 tests stay green within the same commit
 #### Item 08 — `platform/config.ts`: the single env boundary
 
 - **Scoping:** CONCURRENT with 04–07.
-- **Model:** **Sonnet.** Mechanical consolidation of nine `Deno.env.get` call sites behind one service, with
-  validation rules that already exist in the code.
+- **Model:** **Sonnet / luna.** Mechanical consolidation of nine `Deno.env.get` call sites behind one service,
+  with validation rules that already exist in the code.
 - **Owns:** `platform/config.ts`, `tests/unit/config_test.ts`, plus the "Configuration" section of `README.md`
   (nothing else in that file).
 - **Reads:** `core/errors.ts`, `platform/services.ts`, and every current `Deno.env` site (`registry.ts`,
@@ -575,7 +587,7 @@ must land before batch 4** because items 11–14 and all of batch 5 compile agai
 #### Item 09 — `core/compile/*`: pure, total compiler
 
 - **Scoping:** CONCURRENT with 10. SYNC prerequisite for batch 4.
-- **Model:** **Opus.** This is the SQL-generation core: dialect-specific JSON extraction and casts,
+- **Model:** **Opus / sol.** This is the SQL-generation core: dialect-specific JSON extraction and casts,
   bind-parameter numbering (`?` vs `$pN`), `NULLS FIRST/LAST` ordering with the `_id` tie-breaker, `count` vs
   `countBy` limit semantics, STRICT-mode DDL with enum/boolean/array CHECKs. A subtle change here is an
   injection bug or a silent query-semantics change.
@@ -605,10 +617,10 @@ must land before batch 4** because items 11–14 and all of batch 5 compile agai
 #### Item 10 — SDK Effect core: `Execute`, `Documents`, `defineFunctions`, app handlers, client
 
 - **Scoping:** CONCURRENT with 09. SYNC prerequisite for batch 4.
-- **Model:** **Opus.** This changes the public, type-inferred app API: `ScalarKey`/`NumericKey` inference,
-  `Definition` variance, and the `Names`/`ArgsOf`/`ResultOf` client inference all have to keep working, and
-  `tests/types.ts` must keep failing in exactly the same six places. Also the item that decides how app
-  authors experience Effect.
+- **Model:** **Opus / sol.** This changes the public, type-inferred app API: `ScalarKey`/`NumericKey`
+  inference, `Definition` variance, and the `Names`/`ArgsOf`/`ResultOf` client inference all have to keep
+  working, and `tests/types.ts` must keep failing in exactly the same six places. Also the item that decides
+  how app authors experience Effect.
 - **Owns:** `sdk/db.ts`, `sdk/functions.ts`, `sdk/client.ts`, `app/functions.ts`, `app/rules.ts` (new),
   `tests/types.ts`, and the bridging edits in `platform/sqlite.ts` / `platform/duckdb.ts`.
 - **Reads:** `core/errors.ts`, `core/schema.ts`, `platform/services.ts`.
@@ -646,9 +658,9 @@ must land before batch 4** because items 11–14 and all of batch 5 compile agai
 #### Item 11 — Logger service and rotating JSONL sink
 
 - **Scoping:** CONCURRENT with 12, 13, 14.
-- **Model:** **Opus.** A real logging service with a bounded queue, a batching background fiber, scope-ordered
-  flush-on-shutdown, and the guarantee that logging never blocks or fails a mutation. Getting the backpressure
-  policy and the finalizer ordering wrong loses events or hangs shutdown.
+- **Model:** **Opus / sol.** A real logging service with a bounded queue, a batching background fiber,
+  scope-ordered flush-on-shutdown, and the guarantee that logging never blocks or fails a mutation. Getting
+  the backpressure policy and the finalizer ordering wrong loses events or hangs shutdown.
 - **Owns:** `platform/logging/logger.ts`, `platform/logging/file_sink.ts`, `tests/unit/logger_test.ts`.
 - **Reads:** `core/events.ts`, `core/logging/rotation.ts`, `platform/config.ts`, `platform/services.ts`,
   `core/errors.ts`.
@@ -677,8 +689,8 @@ must land before batch 4** because items 11–14 and all of batch 5 compile agai
 #### Item 12 — Property tests, wave 1: schema, rules, framing, rotation
 
 - **Scoping:** CONCURRENT with 11, 13, 14.
-- **Model:** **Sonnet.** The properties are enumerated below and the modules under test are already pure with
-  fixed signatures; writing arbitraries and running them is bounded work.
+- **Model:** **Sonnet / luna.** The properties are enumerated below and the modules under test are already
+  pure with fixed signatures; writing arbitraries and running them is bounded work.
 - **Owns:** `tests/property/arbitraries.ts`, `tests/property/schema_test.ts`, `tests/property/rules_test.ts`,
   `tests/property/framing_test.ts`, `tests/property/rotation_test.ts`.
 - **Reads:** `core/schema.ts`, `app/rules.ts`, `core/ipc/framing.ts`, `core/logging/rotation.ts`.
@@ -711,7 +723,7 @@ must land before batch 4** because items 11–14 and all of batch 5 compile agai
 #### Item 13 — Property tests, wave 2: compiler and plan invariants
 
 - **Scoping:** CONCURRENT with 11, 12, 14.
-- **Model:** **Opus.** The valuable properties here are security and semantics properties over generated
+- **Model:** **Opus / sol.** The valuable properties here are security and semantics properties over generated
   schemas and plans (no unbound literal reaches the SQL string; placeholder count equals bind count; dialects
   agree on shape). Choosing properties that actually catch injection and dialect-drift bugs, rather than
   restating the implementation, is the hard part.
@@ -756,8 +768,8 @@ must land before batch 4** because items 11–14 and all of batch 5 compile agai
 #### Item 14 — k6 load scenarios and output capture
 
 - **Scoping:** CONCURRENT with 11, 12, 13.
-- **Model:** **Sonnet.** Three more k6 scripts following the pattern established in item 03, with thresholds
-  and output paths specified here.
+- **Model:** **Sonnet / luna.** Three more k6 scripts following the pattern established in item 03, with
+  thresholds and output paths specified here.
 - **Owns:** `perf/mutation_load.js`, `perf/query_load.js`, `perf/mixed.js`, `perf/lib/scenarios.js`, and the
   scenario section of `perf/README.md`.
 - **Reads:** `perf/lib/api.js`, `sdk/client.ts` (trace-id header name).
@@ -795,7 +807,7 @@ and emits events through `EventSink`, replacing `platform/registry.ts:trace`.
 #### Item 15 — `Storage` service (SQLite writer)
 
 - **Scoping:** CONCURRENT with 16, 17, 18.
-- **Model:** **Opus.** Transaction boundaries, `BEGIN IMMEDIATE`/`COMMIT`/`ROLLBACK` ordering, the
+- **Model:** **Opus / sol.** Transaction boundaries, `BEGIN IMMEDIATE`/`COMMIT`/`ROLLBACK` ordering, the
   mutation-context expiry flag, the exclusive queue, and the `VACUUM INTO` interaction with that queue are the
   correctness heart of the system. The existing tests for competing moves and rollback are precisely the
   behaviour that must not drift.
@@ -834,9 +846,9 @@ and emits events through `EventSink`, replacing `platform/registry.ts:trace`.
 #### Item 16 — `Reader` service (DuckDB) and reader process entry
 
 - **Scoping:** CONCURRENT with 15, 17, 18.
-- **Model:** **Opus.** Scoped native resources (instance + connection must close in the right order on every
-  path), per-query transaction lifecycle, the query-context expiry flag, and the hard rule that this process
-  must never import `node:sqlite`.
+- **Model:** **Opus / sol.** Scoped native resources (instance + connection must close in the right order on
+  every path), per-query transaction lifecycle, the query-context expiry flag, and the hard rule that this
+  process must never import `node:sqlite`.
 - **Owns:** `platform/duckdb.ts`, `platform/reader.ts`, `tests/unit/reader_test.ts`.
 - **Reads:** `core/compile/*`, `core/errors.ts`, `core/events.ts`, `platform/config.ts`,
   `platform/services.ts`, `platform/logging/*`, `core/ipc/framing.ts`.
@@ -866,9 +878,9 @@ and emits events through `EventSink`, replacing `platform/registry.ts:trace`.
 #### Item 17 — `ReaderClient` service (IPC, parent side)
 
 - **Scoping:** CONCURRENT with 15, 16, 18.
-- **Model:** **Opus.** A child process lifecycle plus a correlation map is a classic source of leaked fibers,
-  lost replies and hangs on shutdown. The current implementation mutates a `pending` map, chains writes
-  through `this.writes`, and swallows failures into `fail()`.
+- **Model:** **Opus / sol.** A child process lifecycle plus a correlation map is a classic source of leaked
+  fibers, lost replies and hangs on shutdown. The current implementation mutates a `pending` map, chains
+  writes through `this.writes`, and swallows failures into `fail()`.
 - **Owns:** `platform/ipc.ts`, `tests/unit/ipc_test.ts`.
 - **Reads:** `core/ipc/framing.ts`, `core/errors.ts`, `core/events.ts`, `platform/services.ts`,
   `platform/config.ts`.
@@ -896,8 +908,8 @@ and emits events through `EventSink`, replacing `platform/registry.ts:trace`.
 #### Item 18 — `ObjectStore` service (local and S3 layers)
 
 - **Scoping:** CONCURRENT with 15, 16, 17.
-- **Model:** **Sonnet.** Two straightforward adapters behind an interface fixed in item 02; the key path
-  validation and the atomic temp-file-rename already exist and just move.
+- **Model:** **Sonnet / luna.** Two straightforward adapters behind an interface fixed in item 02; the key
+  path validation and the atomic temp-file-rename already exist and just move.
 - **Owns:** `platform/object_store.ts`, `tests/unit/object_store_test.ts`.
 - **Reads:** `core/errors.ts`, `core/events.ts`, `platform/config.ts`, `platform/services.ts`.
 - **Work:**
@@ -926,9 +938,9 @@ and emits events through `EventSink`, replacing `platform/registry.ts:trace`.
 #### Item 19 — `Backups` service
 
 - **Scoping:** CONCURRENT with 20, 21.
-- **Model:** **Opus.** The ordering guarantee is the point of this module: snapshot → `quick_check` → hash →
-  immutable object PUT → immutable manifest PUT → _only then_ `latest.json`. The temp-directory finalizer and
-  the per-app "already running" guard have to survive interruption.
+- **Model:** **Opus / sol.** The ordering guarantee is the point of this module: snapshot → `quick_check` →
+  hash → immutable object PUT → immutable manifest PUT → _only then_ `latest.json`. The temp-directory
+  finalizer and the per-app "already running" guard have to survive interruption.
 - **Owns:** `platform/backup.ts`, `tests/unit/backup_test.ts`.
 - **Reads:** `platform/services.ts`, `platform/config.ts`, `core/errors.ts`, `core/events.ts`.
 - **Work:**
@@ -956,10 +968,10 @@ and emits events through `EventSink`, replacing `platform/registry.ts:trace`.
 #### Item 20 — Test layers and Effect-ified regression suite
 
 - **Scoping:** CONCURRENT with 19, 21.
-- **Model:** **Opus.** `StorageTest` is a second implementation of the document-store semantics (versioning,
-  metadata, filter/order/limit, transactional rollback) and must agree with the real SQLite implementation or
-  every test built on it is a lie. This is the single highest-leverage item for testability and for the future
-  DST work.
+- **Model:** **Opus / sol.** `StorageTest` is a second implementation of the document-store semantics
+  (versioning, metadata, filter/order/limit, transactional rollback) and must agree with the real SQLite
+  implementation or every test built on it is a lie. This is the single highest-leverage item for testability
+  and for the future DST work.
 - **Owns:** `tests/layers/storage_test_layer.ts`, `tests/layers/object_store_test_layer.ts`,
   `tests/layers/event_sink_test_layer.ts`, `tests/layers/reader_test_layer.ts`,
   `tests/layers/id_gen_test_layer.ts`, `tests/layers/index.ts`, `tests/core_test.ts`, `tests/helpers/run.ts`.
@@ -996,7 +1008,7 @@ and emits events through `EventSink`, replacing `platform/registry.ts:trace`.
 #### Item 21 — DuckDB append-only event log and idempotent ingest
 
 - **Scoping:** CONCURRENT with 19, 20.
-- **Model:** **Opus.** Idempotent ingestion with byte-offset state, append-only tables, and the
+- **Model:** **Opus / sol.** Idempotent ingestion with byte-offset state, append-only tables, and the
   process-placement constraint (DuckDB only in the reader process) is a design problem, not a transcription
   problem; a wrong offset model silently duplicates or loses events.
 - **Owns:** `core/eventlog/ddl.ts`, `core/eventlog/offsets.ts`, `platform/eventlog/tables.ts`,
@@ -1035,9 +1047,9 @@ and emits events through `EventSink`, replacing `platform/registry.ts:trace`.
 
 - **Scoping:** **SYNC. Single item in its batch.** It is the composition root and touches the one file every
   previous batch feeds into.
-- **Model:** **Opus.** This is where the port either pays off or does not: layer composition and memoization,
-  graceful shutdown ordering (HTTP drain → backup fiber → reader child → DB handles → log flush), signal
-  handling, request-body limits, the error-to-status mapping, and the two behaviour changes (409, 503).
+- **Model:** **Opus / sol.** This is where the port either pays off or does not: layer composition and
+  memoization, graceful shutdown ordering (HTTP drain → backup fiber → reader child → DB handles → log flush),
+  signal handling, request-body limits, the error-to-status mapping, and the two behaviour changes (409, 503).
   Getting shutdown ordering wrong loses events and corrupts nothing but looks fine in tests.
 - **Owns:** `platform/server.ts`, `platform/layers.ts`, `platform/registry.ts`, `platform/http/router.ts`,
   `platform/http/auth.ts`, `platform/http/handlers.ts`, `tests/unit/http_test.ts`.
@@ -1090,8 +1102,8 @@ and emits events through `EventSink`, replacing `platform/registry.ts:trace`.
 #### Item 23 — Analysis query catalog and `logs` CLI
 
 - **Scoping:** CONCURRENT with 24, 25.
-- **Model:** **Sonnet.** A fixed list of named SQL queries over the schema frozen in item 21, plus a small
-  CLI. The queries are specified below.
+- **Model:** **Sonnet / luna.** A fixed list of named SQL queries over the schema frozen in item 21, plus a
+  small CLI. The queries are specified below.
 - **Owns:** `platform/analysis/catalog.ts`, `scripts/logs.ts`, `docs/observability.md`.
 - **Reads:** `core/eventlog/ddl.ts`, `platform/eventlog/*`, `platform/services.ts`.
 - **Work:**
@@ -1115,9 +1127,9 @@ and emits events through `EventSink`, replacing `platform/registry.ts:trace`.
 #### Item 24 — Retention sweeper
 
 - **Scoping:** CONCURRENT with 23, 25.
-- **Model:** **Sonnet.** The policy decisions are already pure and property-tested in items 06 and 12; this
-  item only executes a plan. It is kept separate from item 06 precisely because deleting files is the risky
-  half.
+- **Model:** **Sonnet / luna.** The policy decisions are already pure and property-tested in items 06 and 12;
+  this item only executes a plan. It is kept separate from item 06 precisely because deleting files is the
+  risky half.
 - **Owns:** `platform/logging/retention.ts`, `tests/unit/retention_test.ts`.
 - **Reads:** `core/logging/rotation.ts`, `platform/config.ts`, `platform/logging/file_sink.ts`.
 - **Work:**
@@ -1142,9 +1154,9 @@ and emits events through `EventSink`, replacing `platform/registry.ts:trace`.
 #### Item 25 — End-to-end: integration test port plus k6→DuckDB join
 
 - **Scoping:** CONCURRENT with 23, 24.
-- **Model:** **Opus.** It is the item that proves the whole phase: a real multi-process run, real DuckDB, real
-  backup/restore, plus correlating k6 client-side latency with server-side event durations by trace id.
-  Diagnosing a failure here requires reasoning across every layer.
+- **Model:** **Opus / sol.** It is the item that proves the whole phase: a real multi-process run, real
+  DuckDB, real backup/restore, plus correlating k6 client-side latency with server-side event durations by
+  trace id. Diagnosing a failure here requires reasoning across every layer.
 - **Owns:** `tests/integration.ts`, `perf/ingest_k6.ts`, `tests/e2e/observability_test.ts`.
 - **Reads:** everything.
 - **Work:**
@@ -1175,8 +1187,8 @@ and emits events through `EventSink`, replacing `platform/registry.ts:trace`.
 #### Item 26 — Remove compatibility wrappers and enforce the boundaries
 
 - **Scoping:** CONCURRENT with 27.
-- **Model:** **Sonnet.** Deletion guided by the compiler plus a set of grep-based boundary tests whose rules
-  are already specified.
+- **Model:** **Sonnet / luna.** Deletion guided by the compiler plus a set of grep-based boundary tests whose
+  rules are already specified.
 - **Owns:** `platform/compiler.ts` (deleted or reduced to re-exports), the `*OrThrow` wrappers in
   `sdk/schema.ts`, `tests/unit/boundaries_test.ts`.
 - **Reads:** everything.
@@ -1202,7 +1214,7 @@ and emits events through `EventSink`, replacing `platform/registry.ts:trace`.
 #### Item 27 — Documentation and regenerated artifacts
 
 - **Scoping:** CONCURRENT with 26.
-- **Model:** **Sonnet.** Prose and regenerated output against a now-settled codebase.
+- **Model:** **Sonnet / luna.** Prose and regenerated output against a now-settled codebase.
 - **Owns:** `README.md`, `SKIM.md`, `GENERATED_SQL.txt`, `docs/testing.md`, `docs/adr/README.md`.
 - **Reads:** everything.
 - **Work:**
@@ -1244,9 +1256,9 @@ Neither item edits `deno.json` (§2.2): item 01 wrote it once. Item 28's demos t
 
 - **Scoping:** CONCURRENT with 29; the two items are independent of each other. Starts only after batch 9 has
   landed (both 26 and 27).
-- **Model:** **Sonnet.** Bounded and mechanical: every interface the demos touch (the Effect client from item
-  10, the HTTP and admin routes from item 22, the analysis catalog from item 23, the restore script) is fixed
-  by earlier items, the file list is short, and each demo is checked by running one command.
+- **Model:** **Sonnet / luna.** Bounded and mechanical: every interface the demos touch (the Effect client
+  from item 10, the HTTP and admin routes from item 22, the analysis catalog from item 23, the restore script)
+  is fixed by earlier items, the file list is short, and each demo is checked by running one command.
 - **Owns:** `demos/README.md`, and everything under `demos/documents/`, `demos/backup-restore/` and
   `demos/observability/` (each holds a `main.ts` plus any helper files private to that demo). Nothing outside
   `demos/`; in particular not `deno.json`, and no `demos/deno.json`.
@@ -1319,12 +1331,12 @@ Neither item edits `deno.json` (§2.2): item 01 wrote it once. Item 28's demos t
 
 - **Scoping:** CONCURRENT with 28; the two items are independent of each other. Starts only after batch 9 has
   landed (both 26 and 27).
-- **Model:** **Sonnet.** This one is a judgment call. The guide needs editorial choices about what a newcomer
-  must learn first and how to explain Effect-typed handlers. But every fact it states is fixed by landed items
-  and existing docs, the outline is prescribed below, and acceptance is mechanical: a parity test against the
-  item-08 options table and the item-23 catalog, plus running every snippet. That matches item 27, which is
-  also prose over a settled codebase. The `reviewer-opus-high` pass covers the judgment that is left: whether
-  the guide's statements about consistency, backup and error guarantees are accurate.
+- **Model:** **Sonnet / luna.** This one is a judgment call. The guide needs editorial choices about what a
+  newcomer must learn first and how to explain Effect-typed handlers. But every fact it states is fixed by
+  landed items and existing docs, the outline is prescribed below, and acceptance is mechanical: a parity test
+  against the item-08 options table and the item-23 catalog, plus running every snippet. That matches item 27,
+  which is also prose over a settled codebase. The `reviewer-opus-high` pass covers the judgment that is left:
+  whether the guide's statements about consistency, backup and error guarantees are accurate.
 - **Owns:** `docs.md` (new, repo root), `tests/unit/docs_guide_test.ts`.
 - **Reads:** `README.md` (the Configuration section is the source of truth for options; also Run, Query
   language, Transaction contract, Backups and restore, Deliberate limits), `platform/config.ts` (`OPTIONS`),
@@ -1504,7 +1516,7 @@ hour change, or size. Today's directory and the open file are never swept.
 
 ## Future work: deterministic simulation testing
 
-**Not in scope for this phase.** Nothing in items 01–29 attempts deterministic simulation testing (DST), and
+**Not in scope for this phase.** Nothing in items 01–37 attempts deterministic simulation testing (DST), and
 no item's acceptance criteria depend on it. It is the stated next goal, and this phase is deliberately shaped
 to make it reachable rather than to deliver it.
 
@@ -1553,3 +1565,308 @@ so DST runs would use `StorageTest` and an analogous pure reader rather than the
 DST complements, and does not replace, the real-process integration test in item 25. Deciding how much
 confidence a simulated-storage DST run actually buys is the first design question of that phase, not an
 implementation detail.
+
+---
+
+### Batch 11 — accepted reflection correctness follow-ups (mandatory before 23 and MT)
+
+Source: accepted `origin/reflection/astra:docs/architecture/reflection-astra.md`, P1 suggestions 1–5 and P2
+suggestions 6–8. Numbering continues after 29; placement at the end of this document does not imply execution
+after batch 10. The §3 order is authoritative. All eight items start after item 22 lands and finish before
+item 23; none waits for MT.
+
+**Status evidence, 2026-10-11:** `git ls-remote origin refs/heads/main` verified that the live remote matches
+local `origin/main` at `a030ed6ee1488d6aa4bca8dd72d3f719ec76c28d`. The requested fetch could not write the
+session's read-only Git metadata; the read-only remote check establishes this snapshot instead.
+`git log origin/main --oneline --grep='item 22'` matched historical commit bodies, not a landed item-22
+implementation. The ref still has facade-based `platform/server.ts`, no `platform/layers.ts` or
+`platform/http/`, and no `platform/logging/retention.ts`. Thus neither 22 nor 24 has landed in the verified
+snapshot; re-fetch and inspect their actual landed diffs before dispatch. Never touch item 22's in-flight
+branch or worktree.
+
+**Scheduling exception to §2.2:** batch 11 is a staged release gate rather than one concurrent wave. Every new
+item's exact `Owns` set is disjoint, but dependencies still require `(30+35) → 31 → 36 → 32 → 33 → 34 → 37`.
+Only 30 and 35 are independent and concurrent. The existing item 24 lands before this gate; 36 strengthens its
+implementation. Item 24's previously recorded concurrency with 23/25 does not authorize bypassing this order.
+
+**Ownership handoffs:** 32 extends landed item 22's server/registry/layers/router/auth; 34 alone extends its
+HTTP handlers. 33 owns the reader entry and reader-only layer composition. It also prepares optional trace
+context reception for 34; 34 owns the public wire declaration and send path. 35 freezes the event schema
+before 36 changes ingest ordering and before 23 writes its catalog. None owns item 23's catalog, CLI or
+`docs/observability.md`, item 25's integration files, or `deno.json`. Item 36 takes over 24's retention files
+only after 24 lands. Later MT-02 extends 37's README; MT-04 extends 31's SQLite storage; MT-03/04 extend 34's
+services; MT-05/07/08 extend 32/34's HTTP, layers and SDK. These are sequential handoffs, not concurrent
+ownership. MT-01/06/09/10 have no overlapping new-item writes. Diagram maintenance agents run between landing
+barriers, not alongside 37's diagram verification.
+
+**Model labels:** `Opus / sol`, `Sonnet / luna`, `Haiku / astra` use AGENTS.md's Model duality table:
+`gpt-6.1-sol`, `gpt-6-luna`, `gpt-6-astra`, respectively. The machine's cache verifies these IDs, not this
+policy's intelligence/price ordering. Every new item gets an independent top-tier review and must leave
+`deno task ci` green. Commands below are future builder/reviewer acceptance, not tests run by this planning
+session.
+
+#### Item 30 — SQLite JSON number semantics
+
+- **Scoping:** After 22 lands, before 23 and all MT. CONCURRENT only with 35; their exact file sets and inputs
+  are independent. Land before 31, which owns promotion of the shared oracle regressions.
+- **Model:** **Opus / sol.** Numeric coercion affects filtering, grouping and ordering across both engines.
+- **Owns:** `core/compile/select.ts`, `tests/unit/compile_test.ts`, `tests/property/json_number_test.ts`,
+  `tests/unit/number_dialects_test.ts`, `GENERATED_SQL.txt`.
+- **Reads:** `core/schema.ts`, `core/compile/ddl.ts`, `core/compile/write.ts`, `core/compile/decode.ts`,
+  `core/plan.ts`, `tests/property/sqlite_oracle_test.ts`, `tests/property/arbitraries.ts`,
+  `platform/sqlite.ts`, `platform/duckdb.ts`, `scripts/explain.ts`.
+- **Work:**
+  1. Give schema-declared `number` expressions consistent SQLite REAL semantics in JSON layout; preserve
+     integer, boolean, text, metadata and NULL behavior. Use the same expression for predicates, ordering and
+     aggregate/group keys. Do not fix this by coercing every JSON scalar or weakening safe-integer checks.
+  2. Add seeded regression/property coverage for 2^53, adjacent representable doubles, the reported
+     1693240866440448800 case, negative and fractional values, NULL and safe integers. Compare equality,
+     inequalities, ordering and countBy with a JS reference and both storage layouts.
+  3. Compare SQLite and DuckDB results using separate child processes; never import both native libraries into
+     one address space. Regenerate the SQL artifact and review the intentional expression changes.
+- **Acceptance criteria:**
+  - `ORACLE_KNOWN_ISSUES=1 deno test -A --filter 'oracle known issue 1' tests/property/sqlite_oracle_test.ts`
+    passes both reported numeric regressions without skips.
+  - `deno test -A tests/property/json_number_test.ts tests/unit/number_dialects_test.ts` passes the boundary
+    matrix; property output records the repo seed, and neither engine leg is silently skipped.
+  - `deno task explain && git diff --exit-code GENERATED_SQL.txt` passes against this item's committed
+    artifact.
+  - `deno task ci` passes; 31 subsequently removes the old oracle opt-in gate for the resolved cases.
+
+#### Item 31 — Embedded-NUL text storage contract
+
+- **Scoping:** After 22 and 30 land, before 23 and all MT. Serialized; this item alone owns the existing
+  oracle file shared by the reflection's three regressions. Its SQLite changes precede MT-04.
+- **Model:** **Opus / sol.** Accepted strings and identifiers must never silently change across a commit.
+- **Owns:** `core/schema.ts`, `platform/sqlite.ts`, `tests/unit/schema_test.ts`, `tests/unit/storage_test.ts`,
+  `tests/property/sqlite_oracle_test.ts`, `tests/layers/storage_test_layer.ts`,
+  `tests/unit/nul_contract_test.ts`, `docs/adr/0005-text-storage-contract.md`.
+- **Reads:** `core/errors.ts`, `core/compile/write.ts`, `core/compile/select.ts`, `core/compile/decode.ts`,
+  `sdk/db.ts`, `sdk/functions.ts`, `platform/services.ts`, `tests/property/storage_commit_test.ts`,
+  `tests/core_test.ts`.
+- **Work:**
+  1. Choose and record either lossless driver reads or typed rejection of embedded U+0000 before commit.
+     Define the same public contract for columns and JSON layouts, scalar/enum/array values and document
+     identifiers, including generated IDs. Keep schema/table-name validation explicit. Existing stored NUL
+     values must be decoded losslessly or fail explicitly; never return a truncated success.
+  2. Enforce the choice at the real Storage boundary for insert, patch, lookup/delete IDs and handler-return
+     paths as applicable. For rejection, use existing SchemaError/StorageError payloads and prove rollback of
+     prior writes in the same mutation. Keep StorageTest consistent with the chosen contract.
+  3. Replace the NUL oracle's bypass of storage validation with a real-storage regression that asserts the
+     chosen behavior. Promote both item-30 numeric regressions and this NUL regression into the default suite;
+     remove the obsolete known-issue opt-in gate without deleting coverage.
+- **Acceptance criteria:**
+  - `deno test -A tests/unit/nul_contract_test.ts tests/unit/storage_test.ts` covers both layouts, leading,
+    interior and trailing NUL, IDs, patch and preexisting data; every accepted value round-trips unchanged.
+  - `deno test -A tests/property/sqlite_oracle_test.ts` runs all three reflection regressions with no opt-in
+    and no skips. `deno task test:prop` verifies the commit/rollback properties.
+  - `deno task test` passes the real/test storage conformance checks; `deno task ci` passes.
+
+#### Item 32 — Scoped server composition follow-up after item 22
+
+- **Scoping:** FOLLOW-UP only, after 22 lands and its diff is re-read; before 23 and all MT. The inspected
+  local origin/main still lacks 22, so this is the not-yet-landed case, not permission to replace its build.
+  Starts after 31, 35 and 36. Owns no HTTP handlers or reader entry; 33/34 follow this composition.
+- **Model:** **Opus / sol.** Partial startup and shutdown require correct ownership of every scoped resource.
+- **Owns:** `platform/server.ts`, `platform/registry.ts`, `platform/layers.ts`, `platform/http/router.ts`,
+  `platform/http/auth.ts`, `tests/unit/http_test.ts`, `tests/unit/server_scope_test.ts`.
+- **Reads:** `platform/http/handlers.ts`, `platform/services.ts`, `platform/config.ts`, `platform/sqlite.ts`,
+  `platform/ipc.ts`, `platform/backup.ts`, `platform/logging/logger.ts`, `platform/logging/retention.ts`,
+  `core/errors.ts`, `tests/layers/index.ts`.
+- **Work:**
+  1. Compare item 22's landed implementation with the reflection concerns. Preserve completed work; fix
+     remaining composition gaps and add missing failure-path evidence. Mount actual logging and typed HTTP
+     error mapping, centralize environment reads through Config, and share layers without duplicate handles.
+  2. Scope acquisition from the first writer/child onward. Inject failures after each acquisition, including a
+     later app open and HTTP bind failure; release every earlier resource even when serving never starts.
+  3. Verify HTTP drain, backup/sweep fiber shutdown, reader exit, writer close and final log flush ordering.
+     Trigger 36's ingest-then-sweep coordinator with the existing ingest RPC through ReaderClient; the server
+     never opens the event DuckDB file. Leave reader-only composition to 33, and handler trace changes to 34.
+- **Acceptance criteria:**
+  - `deno test -A tests/unit/server_scope_test.ts tests/unit/http_test.ts` passes partial-startup, occupied
+    port, in-flight SIGTERM, child-exit and finalizer-order probes, with bounded termination and no live
+    child/handle remaining. HTTP cases assert 400/401/404/409/413/500/502/503 and server JSONL emission.
+  - `deno task integration` passes against the real server and child, including backup/restore.
+  - `deno task check` and `deno task ci` pass. The scope tests also inspect the server import graph and fail
+    if DuckDB is transitively reachable or server/registry bypass Config for environment reads.
+
+#### Item 33 — Connect reader RPC to EventLogIngestLive
+
+- **Scoping:** After 22, 32, 35 and 36 land, before 23 and all MT. Serialized; extends the landed reader entry
+  without editing 32's server layer root. Prepares the reader trace receiver for item 34.
+- **Model:** **Opus / sol.** Persistent DuckDB scope ownership and serialized RPC access are correctness
+  boundaries.
+- **Owns:** `platform/reader.ts`, `platform/reader_layers.ts`, `platform/reader_context.ts`,
+  `tests/unit/reader_ingest_test.ts`, `tests/unit/reader_context_test.ts`.
+- **Reads:** `platform/eventlog/ingest.ts`, `platform/eventlog/tables.ts`, `platform/services.ts`,
+  `platform/config.ts`, `platform/duckdb.ts`, `platform/registry.ts`, `platform/logging/logger.ts`,
+  `platform/ipc.ts`, `core/ipc/framing.ts`.
+- **Work:**
+  1. Replace the unavailable-ingest response with the real EventLogIngest service. Compose its persistent
+     handle, Config, IdGen and logging in a reader-only root; retain connection-before-instance release and
+     serialized query/ingest access. Keep stdout exclusively RPC frames. Leave named analysis to item 23.
+  2. Connect 36's committed-offset/retention coordination in this process. No writer-side DuckDB import, even
+     transitively; entrypoint imports must make event-log modules reachable by `deno task check`.
+  3. Factor request context reception into `reader_context.ts`: accept validated optional `traceId`, `spanId`
+     and `parentSpanId` wire properties, annotate the request Effect, and preserve the reader-local fallback
+     for old senders. Validate these as optional properties of unknown JSON before narrowing to the existing
+     ReaderRequestFrame; do not require item 34's later type extension. Do not replace a supplied valid caller
+     trace. This prepares, but does not claim completion of, item 34's end-to-end contract.
+- **Acceptance criteria:**
+  - `deno test -A tests/unit/reader_ingest_test.ts tests/unit/reader_context_test.ts` starts a real reader,
+    ingests a fixed closed JSONL source via RPC, repeats with zero new rows for that source, restarts and
+    proves committed offsets survive. Append a tail and assert only its new records appear. Account separately
+    for new ingest/lifecycle records emitted by the operation itself.
+  - The same command injects ingest failure and interruption, verifies typed replies, pure protocol stdout,
+    continued query usability where recoverable, and scope closure without leaked handles.
+  - `deno task check` and `deno task ci` pass; the reader test checks the actual import graph excludes
+    `node:sqlite` and includes eventlog through the reader entrypoint.
+
+#### Item 34 — End-to-end caller trace context
+
+- **Scoping:** After 22, 32 and 33 land, before 23 and all MT. Serialized. Consumes 33's reader context
+  receiver and 32's HTTP root; owns neither entrypoint. Must precede MT-03/04 services and MT-07 client edits.
+- **Model:** **Opus / sol.** Cross-process context propagation must isolate concurrent requests and preserve
+  causality.
+- **Owns:** `sdk/client.ts`, `platform/services.ts`, `platform/ipc.ts`, `platform/http/handlers.ts`,
+  `platform/http/trace.ts`, `tests/unit/trace_test.ts`, `tests/unit/ipc_test.ts`,
+  `tests/unit/trace_e2e_test.ts`.
+- **Reads:** `platform/server.ts`, `platform/http/router.ts`, `platform/reader.ts`,
+  `platform/reader_context.ts`, `platform/sqlite.ts`, `platform/duckdb.ts`, `core/events.ts`,
+  `platform/logging/logger.ts`, `tests/types.ts`, `perf/lib/api.js`.
+- **Work:**
+  1. Preserve the SDK's existing caller-supplied trace argument and generated fallback. Specify bounded
+     validation, missing/invalid-header behavior and response echo consistently at HTTP ingress.
+  2. Extend ReaderRequest/ReaderRequestFrame with optional trace/span context matching 33's receiver. Capture
+     context at call submission, not in the shared IPC writer fiber. Restore it per request in the child using
+     the landed receiver; keep correlation IDs separate from trace IDs and support old frames.
+  3. Apply the same context to HTTP, handler, SQL and transaction events on success and failure, including
+     mutation rollback and reader errors. Ensure handler entry wraps the whole dispatched Effect, not only
+     console/log calls. Verify the existing storage/reader event emitters consume annotations correctly. Do
+     not claim k6 correlation until its producer lands in 25.
+- **Acceptance criteria:**
+  - `deno test -A tests/unit/trace_test.ts tests/unit/ipc_test.ts tests/unit/trace_e2e_test.ts` passes. The
+    end-to-end test uses the real SDK, HTTP server and reader child with isolated directories; one explicit
+    trace is echoed and identifies HTTP/handler/SQL/tx JSONL events in both processes across a query and
+    mutation. It also covers generated trace IDs, invalid input, rollback and error responses.
+  - The command overlaps two callers with distinct traces and asserts no cross-assignment, including queued
+    IPC work, cancellation and late replies. Missing-context legacy frames retain a nonempty fallback.
+  - `deno task check` preserves SDK inference; `deno task integration` and `deno task ci` pass.
+
+#### Item 35 — Event identity and taxonomy for exact joins
+
+- **Scoping:** After 22 lands, before 23 and all MT. CONCURRENT only with 30. Lands before 36 changes ingest
+  coordination, 32 composes producers and 23 writes queries against this schema.
+- **Model:** **Opus / sol.** Event identity, compatible schema evolution and backup accounting require
+  semantic decisions.
+- **Owns:** `core/eventlog/ddl.ts`, `core/events.ts`, `platform/eventlog/tables.ts`, `platform/backup.ts`,
+  `platform/object_store.ts`, `tests/unit/eventlog_test.ts`, `tests/unit/events_test.ts`,
+  `tests/unit/backup_test.ts`, `tests/unit/object_store_test.ts`, `docs/adr/0006-event-identity.md`.
+- **Reads:** `platform/eventlog/ingest.ts`, `core/eventlog/offsets.ts`, `platform/services.ts`,
+  `scripts/duckdb/trace-timeline.sql`, `scripts/duckdb/backup-durations.sql`,
+  `docs/plans/effect-port-and-observability.md` §4.
+- **Work:**
+  1. Add stable event_id to typed projections, with exactly one canonical identity per source record. Define
+     duplicate/rewrite identity rules and test exact joins; timestamps/trace IDs alone are not join keys.
+  2. Separate canonical event_kind from handler_kind without losing legacy JSONL compatibility. Use explicit
+     mappings for query/mutation handlers and preserve rollback/error outcomes for item 23's catalog.
+  3. Distinguish backup orchestration phases from object-store transfers by emitter and backup-run/operation
+     identity. Propagate the run through both producers; count retries and transfers without double-counting
+     one phase as two backups. Update constructor and table mappings together.
+  4. Record a versioned migration or explicit rebuild strategy before changing persisted DDL. Never silently
+     reuse old tables with new mappings. Preserve originals and offsets on failure; prove old records remain
+     queryable or rebuilding from retained JSONL is complete before switching. If retained sources cannot
+     support a lossless rebuild, fail explicitly rather than discarding historical rows. Keep the normal
+     ingest event tables append-only. Item 36 owns any necessary ingest initialization call-site changes.
+- **Acceptance criteria:**
+  - `deno test -A tests/unit/eventlog_test.ts tests/unit/events_test.ts tests/unit/backup_test.ts tests/unit/object_store_test.ts`
+    passes exact typed-to-canonical joins, handler taxonomy, mixed old/new records, duplicate ingestion and
+    one-backup/multiple-transfer accounting. Schema tests exercise a pre-change database and failed upgrade.
+  - `deno task test:prop` preserves offset/idempotency properties; `deno task ci` passes. Tests use the
+    existing ingestion entry so an incompatible DDL/mapping change cannot land as a library-only pass.
+
+#### Item 36 — Retention follows committed ingest
+
+- **Scoping:** After 22, 24, 31 and 35 land, before 23 and all MT. The inspected snapshot has no item-24
+  implementation. Chosen resolution: gate this follow-up after 24 and move 24 forward in §3, rather than alter
+  its existing item text beyond Model. Serialized before 32/33 wire the safe runtime path.
+- **Model:** **Opus / sol.** Destructive retention must never race an uncommitted offset or hide an unread
+  tail.
+- **Owns:** `platform/logging/retention.ts`, `tests/unit/retention_test.ts`, `platform/eventlog/ingest.ts`,
+  `core/logging/rotation.ts`, `platform/logging/file_sink.ts`, `tests/unit/retention_ingest_test.ts`,
+  `tests/property/retention_ingest_test.ts`, `docs/adr/0007-ingest-before-retention.md`.
+- **Reads:** `core/eventlog/offsets.ts`, `core/eventlog/ddl.ts`, `platform/eventlog/tables.ts`,
+  `platform/config.ts`, `platform/services.ts`, `platform/logging/logger.ts`,
+  `tests/property/offsets_test.ts`, `tests/property/arbitraries.ts`.
+- **Work:**
+  1. Extend 24's implementation so gzip/delete eligibility requires a closed stable source and a committed
+     ingest watermark covering its entire tail. Coordinate rotation, ingest and sweep; revalidate source
+     identity/size before applying a plan. An append, partial line, failed ingest or stale inventory blocks
+     destructive action. Rejected lines count as consumed only with durable quarantine evidence.
+  2. Expose a safe ingest-then-sweep coordinator triggered by 32 through the existing ingest RPC and hosted by
+     33 in the reader; successful ingest runs gate the sweep, without adding a new RPC kind. Keep DuckDB
+     access in that process. Publish the smallest module-level hooks possible; do not change services owned
+     by 34. Wire 35's schema compatibility check into ingest startup if required.
+  3. Retain today's/open-file and path-containment exclusions and dry-run behavior. Define crash/retry
+     behavior for gzip, rename and delete. Preserve byte-offset identities across compression or never
+     compress until the complete source has been durably ingested.
+  4. Record the distinct budgets: retained JSONL versus the derived DuckDB file. Pruning the DuckDB event
+     tables remains out of scope; measure and report unbounded derived growth rather than promising that
+     LOG_MAX_TOTAL_BYTES caps it. Account for logger drops separately from emitted/flushed/ingested counts.
+     Item 23 must carry this contract into its observability guide and CLI.
+- **Acceptance criteria:**
+  - `deno test -A tests/unit/retention_test.ts tests/unit/retention_ingest_test.ts` passes real-filesystem
+    cases for append-during-sweep, unread partial tails, failed commit, restart, gzip retry, active file,
+    outside-root path and dry-run. No un-ingested bytes become inaccessible; durable rejected lines are
+    explicitly reconciled. Direct invocation needs no not-yet-created item-23 CLI.
+  - `deno test -A tests/property/retention_ingest_test.ts` passes seeded append/rotate/ingest/sweep/crash
+    interleavings with exactly-once accepted-event assertions.
+  - The unit integration command includes a bounded sustained-write run over multiple rotations and sweeps,
+    prints input/ingested/rejected/dropped counts plus JSONL and DuckDB bytes, and asserts JSONL limits only
+    where closed-file safety permits them. Unsafe-to-delete backlog is reported explicitly.
+  - `deno task ci` passes. After 23 lands, `deno task logs:sweep --dry-run` verifies its CLI uses this same
+    coordinator; that later CLI check is not a prerequisite for this pre-23 item.
+
+#### Item 37 — Reconcile architecture and runtime documentation
+
+- **Scoping:** After 22 and 30–36 land, before 23 and all MT. Final serialized gate; incorporates each landed
+  diff and its required diagram follow-up. Item 23 and retention CLI work remain explicitly future.
+- **Model:** **Sonnet / luna.** Bounded documentation reconciliation against landed code and recorded
+  evidence.
+- **Owns:** `README.md`, `docs/architecture/README.md`, `docs/architecture/AGENTS.md`,
+  `docs/architecture/c4-context-document-db.github.md`,
+  `docs/architecture/c4-context-document-db.terminal.md`, `docs/architecture/c4-container-platform.github.md`,
+  `docs/architecture/c4-container-platform.terminal.md`,
+  `docs/architecture/c4-container-observability.github.md`,
+  `docs/architecture/c4-container-observability.terminal.md`,
+  `docs/architecture/c4-component-server.github.md`, `docs/architecture/c4-component-server.terminal.md`,
+  `docs/architecture/diagrams/c4-context-document-db.py`,
+  `docs/architecture/diagrams/c4-container-platform.py`,
+  `docs/architecture/diagrams/c4-container-observability.py`,
+  `docs/architecture/diagrams/c4-component-server.py`.
+- **Reads:** `platform/server.ts`, `platform/layers.ts`, `platform/reader.ts`, `platform/reader_layers.ts`,
+  `platform/eventlog/ingest.ts`, `core/eventlog/ddl.ts`, `platform/logging/retention.ts`, `sdk/client.ts`,
+  `docs/adr/0005-text-storage-contract.md`, `docs/adr/0006-event-identity.md`,
+  `docs/adr/0007-ingest-before-retention.md`, `docs/architecture/diagrams/render.py`, accepted reflection
+  report and landed diffs for 22, 24 and 30–36.
+- **Work:**
+  1. Replace the architecture index's item-21-planned claim and root README's obsolete environment caveat with
+     precise dated evidence. Distinguish available libraries, connected runtime, tested behavior and remaining
+     targets; do not present a reflection snapshot as a current full-suite pass.
+  2. Align architecture instructions with current-state diagrams and explicitly labeled target views.
+     Reconcile all four Mermaid/terminal pairs with the actual landed dependency graphs and event schema.
+     Explain reader composition in the existing container/observability pair; a new reader-component diagram
+     is deferred to keep the exact ownership set bounded. Regenerate terminal embeds from owned sources.
+  3. Document number/NUL behavior, runtime ingest, trace propagation and retention/derived-DB limits. Preserve
+     the README Configuration source of truth for later MT-02. Describe item 23's catalog/CLI and item 25's k6
+     producer as future, even though ingest RPC and safe retention are now connected.
+- **Acceptance criteria:**
+  - `python3 docs/architecture/diagrams/render.py --check` passes after regeneration, and `git diff --check`
+    plus `deno fmt --check README.md docs/architecture/` pass.
+  - Reviewer runs `git show --stat` and `git diff <pre-22-base>..HEAD -- platform/ core/ sdk/` and checks each
+    diagram relationship/status claim against those landed files; record that evidence, not just a successful
+    render check. Mermaid and terminal relationship keys agree.
+  - `deno test -A tests/unit/trace_e2e_test.ts tests/unit/reader_ingest_test.ts tests/unit/retention_ingest_test.ts`
+    passes on the complete batch, proving actual composition rather than isolated helper tests.
+  - `deno task ci` and `deno task integration` pass; README labels any unexecuted external checks with their
+    reason. Item 23 and the MT stack may start only after this final batch gate passes.

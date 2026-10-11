@@ -44,6 +44,29 @@ things, style), see `CLAUDE.md`.
 
 Every item, regardless of model, gets the same Opus review pass described above.
 
+## Model duality
+
+Builders may use `claude --model opus|sonnet|haiku` or `codex exec --model <full-id>`. The short OpenAI names
+below are plan labels; pass the full verified ID to Codex.
+
+| Repo tier                                     | Claude CLI alias | OpenAI label | Codex model ID |
+| --------------------------------------------- | ---------------- | ------------ | -------------- |
+| Top: hard correctness and independent reviews | `opus`           | sol          | `gpt-6.1-sol`  |
+| Middle: bounded mechanical work               | `sonnet`         | luna         | `gpt-6-luna`   |
+| Experiment: fast/cheap dispatch policy        | `haiku`          | astra        | `gpt-6-astra`  |
+
+IDs verified in `/root/.codex/models_cache.json`, fetched 2026-10-11 02:23 UTC (CLI 0.161.0). No OpenAI ID
+deviations were found. This is the repo's standing dispatch correspondence, not a vendor capability or price
+ranking: the cache describes Astra as frontier intelligence and Luna as fast/affordable. Claude aliases select
+the account's current family version; no immutable Anthropic version ID was verified.
+
+Match the task's intelligence tier; either family is acceptable within that tier. This section permits sol
+where the build protocol or a plan calls for Opus, including an independent top-tier review (a different
+reviewer from the builder), and luna where it calls for Sonnet. The Haiku experiment restrictions, including
+explicit human approval before landing, also apply to astra when dispatched in the experiment tier. Model
+names alone never authorize work outside an item's ownership. This orchestration policy lives only here;
+`CLAUDE.md` needs no change.
+
 ## Side-quest protocol
 
 Side quests are small, bounded investigations (survey a library's patterns, measure a baseline, compare output
@@ -93,8 +116,8 @@ phases, in order:
    both the `*.github.md` (Mermaid) and `*.terminal.md` (box-drawing) versions; `render.py --check` must pass.
    Fix any drift found.
 2. **Tests**: run the full test suite; report the results (counts, failures).
-3. **Queries**: run the DuckDB analysis queries in `scripts/duckdb/` (and the item-23 analysis catalog) against
-   real ingested data. Add new queries or adjust stale ones so they reflect the latest architecture.
+3. **Queries**: run the DuckDB analysis queries in `scripts/duckdb/` (and the item-23 analysis catalog)
+   against real ingested data. Add new queries or adjust stale ones so they reflect the latest architecture.
 4. **Verdict**: identify concrete improvements, architectural refactorings, or changes that need to be made —
    with file-level specificity — or declare the architecture good to go, with the evidence for that call.
 

@@ -112,14 +112,15 @@ only a `db-shell` convenience target.
 ### 2.4 New npm dependencies under the `deno.json` freeze
 
 MT-03 needs a Postgres driver (`postgres` or `pg` — pinned, choice justified in a code comment) and MT-08
-needs `better-auth`. The main plan's §2.2 freezes `deno.json` after item 01, so neither item may add import-map
-entries.
+needs `better-auth`. The main plan's §2.2 freezes `deno.json` after item 01, so neither item may add
+import-map entries.
 
-**Decision:** builders use **inline pinned `npm:` specifiers** (e.g. `import postgres from "npm:postgres@3.4.5"`)
-— exact versions, no ranges — which Deno resolves without touching `deno.json`. The resulting `deno.lock`
-entries are owned by the item that first introduces each package: **MT-03** owns the lock entries for the
-Postgres driver, **MT-08** owns the lock entries for `better-auth`; each item regenerates the lock (via the
-test run) and commits the lockfile delta in the same commit. Reviewers reject unpinned specifiers.
+**Decision:** builders use **inline pinned `npm:` specifiers** (e.g.
+`import postgres from "npm:postgres@3.4.5"`) — exact versions, no ranges — which Deno resolves without
+touching `deno.json`. The resulting `deno.lock` entries are owned by the item that first introduces each
+package: **MT-03** owns the lock entries for the Postgres driver, **MT-08** owns the lock entries for
+`better-auth`; each item regenerates the lock (via the test run) and commits the lockfile delta in the same
+commit. Reviewers reject unpinned specifiers.
 
 ## 3. Batch table
 
@@ -136,19 +137,23 @@ Model policy (same as the main plan): **Opus** for security boundaries and resou
 bounded, mechanical items with checkable acceptance.
 
 **Build order with the main plan** (from the ordering analysis — do not reorder):
-`22 →
-(23+24+25+MT-01+MT-02) → (26+MT-03) → (MT-04+MT-05) → (MT-07+MT-09) → (MT-06+MT-08) → MT-10 → 27 →
+`22 → 24 → batch 11: (30+35) → 31 → 36 → 32 → 33 → 34 → 37 →
+(23+25+MT-01+MT-02) → (26+MT-03) → (MT-04+MT-05) → (MT-07+MT-09) → (MT-06+MT-08) → MT-10 → 27 →
 (28+29)`.
-Parenthesized items run concurrently, subject to the batch gates above; MT-06's CLI work still starts only
-after MT-05's endpoints exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy and
-auth item landed, and item 27 documents it, so it can neither move earlier nor run beside 27.
+**Non-reorderable reflection gate:** all eight main-plan batch-11 items (30–37) land after 22 and before 23 or
+any MT work. Item 24 moves forward as 36's prerequisite, not into the MT stack. Main-plan §3 records the
+limited deferral of 24's CLI check until 23 creates the CLI; 36 supplies direct ingest/retention evidence.
+Within batch 11 only 30 and 35 run concurrently; all other arrows are landing barriers. Parenthesized items
+run concurrently, subject to the batch gates above; MT-06's CLI work still starts only after MT-05's endpoints
+exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy and auth item landed, and item
+27 documents it, so it can neither move earlier nor run beside 27.
 
 ---
 
 #### MT-01 — Postgres in docker-compose + central schema
 
 - **Scoping:** CONCURRENT with MT-02.
-- **Model:** **Sonnet.** Mechanical: one service block following the file's template, one SQL file.
+- **Model:** **Sonnet / luna.** Mechanical: one service block following the file's template, one SQL file.
 - **Owns:** `docker-compose.yml` (additive `postgres` service block + `pg-data` volume),
   `platform/tenants/schema.sql`, `Makefile` (additive `db-shell`, `db-migrate` targets only).
 - **Reads:** `docker-compose.yml` (template block), `Makefile`.
@@ -168,20 +173,21 @@ auth item landed, and item 27 documents it, so it can neither move earlier nor r
 #### MT-02 — Config options for multitenancy
 
 - **Scoping:** CONCURRENT with MT-01.
-- **Model:** **Sonnet.** Follows the item-08 options-table pattern exactly.
+- **Model:** **Sonnet / luna.** Follows the item-08 options-table pattern exactly.
 - **Owns:** `platform/config.ts` (additive rows only), `README.md` "Configuration" section (additive),
   `tests/unit/config_test.ts` (additive rows only — owned by main-plan item 08; listed here as an allowed
   edit).
 - **Reads:** `platform/config.ts` (options table).
-- **Work:** Add `tenancyMode` (env `TENANCY`, default `"off"`, validated against `off | api-key |
-  better-auth`), `databaseUrl` (default `postgres://tsdb:tsdb@localhost:5432/tsdb`), `tenantsDir` (default
-  `<dataDir>/tenants`), `tenantRouter` (default `"local"`; validated against the known router kinds —
-  `"local"` today, `"control-plane"` reserved for the future), `betterAuthSecret` (no default — required when
-  `tenancyMode` is `better-auth`), `betterAuthUrl` (default `http://localhost:3000`-style platform base URL).
-  Semantics: `off` = pre-tenancy behavior (single SQLite file, existing app-token auth) — MT-07's middleware
-  must be a no-op in this mode so the default app-token path keeps working; `api-key` = tenant API-key
-  resolution enforced on `/apps/*`; `better-auth` = session tokens accepted alongside API keys. Keep the README
-  section in sync (reviewer verifies parity, per the item-08 precedent).
+- **Work:** Add `tenancyMode` (env `TENANCY`, default `"off"`, validated against
+  `off | api-key |
+  better-auth`), `databaseUrl` (default `postgres://tsdb:tsdb@localhost:5432/tsdb`),
+  `tenantsDir` (default `<dataDir>/tenants`), `tenantRouter` (default `"local"`; validated against the known
+  router kinds — `"local"` today, `"control-plane"` reserved for the future), `betterAuthSecret` (no default —
+  required when `tenancyMode` is `better-auth`), `betterAuthUrl` (default `http://localhost:3000`-style
+  platform base URL). Semantics: `off` = pre-tenancy behavior (single SQLite file, existing app-token auth) —
+  MT-07's middleware must be a no-op in this mode so the default app-token path keeps working; `api-key` =
+  tenant API-key resolution enforced on `/apps/*`; `better-auth` = session tokens accepted alongside API keys.
+  Keep the README section in sync (reviewer verifies parity, per the item-08 precedent).
 - **Acceptance criteria:**
   - `ConfigLive` decodes the new options; missing `betterAuthSecret` fails with `ConfigError` only when
     `tenancyMode` is `better-auth`; an unknown `TENANCY` value fails with `ConfigError`.
@@ -192,7 +198,7 @@ auth item landed, and item 27 documents it, so it can neither move earlier nor r
 #### MT-03 — TenantRegistry service (Effect)
 
 - **Scoping:** CONCURRENT with MT-04.
-- **Model:** **Opus.** Security boundary: key generation, hashing, uniqueness.
+- **Model:** **Opus / sol.** Security boundary: key generation, hashing, uniqueness.
 - **Owns:** `platform/tenants/registry.ts`, `platform/tenants/store.ts`, `tests/unit/tenants_test.ts`,
   `core/errors.ts` (additive only: `TenantError` tagged union with `MalformedTenantId`, `UnknownTenant`,
   `TenantDeactivated` — no other edits), `platform/services.ts` (additive only: the `TenantRegistry`
@@ -216,12 +222,12 @@ auth item landed, and item 27 documents it, so it can neither move earlier nor r
 #### MT-04 — Tenant storage routing: interface + local-folder implementation
 
 - **Scoping:** CONCURRENT with MT-03.
-- **Model:** **Opus.** Interface design plus resource lifetimes (one SQLite handle per tenant, bounded cache,
-  idle eviction).
+- **Model:** **Opus / sol.** Interface design plus resource lifetimes (one SQLite handle per tenant, bounded
+  cache, idle eviction).
 - **Owns:** `platform/tenants/routing.ts`, `platform/sqlite.ts` (additive),
   `tests/unit/tenant_routing_test.ts`, `platform/services.ts` (additive only: the `TenantStorageRouter`
-  `Context.Tag` appended to the tag-declaration section — disjoint from MT-03's `TenantRegistry` tag;
-  existing lines are never reordered so the concurrent MT-03 append merges cleanly).
+  `Context.Tag` appended to the tag-declaration section — disjoint from MT-03's `TenantRegistry` tag; existing
+  lines are never reordered so the concurrent MT-03 append merges cleanly).
 - **Reads:** `platform/sqlite.ts` (item 15).
 - **Work:**
   1. **Define the interface** in `routing.ts` — `TenantStorageRouter` as a `Context.Tag`, in the `services.ts`
@@ -261,7 +267,7 @@ auth item landed, and item 27 documents it, so it can neither move earlier nor r
 #### MT-05 — Admin CRUD HTTP endpoints
 
 - **Scoping:** After MT-03 (needs the registry). MT-06 follows MT-05.
-- **Model:** **Sonnet.** CRUD over the registry behind the existing admin-token pattern.
+- **Model:** **Sonnet / luna.** CRUD over the registry behind the existing admin-token pattern.
 - **Owns:** the admin route surface — `platform/server.ts` `/admin/*` section today, or `platform/http/*` if
   item 22 has landed (builder checks and targets whichever exists; exactly one).
 - **Reads:** `platform/tenants/registry.ts`, `platform/server.ts`.
@@ -276,7 +282,7 @@ auth item landed, and item 27 documents it, so it can neither move earlier nor r
 #### MT-06 — Admin CLI (`scripts/tenants.ts`)
 
 - **Scoping:** After MT-05 (dogfoods its endpoints).
-- **Model:** **Sonnet.** Small CLI, checkable by running.
+- **Model:** **Sonnet / luna.** Small CLI, checkable by running.
 - **Owns:** `scripts/tenants.ts`.
 - **Reads:** MT-05's routes.
 - **Work:** `deno run -A scripts/tenants.ts create <name> [--slug]`, `list`, `show <id>`, `deactivate <id>`,
@@ -289,7 +295,7 @@ auth item landed, and item 27 documents it, so it can neither move earlier nor r
 #### MT-07 — Tenant resolution in the request path + TS client tenant config
 
 - **Scoping:** After MT-04 (needs routing). MT-08 follows MT-07.
-- **Model:** **Opus.** Security-critical: the tenant-context seam every request flows through.
+- **Model:** **Opus / sol.** Security-critical: the tenant-context seam every request flows through.
 - **Owns:** `platform/http/auth.ts` (new; or the auth section of `platform/server.ts` if item 22 hasn't landed
   — builder checks), `sdk/client.ts` (docs + `createTenantClient` alias only, no behavior change),
   `platform/layers.ts` (additive only: `PlatformLive` gains the `TenantStorageRouter` and `TenantRegistry`
@@ -312,12 +318,12 @@ auth item landed, and item 27 documents it, so it can neither move earlier nor r
 #### MT-08 — Better Auth email/password, headless
 
 - **Scoping:** After MT-07 (needs the tenant-context seam). The plan's last item.
-- **Model:** **Opus.** Auth is a security boundary; the spike needs judgment.
+- **Model:** **Opus / sol.** Auth is a security boundary; the spike needs judgment.
 - **Owns:** `platform/auth/*`, `scripts/auth.ts` (admin user commands), `platform/http/auth.ts` (additive:
   session-token branch in MT-07's middleware), `platform/http/router.ts` (additive: `/api/auth/*` mount — or
-  `platform/server.ts` if item 22 hasn't landed, builder checks; exactly one),
-  `platform/tenants/schema.sql` (additive only: `memberships(user_id, tenant_id, role)` table — disjoint from
-  MT-01's `tenants`/`api_keys` DDL).
+  `platform/server.ts` if item 22 hasn't landed, builder checks; exactly one), `platform/tenants/schema.sql`
+  (additive only: `memberships(user_id, tenant_id, role)` table — disjoint from MT-01's `tenants`/`api_keys`
+  DDL).
 - **Reads:** `platform/tenants/registry.ts`, MT-07's middleware, Better Auth docs.
 - **Work:**
   1. **SPIKE FIRST (go/no-go):** mount
@@ -339,7 +345,7 @@ auth item landed, and item 27 documents it, so it can neither move earlier nor r
 #### MT-09 — Property tests for tenant routing invariants
 
 - **Scoping:** After MT-03 and MT-04 (needs the registry and `TenantStorageRouter` interfaces). Batch MT-E.
-- **Model:** **Sonnet.** Bounded, mechanical, checked by running.
+- **Model:** **Sonnet / luna.** Bounded, mechanical, checked by running.
 - **Owns:** `tests/property/tenant_routing_props.ts` (new file only — disjoint from MT-04's
   `tests/unit/tenant_routing_test.ts`).
 - **Reads:** `platform/tenants/routing.ts`, `platform/tenants/registry.ts`, `core/errors.ts`,
@@ -394,7 +400,7 @@ auth item landed, and item 27 documents it, so it can neither move earlier nor r
   `docs/testing.md` describes the real-process test tier and must execute every command it quotes, so the
   suite has to exist (and be green) before 27 documents it; and running it as the platform's final acceptance
   gate means a defect it finds is fixed before 27, 28 and 29 describe the platform as finished.
-- **Model:** **Opus.** The item owns resource lifetimes across three kinds of process — a Docker Compose
+- **Model:** **Opus / sol.** The item owns resource lifetimes across three kinds of process — a Docker Compose
   project, a server per scenario with its reader child, and CLI subprocesses — with teardown that must survive
   failures and signals, and its core assertions are security properties (cross-tenant reads and writes behave
   as missing, revocation and deactivation are enforced). Like item 25, diagnosing a red run means reasoning
