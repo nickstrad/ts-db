@@ -1599,11 +1599,11 @@ services; MT-05/07/08 extend 32/34's HTTP, layers and SDK. These are sequential 
 ownership. MT-01/06/09/10 have no overlapping new-item writes. Diagram maintenance agents run between landing
 barriers, not alongside 37's diagram verification.
 
-**Model labels:** `Opus / astra`, `Sonnet / sol`, `Haiku / luna (high effort)` use AGENTS.md's Model duality
-table: `gpt-6.1-sol`, `gpt-6-luna`, `gpt-6-astra`, respectively. The machine's cache verifies these IDs, not
-this policy's intelligence/price ordering. Every new item gets an independent top-tier review and must leave
-`deno task ci` green. Commands below are future builder/reviewer acceptance, not tests run by this planning
-session.
+**Model labels:** `Opus / astra`, `Sonnet / sol`, `Haiku 5.5 / luna (high effort)` use AGENTS.md's Model
+duality table: `gpt-6.1-sol`, `gpt-6-luna`, `gpt-6-astra`, respectively. The machine's cache verifies these
+IDs, not this policy's intelligence/price ordering. Every new item gets an independent top-tier review and
+must leave `deno task ci` green. Commands below are future builder/reviewer acceptance, not tests run by this
+planning session.
 
 #### Item 30 — SQLite JSON number semantics
 
