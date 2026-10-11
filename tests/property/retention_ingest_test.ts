@@ -561,11 +561,18 @@ test(
   ),
   { timeout: 600_000 },
   async () => {
+    // Anchor the rare stale-watermark and post-gate races independently of the random seed.
+    await runCase([
+      { kind: "append", writer: 0, n: 1 },
+      { kind: "advance", days: 1 },
+      { kind: "ingest", fault: "none", race: "after-commit", pick: 0 },
+      { kind: "ingest", fault: "none", race: "after-gate", pick: 0 },
+    ], Number.MAX_SAFE_INTEGER);
     await fc.assert(
       fc.asyncProperty(caseArb, ({ ops, capBytes }) => runCase(ops, capBytes)),
       { numRuns: CASES },
     );
-    console.log(`retention/ingest outcomes over ${CASES} cases: ${JSON.stringify(seen)}`);
+    console.log(`retention/ingest outcomes over ${CASES} cases + race anchor: ${JSON.stringify(seen)}`);
     // The property only means something if the interleavings actually reach these outcomes.
     for (const key of ["gzipped", "deleted", "sealed", "commitFailures", "interrupted"] as const) {
       assert.ok(seen[key] > 0, `no case produced ${key}; retune the op weights`);
