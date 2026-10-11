@@ -83,6 +83,27 @@ Diagrams must never drift from the code: a reviewer rejects a "diagrams current"
 re-verified against the landed diff. If an item touches no diagram-relevant surface, the follow-up agent says
 so in one line in its commit message (`docs: item NN touches no C4 surface`) and moves on.
 
+## Reflection pass
+
+A reflection pass is a dedicated architectural review of the whole platform at its current state. It runs at
+trajectory inflection points (e.g. before starting a new plan or plan phase) — not after every item. Four
+phases, in order:
+
+1. **Diagrams**: verify every C4 diagram in `docs/architecture/` matches the actually-landed architecture —
+   both the `*.github.md` (Mermaid) and `*.terminal.md` (box-drawing) versions; `render.py --check` must pass.
+   Fix any drift found.
+2. **Tests**: run the full test suite; report the results (counts, failures).
+3. **Queries**: run the DuckDB analysis queries in `scripts/duckdb/` (and the item-23 analysis catalog) against
+   real ingested data. Add new queries or adjust stale ones so they reflect the latest architecture.
+4. **Verdict**: identify concrete improvements, architectural refactorings, or changes that need to be made —
+   with file-level specificity — or declare the architecture good to go, with the evidence for that call.
+
+When it matters, two lenses run concurrently: an architecture/diagram lens (Fable) and a code lens (Opus); a
+synthesizer (Fable) then merges both into the final change set.
+
+Outputs: a reflection report plus any diagram/query fixes. The improvement list steers the plans — it becomes
+new plan items, not ad-hoc edits.
+
 ## File sync protocol
 
 This repo maintains two instruction files: **AGENTS.md** (agent orchestration and repo structure) and
