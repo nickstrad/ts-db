@@ -79,11 +79,21 @@ const orderArb = fc.shuffledSubarray(CELLS, { minLength: 0, maxLength: 9 }).chai
 const reachableArb = fc.tuple(playersArb, orderArb).map(([[x, o], order]) => play(newGame(x, o), order));
 const boardArb = fc.array(fc.constantFrom<Mark | null>("X", "O", null), { minLength: 9, maxLength: 9 });
 
-test(titled("generators: reachable states cover playing, won and draw, and full boards"), () => {
+// Draw reachability must not depend on sampling rare full orders (sq-11 review, P7).
+test("a full-board draw is reachable by legal moves", () => {
+  const { game, history } = play(newGame("x", "o"), [0, 1, 2, 4, 3, 5, 7, 6, 8]);
+  assert.equal(history.length, 10, "all nine moves were applied");
+  assert.ok(history.slice(0, -1).every((g) => g.status === "playing"));
+  assert.equal(filled(game.board), 9);
+  assert.equal(game.status, "draw");
+  assert.equal(game.winner, null);
+  assert.equal(holdsLine(game.board), null);
+});
+
+test(titled("generators: reachable states cover playing and won, arbitrary boards cover lines"), () => {
   const states = fc.sample(reachableArb, { numRuns: 300, seed: SEED }).map((s) => s.game);
   assert.ok(states.some((g) => g.status === "playing" && filled(g.board) > 0), "no mid-game state");
   assert.ok(states.some((g) => g.status === "won"), "no won state");
-  assert.ok(states.some((g) => g.status === "draw" && filled(g.board) === 9), "no full-board draw");
   const boards = fc.sample(boardArb, { numRuns: 300, seed: SEED });
   assert.ok(boards.some((b) => holdsLine(b) !== null) && boards.some((b) => holdsLine(b) === null));
 });

@@ -482,11 +482,12 @@ test(
     );
     console.log(`offsets adversarial coverage: ${JSON.stringify(coverage)}`);
     // The sticky case needs a rewrite, a later append to the same file, and an old line in it.
+    // Use a fixed floor of 15: sq-11 observed a minimum of 22 across 200 seeds at NUM_RUNS=200.
     const floors: Record<keyof typeof coverage, number> = {
       truncated: 100,
       "prefix-mismatch": 100,
       deduplicated: 100,
-      stickyDeduplicated: 25,
+      stickyDeduplicated: 15,
       frankenlines: 100,
     };
     for (const [key, floor] of Object.entries(floors) as [keyof typeof coverage, number][]) {
