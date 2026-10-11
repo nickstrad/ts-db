@@ -115,7 +115,9 @@ export function verifySnapshot(file: string): Effect.Effect<void, SnapshotIntegr
 export function integrityCheck(file: string): void {
   const exit = Effect.runSyncExit(verifySnapshot(file));
   if (Exit.isFailure(exit)) {
-    throw new Error("Snapshot failed integrity check", { cause: Cause.squash(exit.cause) });
+    // The tagged error, not an untyped `Error`: the boundary test forbids `throw new Error` in
+    // `platform/`, and the structured failure carries more than the old message did.
+    throw Cause.squash(exit.cause);
   }
 }
 

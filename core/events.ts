@@ -487,7 +487,7 @@ export function toJsonLine(record: EventRecord): string {
       redacted[key] = redactAndSanitize(ordered[key], 1, seen);
     }
     const line = JSON.stringify(redacted);
-    if (typeof line !== "string") throw new Error("toJsonLine: unstringifiable record");
+    if (typeof line !== "string") return fallbackJsonLine(record);
     return line;
   } catch {
     return fallbackJsonLine(record);

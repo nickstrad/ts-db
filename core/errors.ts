@@ -10,7 +10,7 @@
  * Three rules for everything built on top of this file:
  *
  * 1. Errors carry **structured fields**, never a pre-formatted message. Rendering a human string is
- *    the caller's job (`sdk/schema.ts`'s `*OrThrow` wrappers in item 04, the HTTP body in item 22,
+ *    the caller's job (`sdk/schema.ts`'s `formatSchemaError`, the HTTP body in item 22,
  *    `core/events.ts`'s `fromPlatformError` in item 07).
  * 2. A tag's HTTP status is decided once, in `toHttpStatus`. Adding a member to `PlatformError`
  *    without adding a case there is a compile error.

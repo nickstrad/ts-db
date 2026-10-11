@@ -61,6 +61,7 @@ import {
   Either,
   Exit,
   FiberId,
+  Function as EffectFunction,
   HashMap,
   Layer,
   Option,
@@ -98,7 +99,6 @@ import { literal, quote, type Row, type SQL } from "../core/compile/dialect.ts";
 import { Documents, type Operation, type SelectPlan } from "../sdk/db.ts";
 import type { AnyDefinition } from "../sdk/functions.ts";
 import { formatSchemaError } from "../sdk/schema.ts";
-import { formatCompileError, formatDecodeError } from "./compiler.ts";
 import { ConfigTest } from "./config.ts";
 import { Config, EventSink, type EventSinkService, IdGen, Storage, type StorageService } from "./services.ts";
 
@@ -683,6 +683,60 @@ function clockFrom(millis: () => number): EffectClock.Clock {
     currentTimeNanos: base.currentTimeNanos,
     sleep: (duration) => base.sleep(duration),
   };
+}
+
+/**
+ * Renders a structured compile failure into the pre-port message, verbatim. Moved here from
+ * `platform/compiler.ts` when item 26 deleted that module; `legacyError` below is the only
+ * caller. The switch is total over `CompileFailure`: adding a reason without a case here is a
+ * compile error.
+ */
+export function formatCompileError(error: CompileError): Error {
+  const message = ((): string => {
+    switch (error.reason) {
+      case "unknown-collection":
+        return `Unknown collection: ${error.table}`;
+      case "unknown-field":
+        return `Unknown field: ${error.field}`;
+      case "array-predicate":
+        return `Array predicates/ordering are not supported: ${error.field}`;
+      case "unsupported-operator":
+        return "Unsupported operator";
+      case "gt-requires-numeric":
+        return "gt requires a non-null numeric field and value";
+      case "invalid-limit":
+        return "Invalid limit";
+      case "invalid-ordering":
+        return "Invalid ordering";
+      case "empty-enum":
+        return `Enum has no values: ${error.field}`;
+      default:
+        return EffectFunction.absurd<string>(error.reason);
+    }
+  })();
+  return new Error(message, { cause: error });
+}
+
+/**
+ * Renders a decode failure. Moved here from `platform/compiler.ts` when item 26 deleted that
+ * module; `legacyError` below is the only caller. `unsafe-integer` keeps the pre-port wording;
+ * the other two reasons are new — the old code let `JSON.parse`'s own `SyntaxError` escape, and
+ * a column missing from the row now surfaces as `missing-column` instead of failing downstream.
+ */
+export function formatDecodeError(error: DecodeError): Error {
+  const message = ((): string => {
+    switch (error.reason) {
+      case "unsafe-integer":
+        return "Integer result exceeds JavaScript safe range";
+      case "malformed-json":
+        return `Malformed JSON in stored value${error.field ? `: ${error.field}` : ""}`;
+      case "missing-column":
+        return `Missing column${error.field ? `: ${error.field}` : ""}`;
+      default:
+        return EffectFunction.absurd<string>(error.reason);
+    }
+  })();
+  return new Error(message, { cause: error });
 }
 
 /** Renders a typed failure back into the `Error` the pre-port class threw, message for message. */

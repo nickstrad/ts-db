@@ -40,6 +40,12 @@ import {
 import { defineFunctions } from "../../sdk/functions.ts";
 import { EventSinkTest, IdGenTest, TestEvents } from "../layers/index.ts";
 
+/** Unwrap a `Some`, failing the test on `None`. */
+function expectSome<A>(option: Option.Option<A>): A {
+  assert.ok(Option.isSome(option), "expected a Some, got None");
+  return option.value;
+}
+
 // ===========================================================================
 // The ingress contract
 // ===========================================================================
@@ -97,14 +103,14 @@ test("withChildSpan: nested spans link to their parent; a root span has none; th
   );
   assert.ok(Option.isSome(seen.outside));
   assert.deepEqual(seen.outside.value, { traceId: "trace-1" });
-  assert.deepEqual(Option.getOrThrow(seen.root), { traceId: "trace-1", spanId: "root" });
-  assert.deepEqual(Option.getOrThrow(seen.nested[0]), { traceId: "trace-1", spanId: "outer" });
-  assert.deepEqual(Option.getOrThrow(seen.nested[1]), {
+  assert.deepEqual(expectSome(seen.root), { traceId: "trace-1", spanId: "root" });
+  assert.deepEqual(expectSome(seen.nested[0]), { traceId: "trace-1", spanId: "outer" });
+  assert.deepEqual(expectSome(seen.nested[1]), {
     traceId: "trace-1",
     spanId: "inner",
     parentSpanId: "outer",
   });
-  assert.deepEqual(Option.getOrThrow(seen.restarted), { traceId: "trace-1", spanId: "fresh" });
+  assert.deepEqual(expectSome(seen.restarted), { traceId: "trace-1", spanId: "fresh" });
 });
 
 test("currentTraceContext: None outside a trace; non-token annotations are not propagated", async () => {
@@ -113,7 +119,7 @@ test("currentTraceContext: None outside a trace; non-token annotations are not p
     currentTraceContext.pipe(Effect.annotateLogs({ traceId: "ok", spanId: "bad span", parentSpanId: 7 })),
   ]));
   assert.ok(Option.isNone(none));
-  assert.deepEqual(Option.getOrThrow(filtered), { traceId: "ok" });
+  assert.deepEqual(expectSome(filtered), { traceId: "ok" });
   const invalid = await Effect.runPromise(currentTraceContext.pipe(Effect.annotateLogs({ traceId: "a b" })));
   assert.ok(Option.isNone(invalid));
 });
@@ -129,7 +135,7 @@ test("concurrent fibers never see each other's span", async () => {
     { concurrency: "unbounded" },
   ));
   seen.forEach((context, i) =>
-    assert.deepEqual(Option.getOrThrow(context), { traceId: `trace-${i}`, spanId: `span-${i}` })
+    assert.deepEqual(expectSome(context), { traceId: `trace-${i}`, spanId: `span-${i}` })
   );
 });
 
@@ -407,7 +413,7 @@ traceTest(
         const call = byTrace(traceId);
         assert.ok(call, `the reader call of ${traceId} ran under it`);
         const handler = only<HandlerEventRecord>(yield* traced(traceId), "handler");
-        assert.equal(Option.getOrThrow(call.context).spanId, handler.spanId);
+        assert.equal(expectSome(call.context).spanId, handler.spanId);
         assert.deepEqual(
           Object.keys(call.request).filter((key) => key.endsWith("Id") && key !== "appId"),
           [],

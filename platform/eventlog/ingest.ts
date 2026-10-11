@@ -531,9 +531,18 @@ export function makeEventLogIngest(
             } finally {
               file.close();
             }
-            const note = await syncDir(dirname(path));
-            if (note !== undefined) throw new Error(`quarantine directory not durable: ${note}`);
-          }, relative),
+            return await syncDir(dirname(path));
+          }, relative).pipe(
+            Effect.flatMap((note) =>
+              note === undefined ? Effect.void : Effect.fail(
+                new IngestError({
+                  phase: "insert",
+                  sourceFile: relative,
+                  detail: `quarantine directory not durable: ${note}`,
+                }),
+              )
+            ),
+          ),
         { discard: true },
       );
 
