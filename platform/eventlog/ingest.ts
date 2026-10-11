@@ -28,7 +28,8 @@
  *
  * A line that cannot be ingested is appended to `LOG_DIR/<role>/<date>/rejected.jsonl` beside its
  * source file, and the rest of the batch proceeds. (A line rejected for exceeding `MAX_LINE_BYTES`
- * keeps only its first 64 Ki characters there; the source JSONL still holds it in full.) Quarantine
+ * keeps only its first 64 KiB of bytes there, decoded lossily, so a UTF-8 sequence cut at the end
+ * becomes U+FFFD; the source JSONL still holds it in full.) Quarantine
  * is written *before* `COMMIT`: if the commit then fails, the next run quarantines the same lines
  * again. A duplicate in a diagnostic file
  * is the safe failure; a rejected line that vanished would not be. Each file with rejects yields one
@@ -37,6 +38,16 @@
  * Only anomalies (rejected lines, a rewritten source, an unreadable file, a failed run) are emitted
  * as `ingest` events. A success event per run would itself be ingested by the next run, so a quiet
  * tree would never become an unchanged one.
+ *
+ * ## Follow-ups
+ *
+ * - **Item 22: type-check reach.** No entry point imports `platform/eventlog/*` yet, so
+ *   `deno task check` never type-checks this module or `tables.ts` (only the tests do, via
+ *   `deno test`). `deno.json` belongs to item 01; item 22 must wire these modules into an entry point
+ *   (the reader's `ingest` request) so the check graph reaches them.
+ * - **Item 24: ingest before gzip.** Nothing here enforces that a `.jsonl` is fully ingested before
+ *   retention gzips it; a tail gzipped first is never ingested (ADR 0004). Item 24 owns that ordering,
+ *   and pruning `_ingest_state` (see `readState`).
  */
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
@@ -215,8 +226,11 @@ interface Staged {
 const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
 const lossyUtf8 = new TextDecoder("utf-8");
 
-/** Quarantine keeps at most this much of a line rejected for its size. */
-const QUARANTINE_LINE_CHARS = 64 * 1024;
+/**
+ * Quarantine keeps at most this many bytes (64 KiB, not characters) of a line rejected for its size.
+ * The cut can split a UTF-8 sequence, which the lossy decode turns into U+FFFD.
+ */
+const QUARANTINE_LINE_BYTES = 64 * 1024;
 
 /**
  * Writes `plan`'s lines as `StagedLine` wrappers to `tempFile`. The original line travels as a JSON
@@ -234,7 +248,7 @@ async function stage(
   for (const span of plan.lines) {
     const raw = bytes.subarray(span.start, span.end);
     if (raw.length > MAX_LINE_BYTES) {
-      const prefix = lossyUtf8.decode(raw.subarray(0, QUARANTINE_LINE_CHARS));
+      const prefix = lossyUtf8.decode(raw.subarray(0, QUARANTINE_LINE_BYTES));
       rejects.push({ sourceOffset: span.start, reason: "line-too-large", line: prefix });
       continue;
     }
@@ -339,6 +353,9 @@ export function makeEventLogIngest(
         }));
       });
 
+    // FOLLOW-UP (item 24): `_ingest_state` rows are never removed for files that retention gzips or
+    // deletes, and this loads every one of them each run, so it grows slowly without bound. Item 24
+    // (retention) owns pruning a row when its source file leaves the tree.
     const readState: Effect.Effect<Map<string, IngestStateRow>, IngestError> = Effect.map(
       attempt(
         "inventory",
@@ -391,7 +408,11 @@ export function makeEventLogIngest(
         let inserted = 0;
         if (files.length > 0) {
           yield* attempt("insert", () => db.connection.run(stageSql(files)));
-          yield* attempt("insert", () => db.connection.run(rowsSql));
+          // Only a batch with a flagged (rewritten) file pays for the anti-join against all of history.
+          const dedupe = batch.some((item) =>
+            item.tempFile !== undefined && item.plan.decision.kind === "read" && item.plan.decision.dedupe
+          );
+          yield* attempt("insert", () => db.connection.run(rowsSql(dedupe)));
           for (const statement of insertStatements) {
             yield* attempt("insert", () => db.connection.run(statement.sql), statement.table);
           }

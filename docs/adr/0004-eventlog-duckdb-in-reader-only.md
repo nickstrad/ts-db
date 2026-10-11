@@ -71,13 +71,15 @@ while no reader holds the file; it must never open the file alongside a running 
   (the sticky `_ingest_state.dedupe` flag). The property suite found two double-insert paths that offsets
   alone cannot close: a torn `\n` restored by a later append, and a second rewrite bringing back an earlier
   generation's lines. Neither happens with the platform's own writers, which only append. The cost is one
-  anti-join per batch, and only for tampered files. Within a batch, only the first flagged copy of an
-  `eventId` lands. Duplicate _production_ stays out of model: an outside append that repeats lines while
-  keeping the ingested prefix intact (`cat f f > f`) reads as new events.
+  anti-join per batch, and only for batches that contain a tampered file; other batches never touch history.
+  Within a batch, only the first flagged copy of an `eventId` lands. Duplicate _production_ stays out of
+  model: an outside append that repeats lines while keeping the ingested prefix intact (`cat f f > f`) reads
+  as new events.
 - **Rejected lines are quarantined, never silently dropped.** A line that is not UTF-8, is over 1 MiB, or is
   not a JSON object with an `eventId` and a readable `ts` goes to `logs/<role>/<date>/rejected.jsonl` beside
   its source. The run emits an `ingest` event for it, and the rest of the batch proceeds. A line over 1 MiB
-  keeps only its first 64 Ki characters in quarantine; the source JSONL still holds it in full.
+  keeps only its first 64 KiB of bytes in quarantine (a UTF-8 sequence cut there becomes U+FFFD); the source
+  JSONL still holds it in full.
 - **What the platform writes always parses.** `JSON.stringify` escapes a lone UTF-16 surrogate as `\ud800`,
   which DuckDB's `json_valid` rejects. Before staging, ingest replaces unpaired surrogate escapes with
   `\ufffd`, so a client cannot keep its own error events out of the tables. The session time zone is pinned to
@@ -97,7 +99,9 @@ while no reader holds the file; it must never open the file alongside a running 
 - **Ingest must run at least once between a file closing and retention gzipping it**, or the file's
   un-ingested tail is not ingested. With the default two days and a periodic ingest this is not a constraint
   in practice. A full rebuild from a tree that contains `.gz` files means gunzipping them in place first:
-  offsets are keyed by the `.jsonl` path.
+  offsets are keyed by the `.jsonl` path. **Follow-up (item 24):** nothing enforces this ordering yet;
+  retention (item 24) owns ingesting a file's tail before gzipping it, and pruning the `_ingest_state` rows of
+  files it gzips or deletes (they are otherwise kept, and read, forever).
 - **Large integers.** DuckDB's JSON reader extracts integer literals exactly, but has already rounded a
   literal with a fraction or exponent to the nearest double. The typed columns therefore store `NULL` for any
   integer field they cannot prove exact, rather than a silently rounded value (`platform/eventlog/tables.ts`,

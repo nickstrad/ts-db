@@ -157,8 +157,19 @@ FROM read_json_auto(${list},
  * `platform_events` and is the first ingestible line with that id in this batch (file, then offset
  * order), so two flagged copies in one batch cannot both land. Unflagged lines are trusted: they come
  * from past a verified prefix of a file that was never rewritten.
+ *
+ * `dedupe` says whether any staged line is flagged. Without one, the anti-join is left out of the SQL
+ * entirely: DuckDB plans `NOT r.dedupe OR (… NOT EXISTS …)` as a MARK delim-join that scans all of
+ * `platform_events` even when no row is flagged, which makes every batch cost O(history).
  */
-export const rowsSql = `CREATE OR REPLACE TEMP TABLE ${ROWS_TABLE} AS
+export function rowsSql(dedupe: boolean): string {
+  if (!dedupe) {
+    return `CREATE OR REPLACE TEMP TABLE ${ROWS_TABLE} AS
+SELECT source_file, source_offset, line::JSON AS j
+FROM ${STAGE_TABLE}
+WHERE reject_reason IS NULL`;
+  }
+  return `CREATE OR REPLACE TEMP TABLE ${ROWS_TABLE} AS
 SELECT source_file, source_offset, j FROM (
   SELECT s.source_file, s.source_offset, s.dedupe, s.line::JSON AS j, (s.line ->> '$.eventId') AS event_id,
     row_number() OVER (PARTITION BY (s.line ->> '$.eventId') ORDER BY s.source_file, s.source_offset) AS occurrence
@@ -168,6 +179,7 @@ SELECT source_file, source_offset, j FROM (
 WHERE NOT r.dedupe OR (
   r.occurrence = 1 AND NOT EXISTS (SELECT 1 FROM platform_events p WHERE p.event_id = r.event_id)
 )`;
+}
 
 /** Lines to quarantine, in file order. */
 export const rejectedSql = `SELECT source_file, source_offset, reject_reason, line

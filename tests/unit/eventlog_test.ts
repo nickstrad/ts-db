@@ -667,6 +667,50 @@ test("two copies of one event in a rewritten file land once", async () => {
   });
 });
 
+/** Wraps the real driver and records every statement that builds `ingest_rows`. */
+function rowsRecordingDriver(seen: string[]): EventLogDriver {
+  return {
+    open: async (path) => {
+      const instance = await eventLogDriver.open(path);
+      return {
+        closeSync: () => instance.closeSync(),
+        connect: async () => {
+          const connection = await instance.connect();
+          return {
+            run: (sql, values) => {
+              if (sql.includes("TEMP TABLE ingest_rows")) seen.push(sql);
+              return connection.run(sql, values);
+            },
+            runAndReadAll: (sql) => connection.runAndReadAll(sql),
+            closeSync: () => connection.closeSync(),
+          };
+        },
+      };
+    },
+  };
+}
+
+test("only a batch with a rewritten file anti-joins against platform_events", async () => {
+  await withWorld(async (world) => {
+    const life = (id: string) => lifecycleEvent({ ...envelope(id, "server", 1), phase: id });
+    const seen: string[] = [];
+    const driver = rowsRecordingDriver(seen);
+    await writeSource(world, SERVER_FILE, lines([life("a")]));
+    await ingest(world, T0, { driver });
+    await appendSource(world, SERVER_FILE, lines([life("b")]));
+    await ingest(world, T0 + 1000, { driver });
+    assert.equal(seen.length, 2);
+    // A new file and a plain append trust their lines: the batch never reads history.
+    assert.ok(seen.every((sql) => !sql.includes("platform_events")), seen.join("\n---\n"));
+
+    await writeSource(world, SERVER_FILE, lines([life("a"), life("c")]));
+    assert.equal((await ingest(world, T0 + 2000, { driver })).linesIngested, 1);
+    assert.equal(seen.length, 3);
+    assert.ok(seen[2].includes("platform_events"));
+    assert.deepEqual((await eventIds(world)).sort(), ["a", "b", "c"]);
+  });
+});
+
 /** Wraps the real driver; the first `COMMIT` and the first `ROLLBACK` issued both fail. */
 function failingRollbackDriver(): EventLogDriver {
   const failed = new Set<string>();
