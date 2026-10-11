@@ -22,6 +22,12 @@
  *
  * Run: `deno run -A tests/e2e/observability_test.ts` (needs `k6` on `PATH`; ~45 s).
  *
+ * The k6 latency gate is the adopted host-dependent rule (sq-08): p(95) < 160 ms on the shared
+ * VM, < 60 ms on a quiet host, decided per host at run time — `K6_HOST_CLASS=quiet` selects the
+ * quiet-host gate, unset (or anything else) means the shared VM. A p95 at or above the threshold
+ * is a load refusal: the host was too noisy for the run to serve as a regression signal. It is
+ * recorded in `perf/baseline.json` and fails the run loudly. p99 is never gated (too noisy).
+ *
  * Negative control: `OBS_SINK=noop deno run -A tests/e2e/observability_test.ts` must fail. It starts
  * the server (and its reader) with `LOG_LEVEL=error`, so `EventSinkLive`'s level gate drops every
  * record below `error` before it is queued — on a clean run, every record either process emits (the
@@ -71,6 +77,46 @@ FROM client FULL OUTER JOIN server USING (bucket)
 ORDER BY coalesce(client.bucket, server.bucket)`;
 }
 
+/** The adopted k6 latency gate's host classes, decided per host at run time. */
+export type K6HostClass = "shared" | "quiet";
+
+/**
+ * The execution host's class for the adopted k6 latency gate: `K6_HOST_CLASS=quiet` on a quiet
+ * (dedicated/CI) host for the 60 ms p95 gate; anything else — including unset — is the shared
+ * VM's 160 ms gate. The default is the lenient one, so an unknown host never false-fails.
+ */
+export function k6HostClass(): K6HostClass {
+  return Deno.env.get("K6_HOST_CLASS") === "quiet" ? "quiet" : "shared";
+}
+
+/** A k6 load refusal: the host was too noisy for the run to serve as a regression signal. */
+export interface LoadRefusal {
+  readonly at: string;
+  readonly runId: string;
+  readonly hostClass: K6HostClass;
+  readonly thresholdMs: number;
+  readonly httpReqDurationP95Ms: number;
+}
+
+/**
+ * Appends a load refusal to `perf/baseline.json` (adopted k6 gate rule). The file is a JSON
+ * array, created when absent; an unparsable file starts a fresh baseline rather than failing
+ * the run. A refusal is host noise, not a product regression — but the run still fails the gate
+ * loudly, so a noisy host never certifies as clean.
+ */
+export async function recordLoadRefusal(refusal: LoadRefusal): Promise<void> {
+  const path = resolve("perf", "baseline.json");
+  let refusals: LoadRefusal[] = [];
+  try {
+    const parsed: unknown = JSON.parse(await Deno.readTextFile(path));
+    if (Array.isArray(parsed)) refusals = parsed as LoadRefusal[];
+  } catch {
+    /* absent or unparsable: start a fresh baseline */
+  }
+  refusals.push(refusal);
+  await Deno.writeTextFile(path, `${JSON.stringify(refusals, null, 2)}\n`);
+}
+
 const program = Effect.gen(function* () {
   const runId = `e2e-obs-${new Date().toISOString().replace(/[-:.]/g, "").slice(0, 15)}-` +
     crypto.randomUUID().slice(0, 6);
@@ -101,10 +147,42 @@ const program = Effect.gen(function* () {
       }).output()
     );
     const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
-    // k6's thresholds are what notice a down or failing server.
+    // The latency gate is the adopted host-dependent rule, applied here from k6's summary
+    // rather than in perf/smoke.js: p(95) < 160 ms on the shared VM, < 60 ms on a quiet host.
+    // A p95 at or above the threshold is a load refusal — recorded in perf/baseline.json, and
+    // the run fails loudly. p99 is never gated.
+    let summary: { http_req_duration_p95?: number } | undefined;
+    try {
+      summary = JSON.parse(decode(k6.stdout)) as { http_req_duration_p95?: number };
+    } catch {
+      summary = undefined;
+    }
+    const hostClass = k6HostClass();
+    const latencyGateMs = hostClass === "quiet" ? 60 : 160;
+    const p95 = summary?.http_req_duration_p95;
+    if (typeof p95 === "number" && !(p95 < latencyGateMs)) {
+      yield* Effect.promise(() =>
+        recordLoadRefusal({
+          at: new Date().toISOString(),
+          runId,
+          hostClass,
+          thresholdMs: latencyGateMs,
+          httpReqDurationP95Ms: p95,
+        })
+      );
+      assert.fail(
+        `k6 load refused on ${hostClass} host: http_req_duration p95 ${p95.toFixed(3)} ms >= ` +
+          `${latencyGateMs} ms gate (recorded in perf/baseline.json; host too noisy for a ` +
+          `regression signal — re-run when quiet)`,
+      );
+    }
+    // k6's own exit code still gates correctness: a down server fails its checks and the
+    // http_req_failed threshold, which is what notices it.
     assert.equal(k6.code, 0, `k6 failed:\n${decode(k6.stdout)}\n${decode(k6.stderr)}`);
-    const summary = JSON.parse(decode(k6.stdout)) as { http_req_duration_p95?: number };
-    console.log(`k6: exit 0, overall http_req_duration p95 ${summary.http_req_duration_p95?.toFixed(3)} ms`);
+    console.log(
+      `k6: exit 0, overall http_req_duration p95 ${p95?.toFixed(3)} ms ` +
+        `(gate < ${latencyGateMs} ms on ${hostClass} host)`,
+    );
 
     // Flush barrier: once a request made after k6 finished is in the log, every k6 request's records
     // are too (one FIFO queue). Best effort — the assertions below are on what ingest finds.
