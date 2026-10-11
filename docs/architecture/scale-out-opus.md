@@ -321,3 +321,164 @@ neither should be the first step.
 The through-line: keep the routing decision explicit and auditable for as long as you can.
 Automatic placement is a tax you pay when the alternative — a human deciding where the hot
 tenant lives — stops being fast enough.
+---
+
+## Research-informed revision (Opus, 2026-10-11)
+
+**Status:** second pass. The four approaches above are preserved unmodified — what follows is
+what the Convex / SurrealDB / Turso research changes. Research brief:
+`/tmp/convex-surreal-research.md` (vm-1). The parallel Astra effort did its own
+research-informed revision independently; this is mine.
+
+**The research in one paragraph.** Turso is the existence proof that our architecture
+(per-tenant SQLite files, control/data-plane split) works at production scale: 10,000+
+databases per account, hundreds of SQLite DBs per node, single-writer with frame-log
+replicas, WAL frames streamed continuously to S3 for durability. Convex's horizontal-scaling
+plan independently converges on the same shape — one serial writer (their Committer, our
+`Semaphore(1)`), primary/replica via a distributed log, a thin router splitting mutations
+from queries — and adds a quantified threshold: don't distribute writes until ~5k
+mutations/sec sustained; before that, pin hot tenants to dedicated shards. SurrealDB's
+contribution is mostly negative space: quorum multi-write is heavier machinery than
+per-file serial SQLite needs, but their compute/storage separation (TAPIR) is a legitimate
+future direction.
+
+### Per-approach revisions
+
+**Approach A — strengthened, no structural change.** Turso validates the control/data-plane
+split as a production pattern for SQLite-at-scale (their managed control plane vs
+open-source libSQL data plane is exactly our Postgres-registry-plus-Deno-nodes shape).
+Convex's hot-partition guidance ("dedicated shards for the biggest tenants" before 5k/sec)
+independently confirms A's operator-pinned hot tenant. The research doesn't change A's
+design; it changes A's status from "the operable default" to "the production-proven
+default." One refinement worth stealing: Turso's group-token auth (one token spanning all
+DBs in a group) for our Bearer scheme — a single API key authorizing across a tenant's
+shards rather than per-node credentials.
+
+**Approach B — strengthened as a stopgap, now with a concrete mechanism.** My original B
+was hand-wavy about eviction correctness ("checkpoint WAL and close cleanly on every
+path"). Turso's "hundreds of DBs per node" plus cross-database WAL batching (accumulate
+frames from dozens of DBs over a few ms, upload in one S3 PUT) gives B a real
+implementation story: the broker doesn't just evict, it batches durability across the open
+set. This doesn't fix B's fundamental limits (single fate-sharing domain, thrash risk),
+but it upgrades B from "pressure valve with scary eviction code" to "pressure valve with
+a known-good batching pattern." Still a stopgap; still revisit when the second file gets
+warm.
+
+**Approach C — significantly strengthened; both flagged weaknesses dissolved.** My
+original C had two weaknesses, and the research dissolves both:
+1. *"SQLite has no native replication"* — Turso's frame-log replication (libSQL's WAL
+   frame log pulled by replicas) is the concrete mechanism. Replace my vague
+   "litestream-style WAL shipping" with frame-log replication: the primary streams WAL
+   frames, replicas apply them. Production code, not a sidecar to build.
+2. *"Replicas are async; hot reads can be stale by seconds"* — Turso's embedded replica
+   pattern solves read-your-own-writes without quorum: the replica holds a local SQLite
+   file and updates it on commit, so the writer's own reads are never stale. For other
+   readers, Convex's router pattern (sticky sessions + write timestamps) bounds staleness
+   deterministically.
+
+C goes from "powerful but operationally scary" to "the hot path has a production
+playbook." Failover/promotion remains the one genuinely hard part — but it's now the
+*only* hard part rather than one of three.
+
+**Approach D — weakened; prematurity now quantified.** Convex is explicit:
+partitioned/distributed writes only become necessary past ~5k mutations/sec sustained. Our
+hot path is one write per minute — roughly five orders of magnitude below that threshold.
+D's distributed write machinery isn't just complex, it's solving a problem we don't have
+and won't have for a very long time. D stays as the endgame, but the "consider D" trigger
+moves from the vague "when manual placement stops scaling" to the measurable "when
+sustained writes approach thousands per second."
+
+### Approach E (new) — WAL-native control/data plane: the Turso playbook, composed
+
+This is a **composition of A and C**, not a from-scratch design — labeled as such. Take
+Approach A's control/data-plane split and shard map, and build Approach C's hot-file
+replication in from day one using Turso's mechanisms:
+
+- **Data plane:** per-tenant SQLite files on data nodes (A's sharding); the hot file gets
+  a single-writer primary + frame-log replicas (C, upgraded via Turso).
+- **Durability:** replace the snapshot→object-store backup flow with bottomless WAL-to-S3
+  replication (TAPIR/Litestream lineage). Continuous frame streaming instead of periodic
+  snapshots — cheaper, finer-grained recovery, no backup windows.
+- **Reads:** hot reads go to embedded replicas (local file, zero network,
+  read-your-own-writes on commit); cold reads go to shard nodes.
+- **Control plane:** Postgres shard map + placement (A), with Turso-style group tokens
+  for cross-shard auth.
+
+```mermaid
+flowchart TB
+    subgraph control["Control plane"]
+        pg["Shard map + placement<br/>[Postgres]<br/>tenant → node, replica set"]
+        admin["Placement admin<br/>[Deno]<br/>pin hot tenant"]
+    end
+    subgraph gateway["Gateway fleet (stateless)"]
+        gw["Gateway<br/>[Deno]<br/>auth (group token),<br/>route by operation"]
+    end
+    subgraph hotplane["Hot file plane (WAL-native)"]
+        primary["Hot primary<br/>[Deno]<br/>single writer<br/>streams WAL frames"]
+        emprep["Embedded replicas<br/>[Deno]<br/>local SQLite file<br/>frame-log sync,<br/>read-your-own-writes"]
+        s3["WAL frames → S3<br/>[bottomless]<br/>continuous durability"]
+    end
+    subgraph coldplane["Cold shards"]
+        coldA["Cold node A<br/>[Deno]<br/>shard ≤ FD budget"]
+        coldB["Cold node B<br/>[Deno]<br/>shard ≤ FD budget"]
+    end
+    client["Client SDK<br/>[external]"]
+    client -->|" (1) HTTP + Bearer"| gw
+    gw -->|" (2) hot write → primary"| primary
+    gw -->|" (3) hot read → embedded replica"| emprep
+    gw -->|" (4) cold → shard"| coldA
+    gw -->|" (4) cold → shard"| coldB
+    primary -->|" (5) WAL frames"| emprep
+    primary -->|" (6) WAL frames"| s3
+    gw -->|" (7) topology"| pg
+    admin -->|" (8) placement"| pg
+```
+
+| # | From | To | Relationship |
+| - | ---- | -- | ------------ |
+| 1 | Client SDK | Gateway | HTTP + Bearer (group token) |
+| 2 | Gateway | Hot primary | All hot-file writes (single writer) |
+| 3 | Gateway | Embedded replica | Hot reads, local file, zero network |
+| 4 | Gateway | Cold nodes | Cold tenants by shard map |
+| 5 | Hot primary | Embedded replicas | WAL frame-log replication |
+| 6 | Hot primary | S3 | Bottomless WAL streaming (durability) |
+| 7 | Gateway | Shard map | Topology lookup (cached) |
+| 8 | Placement admin | Shard map | Operator pinning |
+
+**Constraints.**
+1. *FD budget:* the shard map caps per-node files (A); the hot file's replicas each hold
+   one handle on separate nodes.
+2. *Hot write:* single-writer primary, physically dedicated — the every-minute write
+   cannot be starved.
+3. *Isolation:* shard boundaries + replica separation; hot reads never touch the primary.
+
+**What breaks / gets hard.** Frame-log replication needs a libSQL-style frame log or
+equivalent — we're on stock SQLite via `node:sqlite`, so this is either a libSQL
+migration or a custom WAL-frame shipper to build. Failover/promotion still needs design.
+Bottomless WAL-to-S3 replaces the backup flow — a real migration of a load-bearing
+system. More to build than plain A, but every mechanism is production-proven somewhere.
+
+**Pick when:** you want A's operability with C's hot-path performance, and you're willing
+to invest in WAL-native replication because the hot file earns it.
+
+### Revised recommendation
+
+**Pick Approach E** — which is to say: pick A, but build C's replication in from the
+start using Turso's WAL-native mechanisms rather than deferring it.
+
+The research changed my mind on one specific point. My original "refine with C when the
+hot file's read volume earns it" assumed C's replication was speculative machinery worth
+deferring. Turso proves the machinery exists and works — frame-log replication and
+bottomless WAL are not research projects. Deferring them saves little and costs a
+migration later. The honest cost of E over plain A is the WAL-frame infrastructure; the
+honest benefit is that the hot path never needs a redesign.
+
+What didn't change: A is still the foundation (the research validates it, it doesn't
+replace it). B is still a stopgap (now with a better mechanism). D is still the endgame
+(now with a quantified trigger: ~5k writes/sec sustained). SurrealDB's quorum consensus
+remains correctly out of scope — per-file serial semantics don't need it, and the
+research agrees.
+
+The through-line from the original still holds — keep routing explicit and auditable —
+with one addition from Turso: **make durability continuous (WAL streaming), not periodic
+(snapshots).** The backup flow is the first thing I'd redesign under E.
