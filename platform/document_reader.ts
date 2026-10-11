@@ -37,6 +37,7 @@ import {
   ReaderClient,
   type ReaderClientService,
 } from "./services.ts";
+import { DEFAULT_READER_CAP } from "./ipc.ts";
 import { currentTraceContext, isTraceToken } from "./http/trace.ts";
 import { parseTenantId } from "./tenants/registry.ts";
 
@@ -250,7 +251,10 @@ export function makeDocumentReaderClient(ipc: ReaderClientService) {
     const apps = yield* AppRegistry;
     const services = yield* Effect.context<Config | EventSink>();
     let pending = 0;
-    const cap = 1000;
+    // Preserve the IPC client's observable admission contract
+    // (QueueFullError{queue:"reader", cap:1000}). Admission guard only;
+    // SP-05 owns the real concurrency story for in-process reads.
+    const cap = DEFAULT_READER_CAP;
     const client: ReaderClientService = {
       call: (request) => {
         if (request.kind !== "query") return ipc.call(request);
@@ -286,12 +290,15 @@ export function makeDocumentReaderClient(ipc: ReaderClientService) {
         }).pipe(
           Effect.provide(services),
           Effect.catchAllDefect((cause) =>
-            Effect.fail(
-              new ReaderError({
-                operation: "select",
-                detail: `handler defect: ${messageOf(cause)}`,
-                cause,
-              }),
+            Effect.zipRight(
+              Effect.logError("document query handler defect", cause),
+              Effect.fail(
+                new ReaderError({
+                  operation: "select",
+                  detail: `handler defect: ${messageOf(cause)}`,
+                  cause,
+                }),
+              ),
             )
           ),
         );
