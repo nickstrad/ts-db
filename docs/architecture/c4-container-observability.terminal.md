@@ -75,7 +75,8 @@ Item 23 provides the named catalog and logs CLI; item 25 provides the k6 loader 
 MT-10 wires the reader analysis RPC and shares the ingest instance so later commits remain visible. The server
 never opens DuckDB. The standalone CLI queries read-only and can fail while a writer owns the file; use the
 live admin route during serving. Ingest and analysis handles are independently scoped connections on the
-shared native instance. Per-app query readers are independent of the event log. Retention bounds JSONL only,
-requires committed watermarks and matching hashes, and never touches today or the reader sink open path.
-Derived tables are never pruned; logs:compact remains future work. Gzipped retained sources are not
-re-ingested by the current scanner. No load-performance result is claimed by this diagram.
+shared native instance. Document reads run in-process against application SQLite files; they do not use the
+reader event-log database. Retention bounds JSONL only, requires committed watermarks and matching hashes, and
+never touches today or the reader sink open path. Derived tables are never pruned; logs:compact remains future
+work. Gzipped retained sources are not re-ingested by the current scanner. No load-performance result is
+claimed by this diagram.

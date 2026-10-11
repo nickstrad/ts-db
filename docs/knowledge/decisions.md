@@ -2,6 +2,15 @@
 
 Dated decisions with rationale. Plans carry the _what_; this page carries the _why_. Newest first.
 
+## 2026-10-11 — Narrowed SQLite pivot: in-process document reads
+
+DuckDB stays responsible for the event log and named analysis in the supervised reader child; only document
+reads move to in-process SQLite. The query compiler already emits `dialect="sqlite"`, so SP-02 can execute
+that SQL directly with `node:sqlite` without a full backend migration. The reader child, IPC, supervision and
+teardown discipline remain load-bearing for ingest and analysis. Read-only document connections and SP-05's
+32-permit execution semaphore reduce interference with SQLite writers while bounding concurrent reads. This
+is the narrowed outcome of the sqlite-pivot plan's SP-02/SP-05.
+
 ## 2026-10-11 — No ORM for Postgres access
 
 Human decision: MT-03 (and any other item touching Postgres) uses the pinned `npm:postgres` client directly
@@ -63,9 +72,9 @@ lifecycle code.
 
 ## 2026-10-10 — SQLite storage, DuckDB analytics, Deno runtime
 
-The MVP's core shape survived the Effect port: SQLite for document storage, DuckDB for the query/analytics
-plane, Deno as the runtime. The reflection pass (Astra, 2026-10-11) confirmed the core architecture sound
-while sending back data-semantics fixes (items 30–37).
+The MVP's core shape survived the Effect port: SQLite for document storage, DuckDB for event-log ingest and
+named analysis, Deno as the runtime. The reflection pass (Astra, 2026-10-11) confirmed the core architecture
+sound while sending back data-semantics fixes (items 30–37).
 
 ## Standing — Review and landing protocol
 

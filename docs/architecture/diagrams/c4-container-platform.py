@@ -17,13 +17,13 @@ NODES = [('client',
   'Server process',
   'Deno process',
   'platform/server.ts',
-  'HTTP auth, SQLite writes, backup and ingest timers',
+  'HTTP auth, SQLite document reads/writes, backup and ingest timers',
   True),
  ('reader',
   'Reader process',
   'Deno child process',
   'platform/reader.ts',
-  'DuckDB SQLite reads; ingest and named analysis',
+  'Event-log DuckDB; ingest and named analysis',
   True),
  ('files',
   'Application documents',
@@ -56,14 +56,13 @@ NODES = [('client',
   'apps/appId/ snapshots and manifests',
   False)]
 EDGES = [('client', 'server', 'HTTP JSON + bearer + trace'),
- ('server', 'reader', 'JSONL IPC query/ping/ingest/analysis; trusted tenant id/path'),
- ('server', 'files', 'node:sqlite; serialized mutation transaction'),
- ('reader', 'files', 'DuckDB SQLite extension; READ_ONLY attachment'),
+ ('server', 'reader', 'JSONL IPC ping/ingest/analysis'),
+ ('server', 'files', 'node:sqlite; read-only queries and serialized mutations'),
  ('server', 'pg', 'Postgres protocol; registry SQL and session auth'),
  ('tenants', 'pg', 'Postgres protocol; tenant/key or auth operations'),
  ('migration', 'pg', 'Postgres protocol; journal and migration SQL'),
  ('server', 'objects', 'Snapshot verification/hash; S3 HTTPS or local publication')]
-NOTES = 'The writer and reader remain separate OS processes and native module graphs. The central Postgres\nconnection is acquired lazily for registry use; TENANCY=off preserves app tokens and legacy files.\nEach app has a LocalFolderRouter over the shared TENANTS_DIR/tenantId.db path.\nDifferent physical layouts need distinct tenants because the schema guard rejects switching layouts. Tenant-mode reads acquire a fresh\nscoped reader per request; legacy reads use the app pool. Application documents stay in SQLite.\nBetter Auth is mounted in the server at /api/auth/*; scripts/auth.ts is the headless CLI. The future\ncontrol-plane router is not implemented. E2E uses ephemeral Postgres, distinct tenants for layouts, and fresh Better Auth servers per layout.'
+NOTES = 'The writer and reader remain separate OS processes and native module graphs. The central Postgres\nconnection is acquired lazily for registry use; TENANCY=off preserves app tokens and legacy files.\nEach app has a LocalFolderRouter over the shared TENANTS_DIR/tenantId.db path.\nDifferent physical layouts need distinct tenants because the schema guard rejects switching layouts. Document queries use fresh read-only node:sqlite connections in the server, with authenticated tenant routing selecting the file. Application documents stay in SQLite.\nBetter Auth is mounted in the server at /api/auth/*; scripts/auth.ts is the headless CLI. The future\ncontrol-plane router is not implemented. E2E uses ephemeral Postgres, distinct tenants for layouts, and fresh Better Auth servers per layout.'
 NAME = 'c4-container-platform'
 
 

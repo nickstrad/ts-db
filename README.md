@@ -1,8 +1,9 @@
-# Document DB MVP — TypeScript document API, SQLite storage, DuckDB queries
+# Document DB MVP — TypeScript document API, SQLite storage, DuckDB analytics
 
 **Application authors write schemas and document operations, not SQL.** The platform captures document
-operations as a small intermediate representation and compiles them to SQLite or DuckDB SQL. Regular
-TypeScript control flow (the tic-tac-toe rules) still runs as TypeScript.
+operations as a small intermediate representation and compiles document reads to SQLite SQL. DuckDB remains
+the engine for event-log ingest and named analysis. Regular TypeScript control flow (the tic-tac-toe rules)
+still runs as TypeScript.
 
 ## Verification status
 
@@ -47,7 +48,7 @@ also has fixture coverage. No live load-performance claim follows from that cove
 | `sdk/db.ts`          | Document operations become an engine-neutral query plan.                                     |
 | `core/compile/`      | Schema to DDL; query plan to dialect-specific SQL; document writes to SQL; row decoding.     |
 | `platform/sqlite.ts` | Per-app mutation serialization and SQLite transactions, including mutation-internal reads.   |
-| `platform/duckdb.ts` | Read-only attachment of the same SQLite file; generated DuckDB queries.                      |
+| `platform/document_reader.ts` | In-process read-only SQLite connections for document queries, with a concurrency cap.       |
 | `platform/server.ts` | Server entrypoint: scoped listener, backup and ingest-then-sweep timers, signal shutdown.    |
 | `platform/layers.ts` | `PlatformLive`: the server's ordered layer chain (config, logging, per-app storage, reader). |
 | `platform/http/`     | Router, auth, handlers, and the `X-Trace-Id` / span contract (`trace.ts`).                   |
@@ -123,11 +124,11 @@ TypeScript client / browser
      |
      | named handler + JSON args (never raw SQL)
      v
-Deno process 1: HTTP API + SQLite mutation handlers + backup and ingest-then-sweep timers
+Deno process 1: HTTP API + SQLite document reads/writes + backup and ingest timers
      |                  |
-     | write/read tx    | JSON-lines RPC over stdin/stdout (query, ping, ingest)
+     | node:sqlite      | JSON-lines RPC over stdin/stdout (ping, ingest, analysis)
      v                  v
-app.sqlite <------ Deno process 2: query handlers + DuckDB SQLite extension
+app.sqlite          Deno process 2: DuckDB event-log ingest + named analysis
      |                  |
      | consistent       | JSONL logs -> event-log DuckDB file (derived; reader only)
      | VACUUM INTO      v
@@ -142,9 +143,10 @@ DuckDB file is the **derived** event-log file written by the reader's ingest fro
 (`EVENTLOG_DUCKDB`, default `<DATA_DIR>/eventlog.duckdb`); the server never opens it. See "Observability and
 the event log" below.
 
-SQLite writes use `node:sqlite`. DuckDB uses its SQLite extension to read the live file. The processes are
-separated because DuckDB documents a warning about linking multiple SQLite-library copies into one
-application. Deno Workers/threads are not substituted for that OS-process boundary.
+The server uses `node:sqlite` for document reads and writes. The separate reader child remains responsible
+for DuckDB event-log ingest and named analysis. Keeping DuckDB in its own process also avoids loading its
+SQLite extension alongside `node:sqlite` in one process. Deno Workers/threads are not substituted for that
+OS-process boundary.
 
 ## Run
 
@@ -279,12 +281,11 @@ arrays JSON-encoded TEXT. Generated tables use SQLite STRICT mode.
 
 `tic-tac-toe-json` uses `_id`, `_creationTime`, `_version`, and one `doc TEXT` JSON document per row. The same
 schema validates the JSON. Index declarations compile to SQLite JSON expression indexes. This is JSON text,
-not SQLite's binary JSONB encoding, so DuckDB can consume it as JSON text.
+not SQLite's binary JSONB encoding, so SQLite's document-read compiler can extract fields from it.
 
 In columns mode, `status = "playing"` targets the `status` column. In JSON mode the SQLite compiler uses
-`json_extract(doc, '$.status')`; the DuckDB compiler uses `json_extract_string(doc, '$.status')`.
-Numeric/boolean extraction has explicit casts in the DuckDB dialect. The result decoder returns the same
-TypeScript document shape in either layout and normalizes safe-integer BIGINT results to JS numbers.
+`json_extract(doc, '$.status')`. The result decoder returns the same TypeScript document shape in either
+layout and normalizes safe-integer BIGINT results to JS numbers.
 
 Schema descriptors are stored in each file. Changing a schema or storage mode on an existing file fails
 explicitly. There is no automatic migration or live schema reload.
@@ -298,9 +299,9 @@ atomic. If validation or game logic throws, both roll back. Concurrent move atte
 
 Public `query` handlers execute in the server process with a read-only SQLite connection to the app's file (or
 the authenticated tenant's file). Each handler has its own connection and read transaction, without taking the
-Storage writer semaphore. Concurrent handlers have independent snapshots; connections close on success,
-failure, interruption, or the configured reader-call deadline. Ingest, analysis, and ping still use the
-supervised DuckDB reader child over IPC.
+Storage writer semaphore. A separate semaphore caps concurrent document reads at 32. Handlers have independent
+snapshots; connections close on success, failure, interruption, or the configured deadline. Ingest, analysis,
+and ping still use the supervised DuckDB reader child over IPC.
 
 The mutation response returns the locally committed game immediately. DuckDB is never used to make
 transactional write decisions. There is no second data copy that needs to catch up. This does not establish a
@@ -482,7 +483,8 @@ not verified identity. App-level shared bearer tokens are only a basic routing/a
 have no automatic retry or idempotency key, so a network timeout can leave an unknown commit outcome.
 
 Legacy mode uses one writer connection per app; tenancy leases writers from a bounded per-app handle cache.
-Both use one shared serial reader process. This demonstrates the design without establishing capacity.
+The reader child remains shared for event-log ingest and named analysis. This demonstrates the design without
+establishing capacity.
 SQLite's synchronous API and snapshot creation can block the API event loop. There are queue-size and
 result-size caps but no complete deadline/cancellation, overload, restart, or resource-governance policy.
 Avoid network I/O or long-running work inside mutation handlers. All long-lived processes must remain on one
@@ -490,17 +492,16 @@ local filesystem; object storage is a backup target, not a mounted live SQLite v
 
 Reactive subscriptions, automatic dependency tracking, optimistic UI, durable actions/jobs, automatic
 application-schema migrations, a complete production authentication policy, and a full query optimizer are not
-included. Routing all reads through DuckDB demonstrates the requested architecture; it is not a claim that
-this is faster than SQLite indexed point reads. In a later design, the platform could select SQLite for
-transactional point reads and DuckDB for analytical plans without changing the SDK. Benchmark the actual
-extension's scan/predicate behavior rather than assuming every declared SQLite index accelerates every DuckDB
-query.
+included. Document queries use in-process SQLite; DuckDB remains responsible for the event log and named
+analysis. This split reuses SQLite SQL for ordinary document reads and keeps the supervised reader child
+load-bearing for ingest and analysis. Benchmark actual workloads rather than assuming every declared SQLite
+index accelerates every query.
 
 ## Primary references
 
 - Deno SQLite API: https://docs.deno.com/api/node/sqlite/
 - Deno native npm/Node-API compatibility: https://docs.deno.com/runtime/fundamentals/node/
-- DuckDB SQLite extension (live-file access and multiple-SQLite-library warning):
+- DuckDB SQLite extension (native-library isolation rationale):
   https://duckdb.org/docs/current/core_extensions/sqlite
 - DuckDB Node Neo API: https://duckdb.org/docs/current/clients/node_neo/overview
 - DuckDB JSON functions: https://duckdb.org/docs/current/data/json/json_functions

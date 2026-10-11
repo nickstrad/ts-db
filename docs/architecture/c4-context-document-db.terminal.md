@@ -12,8 +12,9 @@ Audited against landed main `643b706` on 2026-10-11 (item 27). Both formats are 
 ╎  │ Document DB platform         │                                    ╎
 ╎  │ [Software system]            │                                    ╎
 ╎  │ platform/                    │                                    ╎
-╎  │ Effect; SQLite writes;       │                                    ╎
-╎  │ DuckDB reads; tenant routing │                                    ╎
+╎  │ Effect; SQLite document      │                                    ╎
+╎  │ reads/writes; DuckDB event   │                                    ╎
+╎  │ log and analysis             │                                    ╎
 ╎  └──────────────────────────────┘                                    ╎
 ╎                                                                      ╎
 ╰╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╯
