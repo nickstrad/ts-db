@@ -234,7 +234,9 @@ export interface RetentionBudgets {
 /** `IngestReport` plus the sweep it gated and the budgets after it. A superset, so the wire type holds. */
 export interface IngestThenSweepReport extends IngestReport {
   readonly retention: RetentionOutcome;
-  readonly budgets: RetentionBudgets;
+  /** Absent only when measuring failed (`budgetsError`); ingest and sweep had already completed. */
+  readonly budgets?: RetentionBudgets;
+  readonly budgetsError?: string;
 }
 
 /** What `makeEventLogIngest` builds: the frozen service plus the coordinator. */
@@ -516,9 +518,13 @@ export function makeEventLogIngest(
         ([relative, lines]) =>
           attempt("insert", async () => {
             const path = join(logDir, relative);
+            // A write torn earlier (a full disk) leaves a fragment with no terminator; start on a fresh
+            // line, or the first retried record would be glued to it and lost as evidence.
+            const torn = await endsMidLine(path);
             const file = await Deno.open(path, { create: true, append: true });
             try {
-              const data = new TextEncoder().encode(lines.map((line) => line(at)).join("\n") + "\n");
+              const body = lines.map((line) => line(at)).join("\n") + "\n";
+              const data = new TextEncoder().encode(torn ? `\n${body}` : body);
               let written = 0;
               while (written < data.length) written += await file.write(data.subarray(written));
               await file.syncData();
@@ -983,12 +989,37 @@ export function makeEventLogIngest(
             errorTag: swept.left._tag,
             error: describeRetentionError(swept.left),
           };
-        const budgets = yield* measure(now, swept._tag === "Right" ? swept.right.blockedBytes : 0);
-        return { ...counts, retention: outcome, budgets };
+        // Ingest committed and the sweep ran: a failed measurement is reported, never the call's failure.
+        const measured = yield* Effect.either(
+          measure(now, swept._tag === "Right" ? swept.right.blockedBytes : 0),
+        );
+        return measured._tag === "Right"
+          ? { ...counts, retention: outcome, budgets: measured.right }
+          : { ...counts, retention: outcome, budgetsError: measured.left.detail ?? measured.left.phase };
       }));
 
     return { ingest: lock.withPermits(1)(run), ingestThenSweep };
   });
+}
+
+/** Whether `path` exists, is non-empty and does not end in `\n`. */
+async function endsMidLine(path: string): Promise<boolean> {
+  let file: Deno.FsFile;
+  try {
+    file = await Deno.open(path, { read: true });
+  } catch (cause) {
+    if (cause instanceof Deno.errors.NotFound) return false;
+    throw cause;
+  }
+  try {
+    const size = (await file.stat()).size;
+    if (size === 0) return false;
+    await file.seek(size - 1, Deno.SeekMode.Start);
+    const last = new Uint8Array(1);
+    return (await file.read(last)) === 1 && last[0] !== 0x0a;
+  } finally {
+    file.close();
+  }
 }
 
 /** One line for a sweep failure that already emitted its own `error` lifecycle event. */

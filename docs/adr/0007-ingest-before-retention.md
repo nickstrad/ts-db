@@ -56,6 +56,12 @@ run in this order, and the first one that fails is reported:
 Under that contract, a file dated before today can receive no more bytes once its last in-flight write has
 settled.
 
+"Today" is the local date (`rotation.dateBucketOf`), so the contract assumes that every process writing to or
+sweeping a `LOG_DIR` uses the same timezone. A reader whose local date is ahead of the server's would treat
+the server's current directory as yesterday, and an idle server could later append to a file the reader had
+already sealed or removed. The server and its reader child inherit one environment, so they agree. A process
+deployed separately must be given the same `TZ`.
+
 The watermark check is a full identity check. The file's whole content must hash to the prefix hash that
 ingest committed. An append, a rewrite or a stale inventory therefore blocks destructive action.
 Reconciliation is exact: it compares sets of offsets, not counts. Every complete line, plus a trailing partial
@@ -91,6 +97,10 @@ For each such source, one transaction quarantines the tail as a `torn-tail` reje
 offset to the end of the file. That offset now ends a partial line rather than sitting just past a `\n`. A
 byte appended later would fall outside the writers' model, and ingest would read it, and quarantine it, as a
 line of its own.
+
+Like a `line-too-large` reject, the quarantine record keeps only the tail's first 64 KiB, decoded lossily. A
+torn tail can never parse, so the record proves the tail was consumed and shows its start. Once the source
+ages out, the rest of a longer tail is gone with it.
 
 ### 3. Ingest, then sweep, in the reader, through the existing RPC
 
@@ -138,7 +148,8 @@ Every step is idempotent, and the next sweep repairs a crash at any point:
 - **quarantine files** are deleted last, and only from a directory with no event file left.
 - **ingest and seal** are single DuckDB transactions. Quarantine records are durable before `COMMIT`, so a
   crash between the two leaves at most a duplicate quarantine record. Reconciliation uses sets, so a duplicate
-  is harmless.
+  is harmless. A quarantine write torn by a full disk leaves an unterminated fragment. The retry starts on a
+  fresh line, so its records are not glued to the fragment, and the fragment itself proves nothing.
 
 **Byte offsets survive compression**, because only a fully ingested source is compressed and the `.gz`
 decompresses to exactly those bytes. `_ingest_state` rows are **never pruned**. A row is a tombstone: a source

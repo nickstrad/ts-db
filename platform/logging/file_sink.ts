@@ -26,7 +26,8 @@
  *    once its last in-flight write has settled, can gain no more bytes from any sink, and the
  *    ingest-then-sweep coordinator may seal its torn tail and, once ingested, gzip or delete it.
  *    Changing any of this (reopening a file to finish a line, appending under a stale bucket) would
- *    let retention remove bytes that were never ingested.
+ *    let retention remove bytes that were never ingested. Buckets are local time, so every process
+ *    sharing a `LOG_DIR` must share one timezone (ADR 0007).
  *
  * `rotation.currentPath` is the single source of truth for the on-disk layout, but it hard-codes
  * the `logs/` root segment (`logs/<role>/<YYYY-MM-DD>/events-<HH>-<pid>-<seq>.jsonl`). `LOG_DIR`

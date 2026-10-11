@@ -35,6 +35,7 @@ import {
   eventLogDriver,
   type IngestThenSweepReport,
   makeEventLogIngest,
+  type RetentionBudgets,
   type RetentionCoordinatorOptions,
 } from "../../platform/eventlog/ingest.ts";
 import { eventSinkLayer } from "../../platform/logging/logger.ts";
@@ -219,6 +220,11 @@ function swept(report: IngestThenSweepReport): SweepReport {
   return report.retention.sweep;
 }
 
+function budgetsOf(report: IngestThenSweepReport): RetentionBudgets {
+  if (report.budgets === undefined) throw new Error(`budgets not measured: ${report.budgetsError}`);
+  return report.budgets;
+}
+
 type Row = Record<string, unknown>;
 
 async function query(world: World, sql: string): Promise<Row[]> {
@@ -299,10 +305,10 @@ test("ingest, then sweep: what is committed goes; today stays; nothing is ingest
     await assertIngestedOnce(world, tree.all);
 
     // The budgets: JSONL is what is left on disk; the derived file is measured, not capped.
-    assert.equal(second.budgets.derived.platformEventRows, 15);
-    assert.equal(second.budgets.derived.boundedByLogMaxTotalBytes, false);
-    assert.ok(second.budgets.derived.duckdbBytes > 0);
-    assert.equal(second.budgets.jsonl.files, 2);
+    assert.equal(budgetsOf(second).derived.platformEventRows, 15);
+    assert.equal(budgetsOf(second).derived.boundedByLogMaxTotalBytes, false);
+    assert.ok(budgetsOf(second).derived.duckdbBytes > 0);
+    assert.equal(budgetsOf(second).jsonl.files, 2);
   });
 });
 
@@ -584,6 +590,22 @@ test("rejected lines are reconciled against durable quarantine before their sour
   });
 });
 
+test("a quarantine file left with a torn record still takes whole records after it", async () => {
+  await withWorld(async (world) => {
+    const good = lines(2);
+    await put(world, OLD, `${good[0]}\nnot json\n${good[1]}\n`);
+    // A quarantine write torn by a full disk: a fragment with no terminator, then the batch rolled back.
+    await put(world, "server/2026-10-01/rejected.jsonl", '{"rejectedAt":"2026-');
+
+    const report = swept(await run(world));
+
+    // The retried record starts on its own line, so it counts as evidence and the source can go.
+    assert.deepEqual(report.blocked, []);
+    assert.deepEqual(report.deleted, [OLD, "server/2026-10-01/rejected.jsonl"]);
+    await assertIngestedOnce(world, good.map(idOf));
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Gzip crash and retry
 // ---------------------------------------------------------------------------
@@ -800,7 +822,7 @@ test("sustained writes over many rotations and sweeps: every accepted event inge
           capPruned += 1;
         }
         const rows = yield* appRows();
-        const { jsonl, derived, logger } = report.budgets;
+        const { jsonl, derived, logger } = budgetsOf(report);
         console.log(
           `sweep ${sweeps} (day ${day}): input=${emitted} ingested=${rows.n} rejected=${rejectedReported} ` +
             `dropped=${logger.dropsRecorded} | jsonl=${jsonl.retainedBytes}B in ${jsonl.files} files ` +
@@ -822,7 +844,7 @@ test("sustained writes over many rotations and sweeps: every accepted event inge
         assert.equal(derived.boundedByLogMaxTotalBytes, false);
       }
 
-      const drops = (yield* control.ingestThenSweep()).budgets.logger.dropsRecorded;
+      const drops = budgetsOf(yield* control.ingestThenSweep()).logger.dropsRecorded;
       const rows = yield* appRows();
       const foreign = yield* sideQuery("SELECT count(*) AS n FROM platform_events WHERE name = 'fixture'");
       return { ingested: Number(rows.n), drops, foreignIngested: Number(foreign[0].n) };
