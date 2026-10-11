@@ -8,11 +8,10 @@
  *
  * What it shows:
  * - one explicit trace is echoed and identifies the `http`, `handler`, SQLite `sql`/`tx` events in the
- *   server and the DuckDB `sql`/`tx` events in the reader, across a mutation and a query, with the
- *   reader request's span a child of the server handler's span;
+ *   server across a mutation and a query, each under its own handler span;
  * - a generated trace (no argument) and an invalid one (replaced at ingress, echoed) do the same;
  * - a rolled-back mutation (409) and a reader-side error (400) keep the trace on every event;
- * - two callers overlapping many requests, queued through the one reader connection, never swap
+ * - two callers overlapping many requests never swap
  *   traces: every SQL statement bound a caller's own values under that caller's trace;
  * - a legacy frame with no trace properties, sent straight to a reader, runs under the reader's
  *   nonempty `reader-<pid>-<id>` fallback.
@@ -109,7 +108,7 @@ test("end to end: caller traces through the SDK, server and reader child", { tim
     JSON_APP_TOKEN: "json-token",
     S3_BASE_URL: "",
     BACKUP_INTERVAL_MS: "0",
-    // Successful statements are recorded (the reader records only failures otherwise), with their
+    // Successful statements are recorded (document reads record only failures otherwise), with their
     // values, which is what lets the overlap check prove whose statement ran under whose trace.
     TRACE_SQL: "true",
     LOG_INCLUDE_BIND_VALUES: "true",
@@ -161,7 +160,7 @@ test("end to end: caller traces through the SDK, server and reader child", { tim
       const invalid = await run(client.query("listGames", { status: "playing" }, "not a valid trace"));
       assert.ok(Either.isRight(invalid));
 
-      // A rolled-back mutation (stale version) and a reader-side failure (args the reader rejects).
+      // A rolled-back mutation (stale version) and a document-query failure (invalid args).
       const conflict = await run(
         client.mutation("makeMove", { gameId, playerId: "xe", cell: 0, expectedVersion: 999 }, rollback),
       );
@@ -172,7 +171,7 @@ test("end to end: caller traces through the SDK, server and reader child", { tim
       assert.ok(Either.isLeft(rejected) && rejected.left.status === 400, String(rejected));
 
       // Two callers overlapping: each creates its own game, then interleaves reads of it and more
-      // writes, all at once, so their queries queue together through the one reader connection.
+      // writes, all at once, with independent document-read connections.
       const games = await Promise.all(callers.map(async (caller) => {
         const made = await run(
           client.mutation("createGame", { xPlayer: `x-${caller.name}`, oPlayer: "o" }, caller.traceId),
@@ -250,29 +249,18 @@ test("end to end: caller traces through the SDK, server and reader child", { tim
     const serverSql = inTrace(serverLog, explicit, "sql");
     const serverTx = inTrace(serverLog, explicit, "tx");
     assert.ok(serverSql.some((r) => r.statementKind === "insert" && r.engine === "sqlite"));
-    assert.deepEqual(serverTx.map((r) => [r.engine, r.outcome]), [["sqlite", "commit"]]);
-    for (const record of [...serverSql, ...serverTx]) assert.equal(record.spanId, mutationSpan);
-
-    const readerSql = inTrace(readerLog, explicit, "sql");
-    const readerTx = inTrace(readerLog, explicit, "tx");
-    assert.ok(readerSql.length > 0 && readerSql.every((r) => r.engine === "duckdb" && r.appId === APP.id));
-    assert.deepEqual(readerTx.map((r) => [r.engine, r.outcome]), [["duckdb", "commit"]]);
-    // The reader's per-app DuckDB opens lazily inside the first query — this one — so its log line
-    // carries the reader request's context: a span the server named, whose parent is the handler's.
-    const opened = readerLog.find((r) =>
-      r.kind === "lifecycle" && (r.detail as { message?: string } | undefined)?.message === "reader opened"
-    );
-    assert.ok(opened, "the reader logged opening the app");
-    assert.equal(opened.traceId, explicit);
-    const annotations = (opened.detail as { annotations: Record<string, unknown> }).annotations;
-    assert.deepEqual(
-      { parentSpanId: annotations.parentSpanId, traceOrigin: annotations.traceOrigin },
-      { parentSpanId: querySpan, traceOrigin: "caller" },
-    );
-    assert.ok(opened.spanId && TOKEN_SHAPE.test(opened.spanId) && opened.spanId !== querySpan);
+    assert.deepEqual(serverTx.map((r) => [r.engine, r.outcome]), [
+      ["sqlite", "commit"],
+      ["sqlite", "commit"],
+    ]);
+    const querySql = serverSql.filter((r) => r.spanId === querySpan);
+    assert.ok(querySql.length > 0 && querySql.every((r) => r.engine === "sqlite" && r.appId === APP.id));
+    assert.equal(serverTx[0].spanId, mutationSpan);
+    assert.equal(serverTx[1].spanId, querySpan);
+    assert.equal(inTrace(readerLog, explicit).length, 0, "document queries never reach the child");
 
     // --- generated and replaced ids -------------------------------------------------------------
-    // The generated id ran a mutation (server tx), the replaced one a query (reader tx).
+    // Both mutations and document queries now emit server-side SQLite events.
     const kindsOf = (traceId: string) =>
       [
         ...new Set(
@@ -287,10 +275,10 @@ test("end to end: caller traces through the SDK, server and reader child", { tim
       "server:tx",
     ]);
     assert.deepEqual(kindsOf(invalidExchange.echoed!), [
-      "reader:sql",
-      "reader:tx",
       "server:handler",
       "server:http",
+      "server:sql",
+      "server:tx",
     ]);
     assert.ok(
       ![...serverLog, ...readerLog].some((r) => r.traceId === "not a valid trace"),
@@ -321,7 +309,7 @@ test("end to end: caller traces through the SDK, server and reader child", { tim
       "error",
       "SchemaError",
     ]]);
-    assert.deepEqual(inTrace(readerLog, readerFailure, "tx").map((r) => [r.outcome, r.errorTag]), [[
+    assert.deepEqual(inTrace(serverLog, readerFailure, "tx").map((r) => [r.outcome, r.errorTag]), [[
       "rollback",
       "SchemaError",
     ]]);
@@ -330,11 +318,11 @@ test("end to end: caller traces through the SDK, server and reader child", { tim
     callers.forEach((caller, c) => {
       const own = outcome.games[c];
       const other = outcome.games[1 - c];
-      const reads = inTrace(readerLog, caller.traceId, "sql");
+      const reads = inTrace(serverLog, caller.traceId, "sql").filter((r) => r.statementKind === "select");
       assert.equal(
-        inTrace(readerLog, caller.traceId, "tx").length,
-        8,
-        `${caller.name}'s 8 queries reached the reader`,
+        inTrace(serverLog, caller.traceId, "tx").length,
+        13,
+        `${caller.name}'s 8 queries and 5 mutations ran locally`,
       );
       assert.equal(reads.length, 8);
       for (const read of reads) {

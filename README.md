@@ -296,10 +296,11 @@ A mutation gets one per-app queue slot and one `BEGIN IMMEDIATE ... COMMIT` tran
 atomic. If validation or game logic throws, both roll back. Concurrent move attempts are serialized, and
 `expectedVersion` rejects a stale client attempt.
 
-Public `query` handlers execute in the DuckDB process and get a read-only document context. The attached
-SQLite database is READ_ONLY. The worker serializes whole query handlers and scopes each handler to a fresh
-transaction, so it does not intentionally reuse an earlier transaction snapshot across requests. The
-integration test specifically checks read-after-write visibility on the real extension.
+Public `query` handlers execute in the server process with a read-only SQLite connection to the app's file (or
+the authenticated tenant's file). Each handler has its own connection and read transaction, without taking the
+Storage writer semaphore. Concurrent handlers have independent snapshots; connections close on success,
+failure, interruption, or the configured reader-call deadline. Ingest, analysis, and ping still use the
+supervised DuckDB reader child over IPC.
 
 The mutation response returns the locally committed game immediately. DuckDB is never used to make
 transactional write decisions. There is no second data copy that needs to catch up. This does not establish a
@@ -463,7 +464,6 @@ tests.
 | `awsSessionToken`      | `AWS_SESSION_TOKEN`       | optional-string                 | `(unset)`                                  | AWS session token, for temporary credentials.                                                                                                                  |
 | `localObjectDir`       | `LOCAL_OBJECT_DIR`        | string                          | `./object-store`                           | Local object-store directory used when S3_BASE_URL is unset, resolved to an absolute path.                                                                     |
 | `eventlogDuckdbPath`   | `EVENTLOG_DUCKDB`         | string                          | `<DATA_DIR>/eventlog.duckdb`               | Persistent DuckDB file backing the ingested event log, resolved to an absolute path. Defaults to eventlog.duckdb inside DATA_DIR.                              |
-| `readerBackend` | `READER_BACKEND` | enum(duckdb\|sqlite) | `duckdb` | Temporary migration scaffold to build and prove SQLite parity before removing the DuckDB path; the end state is SQLite only. |
 | `readerCallTimeoutMs`  | `READER_CALL_TIMEOUT_MS`  | number                          | `30000`                                    | Per-call deadline in milliseconds for a request to the reader process; a call with no reply by then fails with HTTP 502. Must be finite and > 0.               |
 | `tenancyMode`          | `TENANCY`                 | enum(off\|api-key\|better-auth) | `off`                                      | Multitenancy mode. `off` preserves the pre-tenancy single-database, app-token behavior; `api-key` and `better-auth` are reserved for later multitenancy items. |
 | `databaseUrl`          | `DATABASE_URL`            | string                          | `postgres://tsdb:tsdb@localhost:5432/tsdb` | Postgres connection URL for the multitenancy central database (tenant registry). Unused while tenancy mode is `off`.                                           |

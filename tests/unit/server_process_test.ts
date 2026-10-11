@@ -221,7 +221,7 @@ test("server process: its runtime module graph never loads DuckDB", async () => 
 // ===========================================================================
 
 test(
-  "server process (spawned): killing the reader child 502s queries, then the supervisor restarts it",
+  "server process (spawned): killing the reader child leaves document reads up while ingest waits for restart",
   { timeout: 180_000 },
   async () => {
     const root = await Deno.makeTempDir({ prefix: "ts-db-reader-restart-" });
@@ -269,7 +269,13 @@ test(
           body: JSON.stringify({ gameId: "no-such-game" }),
         });
 
-      // Baseline: the query path works through the reader.
+      const ingest = () =>
+        fetch(`${base}/admin/logs/ingest`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${ADMIN}` },
+        });
+
+      // Baseline: the local document query works.
       const before = await query();
       assert.equal(before.status, 200, "query did not work before the kill");
       await before.body?.cancel();
@@ -295,29 +301,32 @@ test(
       // Kill the reader child. The server must stay up.
       Deno.kill(readerPid, "SIGKILL");
 
-      // During the restart window, queries fail with 502 (reader down), not 500 and not a hang.
+      // Document reads stay local while ingest still reports the reader restart window.
       let saw502 = false;
       const windowEnd = Date.now() + 1500;
       while (Date.now() < windowEnd && !saw502) {
+        const document = await query();
+        await document.body?.cancel();
+        assert.equal(document.status, 200, "document read depended on the child");
         try {
-          const response = await query();
+          const response = await ingest();
           await response.body?.cancel();
           if (response.status === 502) saw502 = true;
         } catch { /* connection reset is also a down reader */ }
       }
       assert.ok(saw502, "no 502 during the reader restart window");
 
-      // The supervisor respawns the child: queries recover with no server restart.
+      // The supervisor respawns the child: ingest recovers with no server restart.
       let recovered = false;
       for (let attempt = 0; attempt < 300 && !recovered; attempt++) {
         try {
-          const response = await query();
+          const response = await ingest();
           await response.body?.cancel();
           recovered = response.status === 200;
         } catch { /* still restarting */ }
         if (!recovered) await new Promise((resolve) => setTimeout(resolve, 100));
       }
-      assert.ok(recovered, "queries never recovered after the reader was killed");
+      assert.ok(recovered, "ingest never recovered after the reader was killed");
       assert.equal(child.pid, serverPid, "server process changed");
 
       // The log shows the supervision, not a shutdown.
