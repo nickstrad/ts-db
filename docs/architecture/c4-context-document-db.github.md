@@ -6,7 +6,7 @@ Audited against landed main `643b706` on 2026-10-11 (item 27). Both formats are 
 ```mermaid
 flowchart TB
     subgraph platform["Document DB platform"]
-        db["Document DB platform<br/>[Software system]<br/>platform/<br/>Effect; SQLite writes; DuckDB reads; tenant routing"]
+        db["Document DB platform<br/>[Software system]<br/>platform/<br/>Effect; SQLite document reads/writes; DuckDB event log and analysis"]
     end
         developer["App developer<br/>[Person]<br/>app/; sdk/<br/>Declares schemas and Effect handlers"]
         caller["Application caller<br/>[Person]<br/>sdk/client.ts<br/>Players and authenticated tenant users"]

@@ -11,9 +11,9 @@ Conventions, naming and the maintenance contract: [`AGENTS.md`](AGENTS.md).
 | Level | Diagram                        | What it shows                                                                                                                                                         | GitHub                                         | Terminal                                           |
 | ----- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- | -------------------------------------------------- |
 | 1     | System Context                 | The platform as one box: app developers, players, the operator, and the external object store, DuckDB analytics consumer and k6 load generator.                       | [github](c4-context-document-db.github.md)     | [terminal](c4-context-document-db.terminal.md)     |
-| 2     | Container — request path       | The server process, the DuckDB reader child process, the per-app SQLite files and the object store, and how a request and a backup move between them.                 | [github](c4-container-platform.github.md)      | [terminal](c4-container-platform.terminal.md)      |
+| 2     | Container — request path       | The server process, the DuckDB reader child process, the per-app SQLite files and the object store; document reads stay in-process while ingest and analysis use the reader. | [github](c4-container-platform.github.md)      | [terminal](c4-container-platform.terminal.md)      |
 | 2     | Container — observability path | Server/reader JSONL, the reader's connected ingest-then-sweep into the derived DuckDB event log, the reader composition, live named analysis, logs CLI and k6 loader. | [github](c4-container-observability.github.md) | [terminal](c4-container-observability.terminal.md) |
-| 3     | Component — server process     | The mounted HTTP/lifecycle components and services, including per-app AppServices, storage, backups, reader client, logging and dependencies.                         | [github](c4-component-server.github.md)        | [terminal](c4-component-server.terminal.md)        |
+| 3     | Component — server process     | The mounted HTTP/lifecycle components and services, including in-process document reads, per-app storage, backups, reader client, logging and dependencies.           | [github](c4-component-server.github.md)        | [terminal](c4-component-server.terminal.md)        |
 
 Level 2 is split in two so neither picture is cluttered; together they cover one container set.
 
@@ -51,8 +51,8 @@ containers, tenant components, and connected analysis/k6 observability paths.
 | MT-09       | `c9ba958`         | Tenant-routing properties; no new runtime C4 surface.                                                                                                                        |
 | MT-10       | `643b706`         | Reader live analysis wired to catalog/shared ingest instance; E2E uses distinct tenants for incompatible layouts (not per-app storage directories). Seven-scenario E2E gate. |
 
-**Connected:** server layers, tenant auth/registry/routing when enabled, reader queries and named analysis,
-admin/hourly ingest-then-sweep, standalone logs/tenant/auth/migration CLIs, k6 point loader. **Library only:**
+**Connected:** server layers, tenant auth/registry/routing when enabled, in-process SQLite document queries, reader ingest and named analysis, admin/hourly ingest-then-sweep,
+standalone logs/tenant/auth/migration CLIs, k6 point loader. **Library only:**
 `startRetentionSweeper` (not mounted), `upgradeEventLog` (explicit operator API, no CLI). **Future:**
 control-plane routing, event-table pruning and DuckDB compaction. No future work is drawn as a running
 service. Tests and counts are dated in the root [README.md](../../README.md).

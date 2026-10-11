@@ -47,23 +47,23 @@ Audited against landed main `643b706` on 2026-10-11 (item 27). Both formats are 
 ╎  └──────────────────────────────┘   └──────────────────────────────┘ ╎
 ╎                                                                      ╎
 ╎  ┌──────────────────────────────┐   ┌──────────────────────────────┐ ╎
-╎  │ ReaderClient / ReaderProcess │   │ Logger / EventSink           │ ╎
-╎  │ [Effect services]            │   │ [Effect logger/service]      │ ╎
-╎  │ platform/ipc.ts;             │   │ platform/logging/            │ ╎
-╎  │ platform/layers.ts           │   │ Dropping queue; batched      │ ╎
-╎  │ Scoped child, capped queue,  │   │ JSONL; final drain           │ ╎
-╎  │ deadline, trace/tenant       │   └──────────────────────────────┘ ╎
-╎  │ frames                       │                                    ╎
+╎  │ ReaderClient / ReaderProcess │   │ DocumentReaderClient         │ ╎
+╎  │ [Effect services]            │   │ [Effect service]             │ ╎
+╎  │ platform/ipc.ts;             │   │ platform/document_reader.ts  │ ╎
+╎  │ platform/layers.ts           │   │ In-process SQLite queries;   │ ╎
+╎  │ Scoped child for             │   │ read-only connection;        │ ╎
+╎  │ ingest/analysis; capped      │   │ concurrency cap 32           │ ╎
+╎  │ queue, deadline, trace       │   └──────────────────────────────┘ ╎
 ╎  └──────────────────────────────┘                                    ╎
 ╎                                                                      ╎
-╎  ┌──────────────────────────────┐                                    ╎
-╎  │ Config / IdGen               │                                    ╎
-╎  │ [Effect services]            │                                    ╎
-╎  │ platform/config.ts;          │                                    ╎
-╎  │ platform/sqlite.ts           │                                    ╎
-╎  │ Validated options; UUIDs;    │                                    ╎
-╎  │ Effect runtime Clock         │                                    ╎
-╎  └──────────────────────────────┘                                    ╎
+╎  ┌──────────────────────────────┐   ┌──────────────────────────────┐ ╎
+╎  │ Logger / EventSink           │   │ Config / IdGen               │ ╎
+╎  │ [Effect logger/service]      │   │ [Effect services]            │ ╎
+╎  │ platform/logging/            │   │ platform/config.ts;          │ ╎
+╎  │ Dropping queue; batched      │   │ platform/sqlite.ts           │ ╎
+╎  │ JSONL; final drain           │   │ Validated options; UUIDs;    │ ╎
+╎  └──────────────────────────────┘   │ Effect runtime Clock         │ ╎
+╎                                     └──────────────────────────────┘ ╎
 ╎                                                                      ╎
 ╰╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╯
 
@@ -79,8 +79,8 @@ Audited against landed main `643b706` on 2026-10-11 (item 27). Both formats are 
    │ Reader child                 │   │ Object storage               │
    │ [Deno process]               │   │ [External system /           │
    │ platform/reader.ts           │   │ filesystem]                  │
-   │ DuckDB reads, ingest and     │   │ S3_BASE_URL or               │
-   │ analysis                     │   │ LOCAL_OBJECT_DIR             │
+   │ DuckDB event-log ingest and  │   │ S3_BASE_URL or               │
+   │ named analysis               │   │ LOCAL_OBJECT_DIR             │
    └──────────────────────────────┘   │ Snapshot and manifest        │
                                       │ objects                      │
                                       └──────────────────────────────┘
@@ -106,34 +106,37 @@ Audited against landed main `643b706` on 2026-10-11 (item 27). Both formats are 
 | 7  | TenantStorageRouter          | Application files            | Prepare validated SQLite capability and schema                 |
 | 8  | Storage                      | TenantStorageRouter          | Resolve/prepare tenant location before opening a cached writer |
 | 9  | HTTP API / auth              | Storage                      | Mutation Effect inside serialized transaction                  |
-| 10 | HTTP API / auth              | ReaderClient / ReaderProcess | Query/ingest/analysis frames; trace and trusted tenant path    |
-| 11 | Storage                      | Application files            | node:sqlite transaction and snapshot reads                     |
-| 12 | Server lifecycle             | Backups / ObjectStore        | Scoped backup timer                                            |
-| 13 | Backups / ObjectStore        | Storage                      | Consistent VACUUM INTO snapshot                                |
-| 14 | Backups / ObjectStore        | Object storage               | Verified snapshot and manifest publication                     |
-| 15 | TenantRegistry               | Central registry             | Parameterized registry SQL; lazy scoped pool                   |
-| 16 | Server lifecycle             | ReaderClient / ReaderProcess | Ping; hourly ingest; reader-exit watch and finalizer           |
-| 17 | ReaderClient / ReaderProcess | Reader child                 | JSONL RPC; scoped child shutdown                               |
-| 18 | Storage                      | Logger / EventSink           | SQL/tx/queue events                                            |
-| 19 | HTTP API / auth              | Logger / EventSink           | HTTP/handler spans and failures                                |
-| 20 | Server lifecycle             | Logger / EventSink           | Startup/shutdown and timer events                              |
-| 21 | Backups / ObjectStore        | Logger / EventSink           | Backup and object-transfer events                              |
-| 22 | Logger / EventSink           | Server JSONL                 | Batched append; rotation and scope drain                       |
-| 23 | Config / IdGen               | AppRegistry / AppServices    | App schemas, tokens and paths; generated ids                   |
-| 24 | Config / IdGen               | TenantRegistry               | DATABASE_URL and scope-owned cache                             |
-| 25 | Config / IdGen               | TenantStorageRouter          | TENANTS_DIR and router selection                               |
-| 26 | Config / IdGen               | Logger / EventSink           | Level, queue, flush and rotation settings                      |
+| 10 | HTTP API / auth              | DocumentReaderClient         | Document query in-process; compiled SQLite SQL                 |
+| 11 | DocumentReaderClient         | AppRegistry / AppServices    | Resolve registered query, schema and file                      |
+| 12 | DocumentReaderClient         | Application files            | node:sqlite read-only connection and transaction               |
+| 13 | HTTP API / auth              | ReaderClient / ReaderProcess | Ingest/analysis RPC; trace context                             |
+| 14 | Storage                      | Application files            | node:sqlite transaction and snapshot reads                     |
+| 15 | Server lifecycle             | Backups / ObjectStore        | Scoped backup timer                                            |
+| 16 | Backups / ObjectStore        | Storage                      | Consistent VACUUM INTO snapshot                                |
+| 17 | Backups / ObjectStore        | Object storage               | Verified snapshot and manifest publication                     |
+| 18 | TenantRegistry               | Central registry             | Parameterized registry SQL; lazy scoped pool                   |
+| 19 | Server lifecycle             | ReaderClient / ReaderProcess | Ping; hourly ingest; reader-exit watch and finalizer           |
+| 20 | ReaderClient / ReaderProcess | Reader child                 | JSONL RPC; scoped child shutdown                               |
+| 21 | Storage                      | Logger / EventSink           | SQL/tx/queue events                                            |
+| 22 | HTTP API / auth              | Logger / EventSink           | HTTP/handler spans and failures                                |
+| 23 | Server lifecycle             | Logger / EventSink           | Startup/shutdown and timer events                              |
+| 24 | Backups / ObjectStore        | Logger / EventSink           | Backup and object-transfer events                              |
+| 25 | Logger / EventSink           | Server JSONL                 | Batched append; rotation and scope drain                       |
+| 26 | Config / IdGen               | AppRegistry / AppServices    | App schemas, tokens and paths; generated ids                   |
+| 27 | Config / IdGen               | TenantRegistry               | DATABASE_URL and scope-owned cache                             |
+| 28 | Config / IdGen               | TenantStorageRouter          | TENANTS_DIR and router selection                               |
+| 29 | Config / IdGen               | Logger / EventSink           | Level, queue, flush and rotation settings                      |
 
 ## Runtime notes
 
 Config is acquired before logging, then IdGen, ObjectStore/AppRegistry, TenantRegistry, AppServices and
 ReaderClient. Shutdown drains HTTP, stops timers, closes reader and DB handles, emits the final lifecycle
 event, then drains logging. Every partial startup releases acquired resources. Auth derives TenantContext
-before consuming app arguments; the trusted reader location is prepared behind a shared initialization
-barrier. Tenant key revocation invalidates the local cache; other instances converge within its TTL.
-Tenant-mode writers use a bounded scope-owned handle cache (default 64 handles, 60-second idle expiry);
-requests lease handles, and shutdown drains leases before closing them. Retention and named analysis execute
-in the reader, never as server-side DuckDB components. Item 26 removes compatibility wrappers and
-platform/compiler.ts; pure compilation now lives in core/compile/ and introduces no new runtime component.
-HTTP status mapping lives in core/errors.ts. Better Auth connections are bounded to each request/CLI
-operation, separate from the lazy registry pool.
+before consuming app arguments; the tenant SQLite location is prepared behind a shared initialization barrier.
+Tenant key revocation invalidates the local cache; other instances converge within its TTL. Tenant-mode
+writers use a bounded scope-owned handle cache (default 64 handles, 60-second idle expiry); requests lease
+handles, and shutdown drains leases before closing them. Retention and named analysis execute in the reader,
+never as server-side DuckDB components. Item 26 removes compatibility wrappers and platform/compiler.ts; pure
+compilation now lives in core/compile/ and introduces no new runtime component. HTTP status mapping lives in
+core/errors.ts. Better Auth connections are bounded to each request/CLI operation, separate from the lazy
+registry pool.

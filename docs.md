@@ -8,11 +8,11 @@ guide uses the default app-token mode (`TENANCY=off`) and the two shipped tic-ta
 Typed client / browser
        | named handler + JSON arguments
        v
-Deno server: HTTP + SQLite mutations + backup/timer coordination
+Deno server: HTTP + in-process SQLite document reads/writes + backups
        |                        |
-       | local transactions     | JSON-lines RPC over stdin/stdout
+       | node:sqlite            | JSON-lines RPC over stdin/stdout
        v                        v
-Per-app SQLite files <------ Deno reader: query handlers + DuckDB sqlite extension
+Per-app SQLite files      Deno reader: DuckDB ingest + named analysis
        |                        |
        | consistent snapshot    | ingest JSONL logs
        v                        v
@@ -80,14 +80,15 @@ layout stores metadata columns and one `doc TEXT` JSON body per row, with JSON e
 the same schema and return the same TypeScript document shape. See
 [the layout reference](README.md#two-physical-layouts-same-logical-schema).
 
-A **query** runs in the reader process with a read-only document context, through DuckDB's SQLite extension.
-Whole query handlers are serialized and each gets a fresh read transaction. A **mutation** runs in the server
-process, serialized per app, in one SQLite `BEGIN IMMEDIATE` transaction. Its reads use SQLite inside that
-transaction; its writes commit together or roll back on failure/interruption. Do not retain a handler's
-database context after the handler finishes.
+A **query** runs in the server process against the app's SQLite file (or the authenticated tenant's file),
+using a fresh read-only connection and read transaction. A concurrency semaphore caps active document reads at
+32. A **mutation** also runs in the server process, serialized per app, in one SQLite `BEGIN IMMEDIATE`
+transaction. Its reads use SQLite inside that transaction; its writes commit together or roll back on
+failure/interruption. Do not retain a handler's database context after the handler finishes.
 
 A successful mutation response follows local commit. Queries read the live file rather than an asynchronously
-refreshed replica; a reader overlapping a write may see earlier state. See the
+refreshed replica; a query overlapping a write may see earlier state. Event-log ingest and named analysis
+continue in the supervised DuckDB reader child over IPC. See the
 [transaction contract](README.md#transaction-and-consistency-contract) for the precise scope.
 
 The deployment registry is static. Adding an app means editing `platform/registry.ts` and `platform/config.ts`
@@ -350,7 +351,7 @@ Each entry follows symptom → cause → fix:
 - **`ConfigError` with `S3_BASE_URL`** → credentials are missing → supply both `AWS_ACCESS_KEY_ID` and
   `AWS_SECRET_ACCESS_KEY`, or unset the base URL to select the local stand-in.
 - **DuckDB extension download failure** → first-use network access or extension installation failed → allow
-  the host to download the `sqlite` extension, check the reader log and retry startup/query.
+  the host to download the `sqlite` extension, check the reader log and retry startup, ingest or analysis.
 - **Schema drift on an existing data file** → stored schema/layout differs from the declarations → stop the
   service and use a fresh data directory for a disposable run, or deliberately migrate data offline. There is
   no automatic migration; preserve existing data before changing it.
