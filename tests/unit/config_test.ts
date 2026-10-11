@@ -70,6 +70,15 @@ test("defaults: every option's documented default produces the matching ConfigSe
       localDir: resolve("./object-store"),
     });
     assert.deepEqual(config.eventLog, { duckdbPath: resolve("./data", "eventlog.duckdb") });
+    // MT-02
+    assert.deepEqual(config.tenancy, {
+      mode: "off",
+      databaseUrl: "postgres://tsdb:tsdb@localhost:5432/tsdb",
+      tenantsDir: resolve("./data", "tenants"),
+      router: "local",
+      betterAuthSecret: undefined,
+      betterAuthUrl: "http://localhost:3000",
+    });
   });
 });
 
@@ -275,4 +284,80 @@ test("README 'Configuration' section matches the options table exactly", () => {
     norm(renderOptionsTable()),
     "README.md's Configuration table must match platform/config.ts's OPTIONS exactly (name, env var, type, default, description)",
   );
+});
+
+// --- MT-02: tenancy options ---
+
+async function expectConfigError(
+  vars: Readonly<Record<string, string | undefined>>,
+  key: string,
+  reason: string,
+) {
+  await withEnv(vars, async () => {
+    const exit = await load();
+    assert.equal(exit._tag, "Failure");
+    if (exit._tag !== "Failure") return;
+    const error = exit.cause._tag === "Fail" ? exit.cause.error : undefined;
+    assert.equal(error?._tag, "ConfigError");
+    assert.equal(error?.key, key);
+    assert.equal(error?.reason, reason);
+  });
+}
+
+test("TENANCY=bogus fails with ConfigError(malformed)", async () => {
+  await expectConfigError({ TENANCY: "bogus" }, "TENANCY", "malformed");
+});
+
+test("TENANCY=better-auth without BETTER_AUTH_SECRET fails with ConfigError(inconsistent)", async () => {
+  await expectConfigError({ TENANCY: "better-auth" }, "TENANCY", "inconsistent");
+});
+
+test("TENANCY=better-auth with BETTER_AUTH_SECRET succeeds", async () => {
+  await withEnv({ TENANCY: "better-auth", BETTER_AUTH_SECRET: "s3cr3t" }, async () => {
+    const exit = await load();
+    assert.equal(exit._tag, "Success");
+    if (exit._tag !== "Success") return;
+    assert.equal(exit.value.tenancy.mode, "better-auth");
+    assert.equal(exit.value.tenancy.betterAuthSecret, "s3cr3t");
+  });
+});
+
+test("TENANCY=api-key does not require BETTER_AUTH_SECRET", async () => {
+  await withEnv({ TENANCY: "api-key" }, async () => {
+    const exit = await load();
+    assert.equal(exit._tag, "Success");
+    if (exit._tag !== "Success") return;
+    assert.equal(exit.value.tenancy.mode, "api-key");
+  });
+});
+
+test("tenantsDir defaults inside DATA_DIR", async () => {
+  await withEnv({ DATA_DIR: "./custom-data" }, async () => {
+    const exit = await load();
+    assert.equal(exit._tag, "Success");
+    if (exit._tag !== "Success") return;
+    assert.equal(exit.value.tenancy.tenantsDir, resolve("./custom-data", "tenants"));
+  });
+});
+
+test("an explicit TENANTS_DIR is resolved to an absolute path", async () => {
+  await withEnv({ TENANTS_DIR: "./elsewhere/tenants" }, async () => {
+    const exit = await load();
+    assert.equal(exit._tag, "Success");
+    if (exit._tag !== "Success") return;
+    assert.equal(exit.value.tenancy.tenantsDir, resolve("./elsewhere/tenants"));
+  });
+});
+
+test("TENANT_ROUTER=bogus fails with ConfigError(malformed)", async () => {
+  await expectConfigError({ TENANT_ROUTER: "bogus" }, "TENANT_ROUTER", "malformed");
+});
+
+test("TENANT_ROUTER=control-plane succeeds", async () => {
+  await withEnv({ TENANT_ROUTER: "control-plane" }, async () => {
+    const exit = await load();
+    assert.equal(exit._tag, "Success");
+    if (exit._tag !== "Success") return;
+    assert.equal(exit.value.tenancy.router, "control-plane");
+  });
 });

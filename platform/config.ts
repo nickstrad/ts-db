@@ -29,9 +29,12 @@ import {
   type ObjectStoreConfig,
   type ReaderConfig,
   type ServerConfig,
+  type TenancyConfig,
 } from "./services.ts";
 
 const EVENT_LEVELS = ["debug", "info", "warn", "error"] as const;
+const TENANCY_MODES = ["off", "api-key", "better-auth"] as const;
+const ROUTER_KINDS = ["local", "control-plane"] as const;
 const DEV_TOKEN_DEFAULT = "dev-only";
 
 /**
@@ -301,6 +304,63 @@ export const OPTIONS = [
     description:
       "Per-call deadline in milliseconds for a request to the reader process; a call with no reply by then fails with HTTP 502. Must be finite and > 0.",
   },
+
+  // --- tenancy ---
+  {
+    name: "tenancyMode",
+    envVar: "TENANCY",
+    type: "enum",
+    enumValues: TENANCY_MODES,
+    default: "off",
+    defaultLabel: "off",
+    description:
+      "Multitenancy mode. `off` preserves the pre-tenancy single-database, app-token behavior; `api-key` and `better-auth` are reserved for later multitenancy items.",
+  },
+  {
+    name: "databaseUrl",
+    envVar: "DATABASE_URL",
+    type: "string",
+    default: "postgres://tsdb:tsdb@localhost:5432/tsdb",
+    defaultLabel: "postgres://tsdb:tsdb@localhost:5432/tsdb",
+    description:
+      "Postgres connection URL for the multitenancy central database (tenant registry). Unused while tenancy mode is `off`.",
+  },
+  {
+    name: "tenantsDir",
+    envVar: "TENANTS_DIR",
+    type: "string",
+    default: "",
+    defaultLabel: "<DATA_DIR>/tenants",
+    description:
+      "Root directory for per-tenant SQLite files, resolved to an absolute path. Defaults to tenants inside DATA_DIR.",
+  },
+  {
+    name: "tenantRouter",
+    envVar: "TENANT_ROUTER",
+    type: "enum",
+    enumValues: ROUTER_KINDS,
+    default: "local",
+    defaultLabel: "local",
+    description:
+      "Router kind selecting tenant storage locations. Only `local` exists today; `control-plane` is reserved for the future.",
+  },
+  {
+    name: "betterAuthSecret",
+    envVar: "BETTER_AUTH_SECRET",
+    type: "optional-string",
+    default: undefined,
+    defaultLabel: "(unset)",
+    description:
+      "Secret used to verify Better Auth session tokens. No default; required when TENANCY is `better-auth`.",
+  },
+  {
+    name: "betterAuthUrl",
+    envVar: "BETTER_AUTH_URL",
+    type: "string",
+    default: "http://localhost:3000",
+    defaultLabel: "http://localhost:3000",
+    description: "Base URL of the Better Auth instance issuing session tokens.",
+  },
 ] as const satisfies readonly OptionSpec[];
 
 /** Renders `OPTIONS` as the exact markdown table the README "Configuration" section must contain. */
@@ -434,11 +494,22 @@ function assemble(values: Decoded): Effect.Effect<ConfigService, ConfigError> {
     );
   }
 
+  const tenancyMode = str(values, "tenancyMode") as TenancyConfig["mode"];
+  const betterAuthSecret = optStr(values, "betterAuthSecret");
+  if (tenancyMode === "better-auth" && betterAuthSecret === undefined) {
+    return Effect.fail(
+      configError("TENANCY", "inconsistent", "TENANCY=better-auth requires BETTER_AUTH_SECRET"),
+    );
+  }
+
   const dataDir = resolve(str(values, "dataDir"));
   const eventlogDuckdbRaw = str(values, "eventlogDuckdbPath");
   const eventlogDuckdbPath = eventlogDuckdbRaw === ""
     ? resolve(dataDir, "eventlog.duckdb")
     : resolve(eventlogDuckdbRaw);
+
+  const tenantsDirRaw = str(values, "tenantsDir");
+  const tenantsDir = tenantsDirRaw === "" ? resolve(dataDir, "tenants") : resolve(tenantsDirRaw);
 
   const adminToken = str(values, "adminToken");
   const columnAppToken = str(values, "columnAppToken");
@@ -482,7 +553,16 @@ function assemble(values: Decoded): Effect.Effect<ConfigService, ConfigError> {
   const eventLog: EventLogConfig = { duckdbPath: eventlogDuckdbPath };
   const reader: ReaderConfig = { callTimeoutMs: readerCallTimeoutMs };
 
-  return Effect.succeed({ server, apps, backup, logging, objectStore, eventLog, reader });
+  const tenancy: TenancyConfig = {
+    mode: tenancyMode,
+    databaseUrl: str(values, "databaseUrl"),
+    tenantsDir,
+    router: str(values, "tenantRouter") as TenancyConfig["router"],
+    betterAuthSecret,
+    betterAuthUrl: str(values, "betterAuthUrl"),
+  };
+
+  return Effect.succeed({ server, apps, backup, logging, objectStore, eventLog, reader, tenancy });
 }
 
 function buildConfig(env: EnvRecord): Effect.Effect<ConfigService, ConfigError> {
@@ -509,6 +589,7 @@ export interface ConfigOverrides {
   readonly objectStore?: Partial<ObjectStoreConfig>;
   readonly eventLog?: Partial<EventLogConfig>;
   readonly reader?: Partial<ReaderConfig>;
+  readonly tenancy?: Partial<TenancyConfig>;
 }
 
 /** Test: ignores the environment; merges `overrides` over the documented defaults. */
@@ -521,6 +602,7 @@ export function ConfigTest(overrides: ConfigOverrides = {}): Layer.Layer<Config>
     objectStore: { ...DEFAULT_CONFIG.objectStore, ...overrides.objectStore },
     eventLog: { ...DEFAULT_CONFIG.eventLog, ...overrides.eventLog },
     reader: { ...DEFAULT_CONFIG.reader, ...overrides.reader },
+    tenancy: { ...DEFAULT_CONFIG.tenancy, ...overrides.tenancy },
   };
   return Layer.succeed(Config, value);
 }

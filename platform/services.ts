@@ -233,6 +233,21 @@ export interface ReaderConfig {
   readonly callTimeoutMs: number;
 }
 
+export interface TenancyConfig {
+  /** `TENANCY`. `off` = pre-tenancy behavior (single SQLite file, existing app-token auth). */
+  readonly mode: "off" | "api-key" | "better-auth";
+  /** `DATABASE_URL`. Postgres central DB for the tenant registry (reserved; MT-01 provisions it). */
+  readonly databaseUrl: string;
+  /** `TENANTS_DIR`, resolved to an absolute path. */
+  readonly tenantsDir: string;
+  /** `TENANT_ROUTER`. Only `local` is implemented; `control-plane` is reserved for the future. */
+  readonly router: "local" | "control-plane";
+  /** `BETTER_AUTH_SECRET`. Required only when mode is `better-auth`. */
+  readonly betterAuthSecret?: string;
+  /** `BETTER_AUTH_URL`. */
+  readonly betterAuthUrl: string;
+}
+
 /**
  * The whole configuration, read once at layer construction. `platform/config.ts` is the only module
  * permitted to read the process environment.
@@ -245,6 +260,7 @@ export interface ConfigService {
   readonly objectStore: ObjectStoreConfig;
   readonly eventLog: EventLogConfig;
   readonly reader: ReaderConfig;
+  readonly tenancy: TenancyConfig;
 }
 
 /** Live: `ConfigLive` (env, item 08). Test: `ConfigTest(overrides)`. */
