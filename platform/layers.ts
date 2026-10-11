@@ -81,6 +81,7 @@ import { Cause, Context, Deferred, Duration, Effect, Exit, Layer, Ref, Scope } f
 import { StorageError } from "../core/errors.ts";
 import { lifecycleEvent } from "../core/events.ts";
 import { BackupsLive } from "./backup.ts";
+import { DocumentReaderClientLive } from "./document_reader.ts";
 import { ConfigLive } from "./config.ts";
 // Type-only, on purpose: see "The reader process root" above.
 import type { EventLogIngestLive } from "./eventlog/ingest.ts";
@@ -418,7 +419,7 @@ export interface PlatformOptions {
 export function makePlatformLive(options: PlatformOptions = {}) {
   const afterStep = options.afterStep ?? noStep;
   return stepDone(afterStep, "reader").pipe(
-    Layer.provideMerge(ReaderClientConfigured),
+    Layer.provideMerge(DocumentReaderClientLive.pipe(Layer.provideMerge(ReaderClientConfigured))),
     Layer.provideMerge(makeAppServicesLive(afterStep)),
     Layer.provideMerge(
       Layer.effect(
