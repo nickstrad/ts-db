@@ -141,7 +141,7 @@ bounded, mechanical items with checkable acceptance.
 
 **Build order with the main plan** (from the ordering analysis — do not reorder):
 `22 → 24 → batch 11: (30+35) → 31 → 36 → 32 → 33 → 34 → 37 →
-(23+25+MT-01+MT-02) → (26+MT-03) → (MT-04+MT-05) → (MT-07+MT-09) → (MT-06+MT-08) → MT-10 → 27 →
+(23+25+MT-01+MT-02) → (26+MT-03+MT-01b) → (MT-04+MT-05) → (MT-07+MT-09) → (MT-06+MT-08) → MT-10 → 27 →
 (28+29)`.
 **Non-reorderable reflection gate:** all eight main-plan batch-11 items (30–37) land after 22 and before 23 or
 any MT work. Item 24 moves forward as 36's prerequisite, not into the MT stack. Main-plan §3 records the
@@ -200,6 +200,37 @@ exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy a
   - With `tenancyMode: "off"`, the pre-tenancy default path is preserved (no tenant resolution, no new auth
     behavior) — covered by the new rows in `tests/unit/config_test.ts`.
   - Reviewer verifies README lists exactly the new options.
+
+#### MT-01b — Postgres migration runner (follow-up, MT-01 ownership)
+
+- **Scoping:** CONCURRENT with item 26 and MT-03 (disjoint files).
+- **Model:** **Sonnet / sol.** Mechanical: one Deno script, SQL files, a Makefile recipe change.
+- **Owns:** `scripts/db/migrate.ts`, `platform/tenants/migrations/*.sql`, `Makefile` (the `db-migrate` recipe
+  only — supersedes MT-01's psql-based recipe), `deno.json` (additive `db:migrate` task only).
+- **Reads:** `platform/tenants/schema.sql` (becomes migration 001), `Makefile`.
+- **Work:**
+  1. Hand-rolled Deno migration runner at `scripts/db/migrate.ts` (no migration framework, no ORM — standing
+     rule: plain SQL files, hand-written). Discovers `platform/tenants/migrations/` files named
+     `<NNN>_<slug>.up.sql` / `<NNN>_<slug>.down.sql`, ordered by `<NNN>`.
+  2. `schema_migrations(version text PK, applied_at timestamptz)` journal table, created by the runner itself
+     when absent. Takes a Postgres advisory lock (`pg_advisory_xact_lock`) before planning so concurrent
+     runners serialize; each migration applies inside its own transaction.
+  3. Migration 001 = MT-01's `schema.sql` verbatim (baseline). `make db-migrate` runs the runner, which
+     applies only pending migrations in order and is a no-op when the journal is current — replacing the old
+     "apply schema.sql via psql" recipe. `make db-migrate down` (or `deno task db:migrate down`) rolls back
+     the most recent migration via its `.down.sql`; refuses when the journal is empty.
+  4. Better Auth tables (MT-08): generated once with Better Auth's own tooling, then captured verbatim as a
+     numbered migration pair — never regenerated in place afterwards.
+  5. Down migrations are best-effort and must never silently drop a table with live rows: a `.down.sql` that
+     would drop a non-empty table fails loudly instead.
+- **Acceptance criteria:**
+  - Fresh DB: `make db-migrate` → `\dt` lists `tenants`, `api_keys`, `schema_migrations`; journal has one row
+    (001). Second run → no-op, exit 0.
+  - Add a scratch migration 002 (additive column), migrate up → column present; migrate down → column gone,
+    journal row removed; delete the scratch files afterwards.
+  - Two concurrent `make db-migrate` runs → exactly one applies, the other waits and exits 0 (advisory lock,
+    no double-apply).
+  - `deno task db:migrate` behaves identically to `make db-migrate`.
 
 #### MT-03 — TenantRegistry service (Effect)
 
@@ -615,7 +646,7 @@ exist. MT-10 (added 2026-10-11) runs alone in its slot: it needs every tenancy a
 
 ## 4. Out of scope / deferred
 
-- Postgres HA, PITR, managed migrations beyond `schema.sql` + `make db-migrate`.
+- Postgres HA, PITR.
 - Per-tenant DuckDB/event-log separation (tenants share the central event log in this phase; tenant id is a
   column).
 - Billing, plans, quotas.
