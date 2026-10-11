@@ -9,7 +9,7 @@
  * (that is `logger.ts`'s batching fiber) and nothing here decides what a record looks like (that is
  * `core/events.ts`'s `toJsonLine`): this module is open/append/roll/close and nothing else.
  *
- * Two rules keep the mechanics honest:
+ * Three rules keep the mechanics honest:
  *
  * 1. **All state transitions happen under one `Effect.Semaphore` permit.** The batching fiber and
  *    the scope's drain finalizer are two different fibers writing the same handle (the finalizer
@@ -19,6 +19,14 @@
  *    `logger.ts` is the layer that must never fail, and it catches these to degrade (drop + count +
  *    one stderr line a minute). Keeping the sink honest about I/O is what lets the degradation
  *    policy live in exactly one place.
+ * 3. **A file, once left, is never written again** — the contract retention's closed-file rule rests
+ *    on (item 36, ADR 0007). Every append first rolls if `now` has left the open file's hour bucket,
+ *    a roll always opens a fresh `seq` (one past the highest on disk, `.gz` included), and a failed
+ *    write abandons the handle rather than finishing its torn line. So a file dated before today,
+ *    once its last in-flight write has settled, can gain no more bytes from any sink, and the
+ *    ingest-then-sweep coordinator may seal its torn tail and, once ingested, gzip or delete it.
+ *    Changing any of this (reopening a file to finish a line, appending under a stale bucket) would
+ *    let retention remove bytes that were never ingested.
  *
  * `rotation.currentPath` is the single source of truth for the on-disk layout, but it hard-codes
  * the `logs/` root segment (`logs/<role>/<YYYY-MM-DD>/events-<HH>-<pid>-<seq>.jsonl`). `LOG_DIR`
@@ -126,7 +134,9 @@ function targetFor(options: FileSinkOptions, now: Date, seq: number): Target {
  * maximum, so the roll lands on `-002`.
  */
 function nextSeq(target: Target, pid: number): Effect.Effect<number, SinkIoError> {
-  const pattern = new RegExp(`^events-${target.hourBucket}-${pid}-(\\d{3})\\.jsonl(\\.gz)?$`);
+  // `\d{3,}`: `seq` is padded to three digits, not limited to them. Matching exactly three would make
+  // the scan blind to `-1000` and reopen it after the next size roll, breaking rule 3.
+  const pattern = new RegExp(`^events-${target.hourBucket}-${pid}-(\\d{3,})\\.jsonl(\\.gz)?$`);
   return Effect.tryPromise({
     try: async () => {
       let highest = 0;

@@ -3,8 +3,10 @@
  *
  * This module is PURE: no platform globals, no built-in runtime modules, no filesystem access. It
  * only computes paths and plans against a policy; the risky part — actually gzipping or deleting
- * files on disk — is deliberately left to the (not-yet-written) sweeper that executes a
- * `RetentionPlan`.
+ * files on disk — is left to the sweeper that executes a `RetentionPlan`
+ * (`platform/logging/retention.ts`). Item 36 adds the gate that sweeper applies first:
+ * `retentionBlock` decides, from facts the sweeper gathered, whether a file is closed, settled and
+ * fully accounted for by committed ingest, and `plan`'s `pinned` set keeps every file that is not.
  *
  * On-disk layout (see docs/plans/effect-port-and-observability.md §4.2):
  *   logs/<role>/<YYYY-MM-DD>/events-<HH>-<pid>-<seq>.jsonl
@@ -15,6 +17,7 @@
  *   logs/<role>/<YYYY-MM-DD>/events-<HH>-<pid>-<seq>.jsonl.gz
  */
 import { Data } from "effect";
+import { completeLines } from "../eventlog/offsets.ts";
 
 /** The four processes that write their own event log stream. */
 export type LogRole = "server" | "reader" | "restore" | "cli";
@@ -78,7 +81,8 @@ function pad(n: number, width: number): string {
   return n.toString().padStart(width, "0");
 }
 
-function dateBucketOf(d: Date): string {
+/** The local `YYYY-MM-DD` date bucket `d` falls in: the dated directory a file opened at `d` lives in. */
+export function dateBucketOf(d: Date): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1, 2)}-${pad(d.getDate(), 2)}`;
 }
 
@@ -125,6 +129,8 @@ export interface FileEntry {
   readonly dir: string;
   readonly bytes: number;
   readonly mtime: Date;
+  /** The inode, when the platform reports one: part of the identity the sweeper revalidates. */
+  readonly ino?: number;
 }
 
 /** The result of `plan`: which files to compress, which to remove, and which to leave untouched.
@@ -178,12 +184,21 @@ function ageInDays(dir: string, today: string): number {
  * paths gone, each `gzip` source replaced in place by `<path>.gz` per §4.2's on-disk layout —
  * yields an empty `gzip` and `delete`. See `tests/unit/rotation_test.ts`'s idempotency case.
  *
+ * `pinned` (item 36) names paths that must stay exactly as they are whatever their age: files the
+ * sweeper could not prove safe to touch (open, unsettled, not fully ingested — see
+ * `retentionBlock`). A pinned file is always in `keep`, and its bytes still count toward
+ * `maxTotalBytes` because they are still on disk. The cap therefore keeps pruning *other* old files,
+ * oldest directory first, until the total fits or nothing unpinned outside today is left; pinned
+ * bytes that keep the total over the cap are the caller's unsafe backlog to report, never a reason
+ * to touch them. With no pins this is exactly the item-06 policy.
+ *
  * Throws `InvalidDateBucketError` if any entry's `dir` is not a bare `YYYY-MM-DD` date bucket.
  */
 export function plan(
   entries: readonly FileEntry[],
   now: Date,
   policy: RotationPolicy,
+  pinned: ReadonlySet<string> = new Set(),
 ): RetentionPlan {
   const today = dateBucketOf(now);
 
@@ -202,7 +217,7 @@ export function plan(
   const deleteSet = new Set<string>();
   const keepSet = new Set<string>();
 
-  /** Bytes still on disk per non-today directory (keep- or gzip-pending), oldest-first. */
+  /** Bytes the cap could still free per non-today directory (its unpinned files), oldest-first. */
   const onDiskNonToday: Array<{ dir: string; bytes: number }> = [];
   let total = 0;
 
@@ -214,23 +229,30 @@ export function plan(
       continue;
     }
 
+    const free = list.filter((entry) => !pinned.has(entry.path));
+    const held = list.filter((entry) => pinned.has(entry.path));
+    for (const entry of held) keepSet.add(entry.path);
+    // A pinned file stays on disk whatever happens to its directory, so it always counts.
+    total += held.reduce((sum, e) => sum + e.bytes, 0);
+    const freeBytes = free.reduce((sum, e) => sum + e.bytes, 0);
+
     const age = ageInDays(dir, today);
     if (age >= policy.keepDays) {
-      for (const entry of list) deleteSet.add(entry.path);
+      for (const entry of free) deleteSet.add(entry.path);
       continue;
     }
 
     if (age >= policy.gzipAfterDays) {
-      for (const entry of list) {
+      for (const entry of free) {
         // §4.2: already compressed by an earlier sweep — gzip-ineligible, falls through to keep.
         if (entry.path.endsWith(".gz")) keepSet.add(entry.path);
         else gzipSet.add(entry.path);
       }
     } else {
-      for (const entry of list) keepSet.add(entry.path);
+      for (const entry of free) keepSet.add(entry.path);
     }
-    onDiskNonToday.push({ dir, bytes });
-    total += bytes;
+    onDiskNonToday.push({ dir, bytes: freeBytes });
+    total += freeBytes;
   }
 
   onDiskNonToday.sort((a, b) => (a.dir < b.dir ? -1 : a.dir > b.dir ? 1 : 0));
@@ -238,6 +260,7 @@ export function plan(
   for (const { dir, bytes } of onDiskNonToday) {
     if (total <= policy.maxTotalBytes) break;
     for (const entry of byDir.get(dir)!) {
+      if (pinned.has(entry.path)) continue;
       gzipSet.delete(entry.path);
       keepSet.delete(entry.path);
       deleteSet.add(entry.path);
@@ -250,4 +273,116 @@ export function plan(
     delete: [...deleteSet].sort(),
     keep: [...keepSet].sort(),
   };
+}
+
+// ---------------------------------------------------------------------------
+// The ingest-before-retention gate (item 36, ADR 0007)
+// ---------------------------------------------------------------------------
+
+/**
+ * Why a file `plan` would gzip or delete must instead be pinned. Checked in this order; the first
+ * that applies is the reason:
+ *
+ * - `open`: a sink in the sweeping process holds it open.
+ * - `unsettled`: modified less than `settleMs` before `now` (or in the future): a write that began
+ *   before its hour ended may still be landing.
+ * - `changed`: it is no longer the file the inventory saw (size, mtime or inode).
+ * - `unreadable`: its content could not be read (or, for `.gz`, decompressed) to prove anything.
+ * - `no-watermark`: ingest has never committed an offset for it.
+ * - `unread-tail`: the committed offset stops short of the end — unread lines or a partial tail.
+ * - `watermark-mismatch`: the committed offset is past the end, or the content is not the bytes
+ *   that ingest committed (a rewrite since).
+ * - `unreconciled`: the derived store and the quarantine do not account for every record exactly.
+ * - `quarantine-evidence`: a `rejected.jsonl` some retained source's rejects still live in.
+ */
+export type RetentionBlock =
+  | "open"
+  | "unsettled"
+  | "changed"
+  | "unreadable"
+  | "no-watermark"
+  | "unread-tail"
+  | "watermark-mismatch"
+  | "unreconciled"
+  | "quarantine-evidence";
+
+/** The committed `_ingest_state` row for one source, as the gate needs it. */
+export interface CommittedWatermark {
+  readonly bytesIngested: number;
+  /** Hex SHA-256 of bytes `[0, bytesIngested)`. */
+  readonly prefixSha256: string;
+  /** The source was rewritten at some point; its lines were deduplicated by `eventId`. */
+  readonly dedupe: boolean;
+}
+
+/** What reading one source (decompressed, for a `.gz`) proved about its content. */
+export interface SourceContent {
+  readonly bytes: number;
+  /** Hex SHA-256 of the whole content. */
+  readonly sha256: string;
+  /** `recordOffsets(content)`. */
+  readonly recordOffsets: readonly number[];
+}
+
+/** Everything the gate judges one event-source file on. */
+export interface RetentionFacts {
+  readonly open: boolean;
+  readonly mtime: Date;
+  /** `false` when the file changed between inventory and the read that produced `content`. */
+  readonly unchanged: boolean;
+  readonly content?: SourceContent;
+  readonly watermark?: CommittedWatermark;
+  /** `platform_events.source_offset`s ingested from this source. Unused for a `dedupe` source. */
+  readonly accepted: ReadonlySet<number>;
+  /** `sourceOffset`s of this source's records in its directory's `rejected.jsonl`. */
+  readonly rejected: ReadonlySet<number>;
+}
+
+/**
+ * Where every record of `content` starts: each complete non-blank line, exactly as ingest cuts them
+ * (`core/eventlog/offsets.completeLines`), plus the start of a trailing partial line if there is one.
+ * A partial tail is only ever consumed by sealing it into quarantine (a `torn-tail` reject), so once
+ * the watermark covers the whole file the tail is a record like any other.
+ */
+export function recordOffsets(content: Uint8Array): number[] {
+  const { lines, end } = completeLines(content, 0);
+  const offsets = lines.map((line) => line.start);
+  if (end < content.length) offsets.push(end);
+  return offsets;
+}
+
+/**
+ * The gate: `undefined` if this event source may be gzipped or deleted, else why not. Pure.
+ *
+ * Safe means: no writer can still add to it (closed and settled), it is still the file that was
+ * read, the committed ingest offset covers its entire content and vouches for exactly those bytes,
+ * and — unless it was ever rewritten — every record is accounted for exactly once, as an accepted
+ * row or a quarantined reject, with nothing accounted for that is not a record. A `dedupe` source's
+ * lines may have landed under other sources' identities, so for it the watermark is the evidence.
+ */
+export function retentionBlock(
+  facts: RetentionFacts,
+  now: Date,
+  settleMs: number,
+): RetentionBlock | undefined {
+  if (facts.open) return "open";
+  const age = now.getTime() - facts.mtime.getTime();
+  if (age < 0 || age < settleMs) return "unsettled";
+  if (!facts.unchanged) return "changed";
+  const content = facts.content;
+  if (content === undefined) return "unreadable";
+  const watermark = facts.watermark;
+  if (watermark === undefined) return "no-watermark";
+  if (watermark.bytesIngested < content.bytes) return "unread-tail";
+  if (watermark.bytesIngested > content.bytes || watermark.prefixSha256 !== content.sha256) {
+    return "watermark-mismatch";
+  }
+  if (watermark.dedupe) return undefined;
+  const records = new Set(content.recordOffsets);
+  for (const offset of records) {
+    if (!facts.accepted.has(offset) && !facts.rejected.has(offset)) return "unreconciled";
+  }
+  for (const offset of facts.accepted) if (!records.has(offset)) return "unreconciled";
+  for (const offset of facts.rejected) if (!records.has(offset)) return "unreconciled";
+  return undefined;
 }

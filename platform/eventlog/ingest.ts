@@ -39,18 +39,39 @@
  * as `ingest` events. A success event per run would itself be ingested by the next run, so a quiet
  * tree would never become an unchanged one.
  *
- * ## Follow-ups
+ * Quarantine records are fsynced (file, then directory) before the `COMMIT` that moves the offsets
+ * past them, so a committed offset only ever covers a rejected line whose evidence is durable. That
+ * is what lets retention count a rejected line as consumed (ADR 0007).
  *
- * - **Item 22: type-check reach.** No entry point imports `platform/eventlog/*` yet, so
- *   `deno task check` never type-checks this module or `tables.ts` (only the tests do, via
- *   `deno test`). `deno.json` belongs to item 01; item 22 must wire these modules into an entry point
- *   (the reader's `ingest` request) so the check graph reaches them.
- * - **Item 24: ingest before gzip.** Nothing here enforces that a `.jsonl` is fully ingested before
- *   retention gzips it; a tail gzipped first is never ingested (ADR 0004). Item 24 owns that ordering,
- *   and pruning `_ingest_state` (see `readState`).
+ * ## Ingest, then sweep (item 36, ADR 0007)
+ *
+ * Retention may gzip or delete a source only once committed ingest covers all of it, and only this
+ * process can see `_ingest_state`. So the coordinator lives here: `ingestThenSweep` runs, under the
+ * same lock as `ingest`,
+ *
+ * 1. an ordinary ingest run — if it fails, the call fails and nothing is swept;
+ * 2. `sealTornTails`: a closed source whose offset stops before a newline-free tail (a write that
+ *    was torn by a crash or a failed write, which no sink will ever finish) has that tail quarantined
+ *    as a `torn-tail` reject and its offset moved to the end, in one transaction;
+ * 3. `platform/logging/retention.sweep`, with the committed rows and the accepted `source_offset`s
+ *    as its ledger, so the gate judges exactly what is durable;
+ * 4. a measurement of both budgets (`RetentionBudgets`).
+ *
+ * `eventLogIngestThenSweepLayer` provides the existing `EventLogIngest` tag with `ingest` bound to
+ * that call, which is the whole hook items 32 and 33 need: the reader's existing `ingest` RPC gains
+ * retention without a new request kind or a service change. A sweep failure is reported in the reply
+ * (and as its own lifecycle event); it does not fail the ingest that already committed.
+ *
+ * The schema compatibility check (item 35) needs no extra wiring: every connection runs
+ * `EVENTLOG_DDL`, whose guards refuse a v1 or foreign file before any statement touches it, so the
+ * layer fails to build and no sweep can run against it. This module never calls `upgradeEventLog`;
+ * it would have to close its own connection first (see that function), so it stays an operator step.
+ *
+ * `deno task check` reaches this module through `platform/layers.ts`'s type-only import; item 33
+ * wires it into the reader entry point at runtime.
  */
 import { createHash } from "node:crypto";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { DuckDBInstance } from "@duckdb/node-api";
 import { Clock, Effect, Exit, Layer, type Scope } from "effect";
 import { IngestError, type IngestPhase } from "../../core/errors.ts";
@@ -61,6 +82,7 @@ import {
   type Level,
   type Role,
 } from "../../core/events.ts";
+import { dateBucketOf } from "../../core/logging/rotation.ts";
 import {
   compareSourceFiles,
   type FilePlan,
@@ -81,9 +103,20 @@ import {
   type RejectReason,
   repairLoneSurrogates,
   rowsSql,
+  sqlString,
   type StagedLine,
   stageSql,
 } from "./tables.ts";
+import {
+  DEFAULT_SETTLE_MS,
+  type IngestLedger,
+  inventory as retentionInventory,
+  policyFromConfig,
+  RetentionLedgerError,
+  sweep,
+  type SweepReport,
+  syncDir,
+} from "../logging/retention.ts";
 import {
   Config,
   EventLogIngest,
@@ -125,11 +158,95 @@ export interface EventLogIngestOptions {
   readonly driver?: EventLogDriver;
   /** Target new bytes per transaction. A single file is never split, so a batch may exceed it. */
   readonly batchBytes?: number;
-  /** The `role` on emitted `ingest` events. Default `"reader"`, the process that owns DuckDB. */
+  /** The `role` on emitted `ingest` and retention events. Default `"reader"`, the process that owns DuckDB. */
   readonly role?: Role;
+  /** How `ingestThenSweep` judges a file closed. */
+  readonly retention?: RetentionCoordinatorOptions;
+}
+
+/** How the ingest-then-sweep coordinator decides a source is closed (ADR 0007). */
+export interface RetentionCoordinatorOptions {
+  /** Paths this process's sinks hold open; never sealed, gzipped or deleted. */
+  readonly openPaths?: Effect.Effect<readonly string[]>;
+  /** A file modified more recently than this is not yet closed. Default `DEFAULT_SETTLE_MS`. */
+  readonly settleMs?: number;
 }
 
 const DEFAULT_BATCH_BYTES = 32 * 1024 * 1024;
+
+/** Per call of `ingestThenSweep`. */
+export interface IngestThenSweepOptions {
+  /**
+   * Plan the sweep from the state already committed and report it, changing nothing: no ingest, no
+   * sealing, no file touched, no event emitted unless the sweep is refused.
+   */
+  readonly dryRun?: boolean;
+}
+
+/** What the retention half of one `ingestThenSweep` did. A sweep failure is data, not the RPC's error. */
+export type RetentionOutcome =
+  | {
+    readonly status: "swept";
+    /** Sources whose torn tails were sealed into quarantine this run. */
+    readonly sealed: readonly string[];
+    readonly sealError?: string;
+    readonly sweep: SweepReport;
+  }
+  | {
+    readonly status: "failed";
+    readonly sealed: readonly string[];
+    readonly sealError?: string;
+    /** The sweep's typed failure; it already emitted a `retention-sweep-failed` lifecycle event. */
+    readonly errorTag: string;
+    readonly error: string;
+  };
+
+/**
+ * The two storage budgets, which are distinct (ADR 0007). `LOG_MAX_TOTAL_BYTES` bounds only the
+ * retained JSONL, and only as far as closed-file safety allows (`blockedBytes` is what it could not
+ * remove). The derived DuckDB file is never pruned: it grows with every ingested event, measured
+ * here, not capped. Logger drops are counted apart from everything that reached disk.
+ */
+export interface RetentionBudgets {
+  readonly jsonl: {
+    readonly retainedBytes: number;
+    readonly files: number;
+    /** Today's (and any future-dated) files: never swept, always counted. */
+    readonly todayBytes: number;
+    /** Files retention wanted gone or compressed but the gate kept: the unsafe-to-delete backlog. */
+    readonly blockedBytes: number;
+    readonly capBytes: number;
+    readonly withinCap: boolean;
+  };
+  readonly derived: {
+    readonly duckdbBytes: number;
+    readonly walBytes: number;
+    readonly platformEventRows: number;
+    readonly ingestStateRows: number;
+    readonly boundedByLogMaxTotalBytes: false;
+  };
+  readonly logger: {
+    /** Records the sinks reported dropped (`queue_events`, `event = 'dropped'`), as ingested so far. */
+    readonly dropsRecorded: number;
+  };
+}
+
+/** `IngestReport` plus the sweep it gated and the budgets after it. A superset, so the wire type holds. */
+export interface IngestThenSweepReport extends IngestReport {
+  readonly retention: RetentionOutcome;
+  readonly budgets: RetentionBudgets;
+}
+
+/** What `makeEventLogIngest` builds: the frozen service plus the coordinator. */
+export interface EventLogIngestControl extends EventLogIngestService {
+  /**
+   * Under the ingest lock: ingest, seal closed torn tails, then sweep with the committed state as
+   * the gate's ledger. An ingest failure fails the whole call before anything is swept.
+   */
+  readonly ingestThenSweep: (
+    options?: IngestThenSweepOptions,
+  ) => Effect.Effect<IngestThenSweepReport, IngestError>;
+}
 
 /**
  * Moves one file's offset. `_ingest_state` is the one mutable table, and this is the only statement in
@@ -208,10 +325,16 @@ function toNumber(value: unknown): number {
 // Per-file staging
 // ---------------------------------------------------------------------------
 
+/**
+ * Why a record was quarantined: `tables.ts`'s reasons, or `torn-tail` — a closed source's partial
+ * last line, sealed by the ingest-then-sweep coordinator.
+ */
+export type QuarantineReason = RejectReason | "torn-tail";
+
 /** One line that will not reach an event table, and why. */
 interface Reject {
   readonly sourceOffset: number;
-  readonly reason: RejectReason;
+  readonly reason: QuarantineReason;
   readonly line: string;
 }
 
@@ -285,7 +408,7 @@ interface BatchResult {
  */
 export function makeEventLogIngest(
   options: EventLogIngestOptions = {},
-): Effect.Effect<EventLogIngestService, IngestError, Scope.Scope | Config | EventSink> {
+): Effect.Effect<EventLogIngestControl, IngestError, Scope.Scope | Config | EventSink> {
   return Effect.gen(function* () {
     const config = yield* Config;
     const sink = yield* EventSink;
@@ -353,9 +476,10 @@ export function makeEventLogIngest(
         }));
       });
 
-    // FOLLOW-UP (item 24): `_ingest_state` rows are never removed for files that retention gzips or
-    // deletes, and this loads every one of them each run, so it grows slowly without bound. Item 24
-    // (retention) owns pruning a row when its source file leaves the tree.
+    // `_ingest_state` rows are never removed, by decision (ADR 0007): a row outlives its source as a
+    // tombstone, so a gunzipped-in-place or restored source is recognised (`skip`), and a recreated
+    // path is read as a rewrite with dedupe, never as a new file whose events land twice. One row per
+    // source file is part of the derived store's reported, unbounded growth.
     const readState: Effect.Effect<Map<string, IngestStateRow>, IngestError> = Effect.map(
       attempt(
         "inventory",
@@ -380,22 +504,76 @@ export function makeEventLogIngest(
         ),
     );
 
-    /** Appends quarantine records, grouped per `rejected.jsonl`. */
+    /**
+     * Appends quarantine records, grouped per `rejected.jsonl`, and makes them durable — file data,
+     * then its directory entry — before returning. Every caller commits the offsets that consume
+     * these lines only afterwards, so a committed watermark never covers a reject whose evidence a
+     * crash could still lose (ADR 0007). A failure here fails the batch, which rolls back.
+     */
     const quarantine = (rejectsBySource: ReadonlyMap<SourceFile, readonly Reject[]>, at: string) =>
       Effect.forEach(
         groupByQuarantine(rejectsBySource),
         ([relative, lines]) =>
           attempt("insert", async () => {
-            const file = await Deno.open(join(logDir, relative), { create: true, append: true });
+            const path = join(logDir, relative);
+            const file = await Deno.open(path, { create: true, append: true });
             try {
               const data = new TextEncoder().encode(lines.map((line) => line(at)).join("\n") + "\n");
               let written = 0;
               while (written < data.length) written += await file.write(data.subarray(written));
+              await file.syncData();
             } finally {
               file.close();
             }
+            const note = await syncDir(dirname(path));
+            if (note !== undefined) throw new Error(`quarantine directory not durable: ${note}`);
           }, relative),
         { discard: true },
+      );
+
+    /**
+     * Runs `work` in one transaction: `BEGIN`, `work`, `COMMIT`; on failure `ROLLBACK`, and a
+     * connection whose rollback failed is marked broken so the next run replaces it. `cleanup` runs
+     * last either way and cannot fail.
+     */
+    const inTransaction = <A>(
+      work: Effect.Effect<A, IngestError>,
+      cleanup: Effect.Effect<void> = Effect.void,
+    ): Effect.Effect<A, IngestError> =>
+      Effect.acquireUseRelease(
+        attempt("commit", () => db.connection.run("BEGIN TRANSACTION")),
+        () => Effect.zipLeft(work, attempt("commit", () => db.connection.run("COMMIT"))),
+        (_, exit) =>
+          Effect.zipRight(
+            Exit.isFailure(exit)
+              ? attempt("commit", () => db.connection.run("ROLLBACK")).pipe(
+                Effect.catchAll((error) =>
+                  Effect.zipRight(
+                    Effect.sync(() => {
+                      db.broken = true;
+                    }),
+                    Effect.logWarning("event-log rollback failed; reconnecting before the next run", error),
+                  )
+                ),
+              )
+              : Effect.void,
+            cleanup,
+          ),
+      );
+
+    /** Moves one file's offset, inside the caller's transaction. */
+    const upsertState = (next: IngestStateRow) =>
+      attempt(
+        "state-update",
+        () =>
+          db.connection.run(UPSERT_INGEST_STATE, [
+            next.sourceFile,
+            next.bytesIngested,
+            next.prefixSha256,
+            next.dedupe,
+            next.lastIngestedAt,
+          ]),
+        next.sourceFile,
       );
 
     /** One transaction: stage, insert, quarantine, move offsets, commit. */
@@ -443,48 +621,20 @@ export function makeEventLogIngest(
         yield* quarantine(rejectsBySource, at);
         for (const item of batch) {
           const next = item.plan.nextState;
-          if (next === undefined) continue;
-          yield* attempt(
-            "state-update",
-            () =>
-              db.connection.run(UPSERT_INGEST_STATE, [
-                next.sourceFile,
-                next.bytesIngested,
-                next.prefixSha256,
-                next.dedupe,
-                next.lastIngestedAt,
-              ]),
-            next.sourceFile,
-          );
+          if (next !== undefined) yield* upsertState(next);
         }
         let rejected = 0;
         for (const rejects of rejectsBySource.values()) rejected += rejects.length;
         return { inserted, rejected, perFile };
       });
 
-      return Effect.acquireUseRelease(
-        attempt("commit", () => db.connection.run("BEGIN TRANSACTION")),
-        () => Effect.zipLeft(work, attempt("commit", () => db.connection.run("COMMIT"))),
-        (_, exit) =>
-          Effect.zipRight(
-            Exit.isFailure(exit)
-              ? attempt("commit", () => db.connection.run("ROLLBACK")).pipe(
-                Effect.catchAll((error) =>
-                  Effect.zipRight(
-                    Effect.sync(() => {
-                      db.broken = true;
-                    }),
-                    Effect.logWarning("event-log rollback failed; reconnecting before the next run", error),
-                  )
-                ),
-              )
-              : Effect.void,
-            Effect.forEach(
-              dropStagingSql,
-              (sql) => attempt("insert", () => db.connection.run(sql)).pipe(Effect.ignore),
-              { discard: true },
-            ),
-          ),
+      return inTransaction(
+        work,
+        Effect.forEach(
+          dropStagingSql,
+          (sql) => attempt("insert", () => db.connection.run(sql)).pipe(Effect.ignore),
+          { discard: true },
+        ),
       );
     };
 
@@ -612,8 +762,243 @@ export function makeEventLogIngest(
       return { ...counts, durationMs };
     });
 
-    return { ingest: lock.withPermits(1)(run) };
+    // -------------------------------------------------------------------------
+    // Ingest-then-sweep (item 36, ADR 0007)
+    // -------------------------------------------------------------------------
+
+    const retention = options.retention ?? {};
+    const settleMs = retention.settleMs ?? DEFAULT_SETTLE_MS;
+    const openPaths = retention.openPaths ?? Effect.succeed([] as readonly string[]);
+
+    /**
+     * Seals the partial tail of each closed source into quarantine: a source dated before today, not
+     * open here, settled, whose committed offset stops at its last `\n` with only a newline-free tail
+     * after it. No sink will ever finish that line — a sink abandons a file after a failed write and a
+     * crashed process never returns to it — so without this the source could never be swept. In one
+     * transaction: the tail is quarantined as a `torn-tail` reject (durably, before `COMMIT`) and the
+     * offset moves to the end of the file. The offset then sits at the end of a partial line rather
+     * than just past a `\n`; a byte appended after that is out of the writers' model and would be
+     * read, and quarantined, as a line of its own. Run right after a successful ingest.
+     */
+    const sealTornTails = (now: Date, at: string, traceId: string, runId: string) =>
+      Effect.gen(function* () {
+        const today = dateBucketOf(now);
+        const open = new Set((yield* openPaths).map((path) => resolve(path)));
+        const sources = yield* attempt("inventory", () => inventory(logDir));
+        const state = yield* readState;
+        const seals: { source: SourceFile; reject: Reject; next: IngestStateRow }[] = [];
+        for (const source of sources) {
+          if (source.date >= today) continue;
+          const path = join(logDir, source.path);
+          if (open.has(resolve(path))) continue;
+          const found = yield* attempt("read", async () => {
+            const info = await Deno.lstat(path).catch(() => undefined);
+            if (info === undefined || !info.isFile) return undefined;
+            const age = now.getTime() - (info.mtime?.getTime() ?? now.getTime());
+            if (age < 0 || age < settleMs) return undefined;
+            const row = state.get(source.path);
+            if (info.size <= (row?.bytesIngested ?? 0)) return undefined;
+            const bytes = await Deno.readFile(path);
+            const after = await Deno.lstat(path);
+            if (after.size !== info.size || after.mtime?.getTime() !== info.mtime?.getTime()) {
+              return undefined;
+            }
+            return { bytes, row };
+          }, source.path);
+          if (found === undefined) continue;
+          const { bytes, row } = found;
+          const from = row?.bytesIngested ?? 0;
+          // The committed offset must still describe these bytes, and the tail must be one partial
+          // line: complete lines past the offset are ingest's to read, not a torn write.
+          if (row !== undefined && sha256Hex(bytes.subarray(0, from)) !== row.prefixSha256) continue;
+          const tail = bytes.subarray(from);
+          if (tail.includes(0x0a)) continue;
+          seals.push({
+            source,
+            reject: {
+              sourceOffset: from,
+              reason: "torn-tail",
+              line: lossyUtf8.decode(tail.subarray(0, QUARANTINE_LINE_BYTES)),
+            },
+            next: {
+              sourceFile: source.path,
+              bytesIngested: bytes.length,
+              prefixSha256: sha256Hex(bytes),
+              dedupe: row?.dedupe ?? false,
+              lastIngestedAt: at,
+            },
+          });
+        }
+        if (seals.length === 0) return [] as readonly string[];
+        yield* inTransaction(Effect.gen(function* () {
+          yield* quarantine(new Map(seals.map(({ source, reject }) => [source, [reject]])), at);
+          for (const { next } of seals) yield* upsertState(next);
+        }));
+        for (const { source, reject, next } of seals) {
+          yield* emit("warn", traceId, {
+            sourceFile: source.path,
+            bytesIngested: next.bytesIngested - reject.sourceOffset,
+            runId,
+            status: "error",
+            errorTag: "TornTailSealed",
+            errorDetail: {
+              quarantine: quarantinePath(source),
+              sourceOffset: reject.sourceOffset,
+              tailBytes: next.bytesIngested - reject.sourceOffset,
+            },
+          });
+        }
+        return seals.map(({ source }) => source.path);
+      });
+
+    /** The committed state, as the sweep's gate reads it. Read after the ingest it follows committed. */
+    const ledger: Effect.Effect<IngestLedger, RetentionLedgerError> = Effect.map(
+      Effect.mapError(
+        readState,
+        (error) =>
+          new RetentionLedgerError({
+            operation: "watermarks",
+            detail: error.detail ?? error.phase,
+            cause: error,
+          }),
+      ),
+      (state): IngestLedger => ({
+        watermarks: new Map(
+          [...state.values()].map((row) => [row.sourceFile, {
+            bytesIngested: row.bytesIngested,
+            prefixSha256: row.prefixSha256,
+            dedupe: row.dedupe,
+          }]),
+        ),
+        acceptedOffsets: (sources) =>
+          Effect.mapError(
+            acceptedOffsets(sources),
+            (error) =>
+              new RetentionLedgerError({
+                operation: "accepted-offsets",
+                detail: error.detail ?? error.phase,
+                cause: error,
+              }),
+          ),
+      }),
+    );
+
+    /** `platform_events.source_offset`s per source file, for the sweep's reconciliation. */
+    const acceptedOffsets = (sources: readonly string[]) =>
+      Effect.gen(function* () {
+        const out = new Map<string, Set<number>>();
+        for (let at = 0; at < sources.length; at += 256) {
+          const chunk = sources.slice(at, at + 256);
+          const reader = yield* attempt("inventory", () =>
+            db.connection.runAndReadAll(
+              `SELECT source_file, source_offset FROM platform_events WHERE source_file IN (${
+                chunk.map(sqlString).join(", ")
+              })`,
+            ));
+          for (const row of reader.getRowObjects()) {
+            const file = String(row.source_file);
+            const offsets = out.get(file) ?? new Set<number>();
+            offsets.add(toNumber(row.source_offset));
+            out.set(file, offsets);
+          }
+        }
+        return out as ReadonlyMap<string, ReadonlySet<number>>;
+      });
+
+    /** The two budgets side by side, plus the logger's own drop accounting (ADR 0007). */
+    const measure = (now: Date, blockedBytes: number) =>
+      Effect.gen(function* () {
+        const today = dateBucketOf(now);
+        const tree = yield* Effect.either(retentionInventory(resolve(logDir)));
+        const files = tree._tag === "Right" ? tree.right.entries : [];
+        const size = (path: string) => Deno.stat(path).then((info) => info.size).catch(() => 0);
+        const [counts] = (yield* attempt("inventory", () =>
+          db.connection.runAndReadAll(
+            `SELECT (SELECT count(*) FROM platform_events) AS events,
+                    (SELECT count(*) FROM _ingest_state) AS sources,
+                    (SELECT coalesce(sum(dropped), 0) FROM queue_events WHERE event = 'dropped') AS dropped`,
+          ))).getRowObjects();
+        const retainedBytes = files.reduce((sum, e) => sum + e.bytes, 0);
+        const capBytes = config.logging.maxTotalBytes;
+        return {
+          jsonl: {
+            retainedBytes,
+            files: files.length,
+            todayBytes: files.filter((e) => e.dir >= today).reduce((sum, e) => sum + e.bytes, 0),
+            blockedBytes,
+            capBytes,
+            withinCap: retainedBytes <= capBytes,
+          },
+          derived: {
+            duckdbBytes: yield* Effect.promise(() => size(dbPath)),
+            walBytes: yield* Effect.promise(() => size(`${dbPath}.wal`)),
+            platformEventRows: toNumber(counts.events),
+            ingestStateRows: toNumber(counts.sources),
+            boundedByLogMaxTotalBytes: false as const,
+          },
+          logger: { dropsRecorded: toNumber(counts.dropped) },
+        } satisfies RetentionBudgets;
+      });
+
+    const ingestThenSweep = (
+      call: IngestThenSweepOptions = {},
+    ): Effect.Effect<IngestThenSweepReport, IngestError> =>
+      lock.withPermits(1)(Effect.gen(function* () {
+        const counts: IngestReport = call.dryRun === true
+          ? {
+            filesScanned: 0,
+            filesIngested: 0,
+            bytesIngested: 0,
+            linesIngested: 0,
+            linesRejected: 0,
+            durationMs: 0,
+          }
+          : yield* run;
+        const now = new Date(yield* Clock.currentTimeMillis);
+        const runId = crypto.randomUUID();
+        // A failed seal leaves every row as it was: those sources simply stay blocked this time.
+        const sealed = call.dryRun === true ? { sealed: [] as readonly string[] } : yield* Effect.either(
+          sealTornTails(now, now.toISOString(), `ingest-${runId}`, runId),
+        ).pipe(Effect.map((result) =>
+          result._tag === "Right"
+            ? { sealed: result.right }
+            : { sealed: [] as readonly string[], sealError: result.left.detail }
+        ));
+        const swept = yield* Effect.either(
+          sweep({
+            logDir,
+            policy: policyFromConfig(config.logging),
+            role,
+            ledger,
+            openPaths,
+            settleMs,
+            dryRun: call.dryRun,
+          }).pipe(Effect.provideService(EventSink, sink)),
+        );
+        const outcome: RetentionOutcome = swept._tag === "Right"
+          ? { status: "swept", ...sealed, sweep: swept.right }
+          : {
+            status: "failed",
+            ...sealed,
+            errorTag: swept.left._tag,
+            error: describeRetentionError(swept.left),
+          };
+        const budgets = yield* measure(now, swept._tag === "Right" ? swept.right.blockedBytes : 0);
+        return { ...counts, retention: outcome, budgets };
+      }));
+
+    return { ingest: lock.withPermits(1)(run), ingestThenSweep };
   });
+}
+
+/** One line for a sweep failure that already emitted its own `error` lifecycle event. */
+function describeRetentionError(error: { readonly _tag: string }): string {
+  const { _tag, ...fields } = error as unknown as Record<string, unknown>;
+  try {
+    return `${_tag} ${JSON.stringify(fields)}`;
+  } catch {
+    return String(_tag);
+  }
 }
 
 /** Builds quarantine record writers grouped by their `rejected.jsonl`, relative to `LOG_DIR`. */
@@ -650,3 +1035,22 @@ export function eventLogIngestLayer(
 /** Live: the persistent DuckDB event log, ingesting `LOG_DIR`. Reader process only. */
 export const EventLogIngestLive: Layer.Layer<EventLogIngest, IngestError, Config | EventSink> =
   eventLogIngestLayer();
+
+/**
+ * The hook for items 32 and 33 (ADR 0007): the same `EventLogIngest` tag, whose `ingest` is
+ * `ingestThenSweep()`. The reader answers its existing `ingest` RPC with it — no new RPC kind, no
+ * service change — and the reply is an `IngestThenSweepReport`, a superset of `IngestReport`.
+ * Retention therefore runs only after a successful ingest, in the process that owns DuckDB.
+ */
+export function eventLogIngestThenSweepLayer(
+  options: EventLogIngestOptions = {},
+): Layer.Layer<EventLogIngest, IngestError, Config | EventSink> {
+  return Layer.scoped(
+    EventLogIngest,
+    Effect.map(makeEventLogIngest(options), (control) => ({ ingest: control.ingestThenSweep() })),
+  );
+}
+
+/** Live ingest-then-sweep over `Config`. Reader process only. */
+export const EventLogIngestThenSweepLive: Layer.Layer<EventLogIngest, IngestError, Config | EventSink> =
+  eventLogIngestThenSweepLayer();
