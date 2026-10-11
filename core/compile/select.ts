@@ -6,10 +6,11 @@
  * or a `SchemaError` (a filter value does not match its node, or a name is not an identifier) in
  * the left channel of an `Either`.
  *
- * The SQL this module emits is byte-for-byte what the pre-port `platform/compiler.ts` emitted —
- * `deno task explain` regenerating `GENERATED_SQL.txt` identically is the safety net for that — and
- * the order in which it checks things is also preserved, so a plan that was wrong in two ways still
- * reports the same failure first.
+ * The SQL this module emits is byte-for-byte what the pre-port `platform/compiler.ts` emitted, with
+ * one intentional exception (plan item 30): SQLite reads a `json`-layout `number` field through
+ * `CAST(... AS REAL)` (see `expression`). `deno task explain` regenerating `GENERATED_SQL.txt` is
+ * the safety net for the rest. The order in which it checks things is also preserved, so a plan
+ * that was wrong in two ways still reports the same failure first.
  */
 import { Either } from "effect";
 import { CompileError, type SchemaError } from "../errors.ts";
@@ -65,11 +66,24 @@ export function scalar(table: Table, name: string): Either.Either<Node, CompileE
  * dialects actually diverge:
  *
  * - `columns` storage (and any metadata column, in either layout) is a plain quoted column.
- * - `json` storage on SQLite is `json_extract`, whose return type already follows the stored JSON
- *   type, so no cast is needed.
+ * - `json` storage on SQLite is `json_extract`, whose return type follows the stored JSON text, so
+ *   strings, integers and booleans need no cast. A `number` does: the writer stores
+ *   `JSON.stringify(x)`, which for an integral double such as 2^53 or 1693240866440448768 is integer
+ *   text (`1693240866440448800`), and `json_extract` reads integer text below 2^63 as an exact
+ *   64-bit INTEGER rather than as the double it denotes. That INTEGER misses `eq x`, satisfies
+ *   `gt x` against itself, and reads back beyond 2^53 where the driver refuses it. `CAST(... AS
+ *   REAL)` rounds it to the nearest double, which is `x` again, so a `number` reads as REAL exactly
+ *   like the `columns` layout's REAL column. Only `number` nodes are cast: integers keep their
+ *   exact INTEGER (and `decode`'s safe-integer check), and nothing else is coerced.
  * - `json` storage on DuckDB is `json_extract_string`, which always yields `VARCHAR`, so numerics
  *   are cast to `BIGINT`/`DOUBLE` and booleans through `BOOLEAN` to `INTEGER` to match SQLite's
  *   `0`/`1` encoding. Without the casts, `moveNumber > 3` would compare strings.
+ *
+ * The same expression serves filters, ordering, `countBy` group keys and (via `core/compile/ddl.ts`)
+ * index keys, so an index on a `json`-layout field matches the expression a query compares. A
+ * database created before item 30 keeps its old bare `json_extract` index on a `json`-layout
+ * `number` field (`CREATE INDEX IF NOT EXISTS` reuses the name), which queries no longer use:
+ * results stay correct, but drop and recreate that `idx_*` to get indexed reads back.
  */
 export function expression(
   table: Table,
@@ -81,7 +95,10 @@ export function expression(
     if (table.storage === "columns" || Object.hasOwn(system, name)) return yield* quote(name);
     const checked = yield* identifier(name);
     const path = literal(`$.${checked}`);
-    if (dialect === "sqlite") return `json_extract("doc", ${path})`;
+    if (dialect === "sqlite") {
+      const extract = `json_extract("doc", ${path})`;
+      return node.kind === "number" ? `CAST(${extract} AS REAL)` : extract;
+    }
     const extract = `json_extract_string("doc", ${path})`;
     if (node.kind === "integer") return `CAST(${extract} AS BIGINT)`;
     if (node.kind === "number") return `CAST(${extract} AS DOUBLE)`;

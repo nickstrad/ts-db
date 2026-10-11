@@ -795,6 +795,7 @@ const SELECT_WORDS = new Set([
   "CAST",
   "BIGINT",
   "DOUBLE",
+  "REAL",
   "BOOLEAN",
   "INTEGER",
   "json_extract",
@@ -820,6 +821,8 @@ const DDL_WORDS = new Set([
   "IS",
   "INDEX",
   "ON",
+  "CAST",
+  "AS",
   "json_valid",
   "json_extract",
 ]);
@@ -919,7 +922,7 @@ export function enumValuesOf(schema: Schema): Set<string> {
 
 const DUCK_FIELD =
   /CAST\(CAST\(json_extract_string\("doc", '\$\.(\w+)'\) AS BOOLEAN\) AS INTEGER\)|CAST\(json_extract_string\("doc", '\$\.(\w+)'\) AS (BIGINT|DOUBLE)\)|json_extract_string\("doc", '\$\.(\w+)'\)/g;
-const SQLITE_FIELD = /json_extract\("doc", '\$\.(\w+)'\)/g;
+const SQLITE_FIELD = /CAST\(json_extract\("doc", '\$\.(\w+)'\) AS REAL\)|json_extract\("doc", '\$\.(\w+)'\)/g;
 
 /** The DuckDB cast a `json`-layout field read needs so it compares like SQLite's `json_extract` does. */
 function expectedCast(node: Node | undefined): string {
@@ -929,11 +932,16 @@ function expectedCast(node: Node | undefined): string {
   return "none";
 }
 
+/** SQLite casts only a `json`-layout `number` read, to REAL (plan item 30); every other kind is bare. */
+function expectedSqliteCast(node: Node | undefined): string {
+  return node?.kind === "number" ? "REAL" : "none";
+}
+
 /**
  * A dialect-neutral token skeleton of a compiled select. Placeholders become `?`, DuckDB's `"app".`
- * schema prefix goes, and each dialect's JSON field read becomes `⟨field⟩`. A DuckDB read whose cast
- * does not fit the field's kind (a `moveNumber > 3` that would compare strings) becomes
- * `⟨field:<cast>!⟩`, so it cannot match SQLite's skeleton.
+ * schema prefix goes, and each dialect's JSON field read becomes `⟨field⟩`. A read whose cast does
+ * not fit the field's kind (a DuckDB `moveNumber > 3` that would compare strings, or a SQLite
+ * `number` read missing its REAL cast) becomes `⟨field:<cast>!⟩`, so the two skeletons cannot match.
  */
 export function skeleton(text: string, dialect: Dialect, table: Table): string[] {
   let t = text;
@@ -948,7 +956,13 @@ export function skeleton(text: string, dialect: Dialect, table: Table): string[]
       },
     );
   } else {
-    t = t.replace(SQLITE_FIELD, (_m, field: string) => `⟨${field}⟩`);
+    t = t.replace(SQLITE_FIELD, (_m, castField?: string, plainField?: string) => {
+      const field = (castField ?? plainField)!;
+      const actual = castField ? "REAL" : "none";
+      return actual === expectedSqliteCast(table.fields[field]?.node)
+        ? `⟨${field}⟩`
+        : `⟨${field}:${actual}!⟩`;
+    });
   }
   return t.match(/"[^"]*"|'(?:[^']|'')*'|⟨[^⟩]*⟩|\?|\w+|\S/g) ?? [];
 }

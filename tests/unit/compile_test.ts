@@ -166,14 +166,61 @@ test("expression reads metadata columns directly even in the json layout", () =>
   }
 });
 
-test("expression uses json_extract without casts on sqlite", () => {
-  // SQLite's json_extract already returns the stored JSON type, so no cast is needed or wanted.
-  for (const field of ["s", "i", "n", "b", "e", "nil"]) {
+test("expression uses json_extract on sqlite, casting only number fields to REAL", () => {
+  // SQLite's json_extract already returns the stored JSON type for every kind but `number`, so no
+  // cast is needed or wanted there: an integer keeps its exact INTEGER and its safe-integer check.
+  for (const field of ["s", "i", "b", "e", "nil"]) {
     assert.equal(
       expectRight(expression(jsonTable, field, "sqlite")),
       `json_extract("doc", '$.${field}')`,
     );
   }
+  // A `number` is a double, but `JSON.stringify(2 ** 53)` is integer text that json_extract would
+  // read as an exact INTEGER; the cast reads it back as the REAL the columns layout stores.
+  assert.equal(
+    expectRight(expression(jsonTable, "n", "sqlite")),
+    `CAST(json_extract("doc", '$.n') AS REAL)`,
+  );
+  const nullableNumber = new Table({ m: v.nullable(v.number()) }, "json");
+  assert.equal(
+    expectRight(expression(nullableNumber, "m", "sqlite")),
+    `CAST(json_extract("doc", '$.m') AS REAL)`,
+  );
+});
+
+test("a json number field uses one REAL expression for filters, ordering, countBy and indexes", () => {
+  const real = `CAST(json_extract("doc", '$.n') AS REAL)`;
+  const filtered = expectRight(compileSelect(json, {
+    ...base,
+    filters: [{ field: "n", op: "eq", value: 2 ** 53 }, { field: "n", op: "gt", value: -0.5 }],
+    order: { field: "n", direction: "desc" },
+  }, "sqlite"));
+  assert.equal(
+    filtered.text,
+    `SELECT * FROM "probe" WHERE ${real} = ? AND ${real} > ? ORDER BY ${real} DESC NULLS LAST, "_id" ASC LIMIT ?`,
+  );
+  // Filter values are bound unchanged: the fix is in the read expression, not in the values.
+  assert.deepEqual(filtered.values, [2 ** 53, -0.5, 20]);
+  const grouped = expectRight(
+    compileSelect(json, { ...base, aggregate: { kind: "countBy", field: "n" } }, "sqlite"),
+  );
+  assert.equal(
+    grouped.text,
+    `SELECT ${real} AS "value", COUNT(*) AS "count" FROM "probe" GROUP BY 1 ORDER BY "value" ASC NULLS FIRST LIMIT ?`,
+  );
+  // An index on the field is built from the same expression, so the planner can use it.
+  const indexed: Schema = { probe: new Table(fields, "json", [{ name: "by_n", fields: ["n"] }]) };
+  assert.equal(
+    expectRight(compileDDL(indexed))[1],
+    `CREATE INDEX IF NOT EXISTS "idx_probe_by_n" ON "probe" (${real})`,
+  );
+  // A null filter on a nullable number still compares with IS NULL and binds nothing.
+  const nullable: Schema = { probe: new Table({ m: v.nullable(v.number()) }, "json") };
+  const nulls = expectRight(
+    compileSelect(nullable, { ...base, filters: [{ field: "m", op: "eq", value: null }] }, "sqlite"),
+  );
+  assert.match(nulls.text, /WHERE CAST\(json_extract\("doc", '\$\.m'\) AS REAL\) IS NULL/);
+  assert.deepEqual(nulls.values, [20]);
 });
 
 test("expression casts json_extract_string per node kind on duckdb", () => {
