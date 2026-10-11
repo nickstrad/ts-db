@@ -785,6 +785,10 @@ export function makeEventLogIngest(
      * offset moves to the end of the file. The offset then sits at the end of a partial line rather
      * than just past a `\n`; a byte appended after that is out of the writers' model and would be
      * read, and quarantined, as a line of its own. Run right after a successful ingest.
+     *
+     * A closed source that is empty and has no row gets an empty-prefix row in the same transaction:
+     * ingest never writes one (it skips a 0-byte file), and without it the source would stay
+     * `no-watermark`, pinning its directory and its `rejected.jsonl` forever.
      */
     const sealTornTails = (now: Date, at: string, traceId: string, runId: string) =>
       Effect.gen(function* () {
@@ -793,6 +797,7 @@ export function makeEventLogIngest(
         const sources = yield* attempt("inventory", () => inventory(logDir));
         const state = yield* readState;
         const seals: { source: SourceFile; reject: Reject; next: IngestStateRow }[] = [];
+        const empties: IngestStateRow[] = [];
         for (const source of sources) {
           if (source.date >= today) continue;
           const path = join(logDir, source.path);
@@ -803,7 +808,8 @@ export function makeEventLogIngest(
             const age = now.getTime() - (info.mtime?.getTime() ?? now.getTime());
             if (age < 0 || age < settleMs) return undefined;
             const row = state.get(source.path);
-            if (info.size <= (row?.bytesIngested ?? 0)) return undefined;
+            const empty = info.size === 0 && row === undefined;
+            if (!empty && info.size <= (row?.bytesIngested ?? 0)) return undefined;
             const bytes = await Deno.readFile(path);
             const after = await Deno.lstat(path);
             if (after.size !== info.size || after.mtime?.getTime() !== info.mtime?.getTime()) {
@@ -813,6 +819,18 @@ export function makeEventLogIngest(
           }, source.path);
           if (found === undefined) continue;
           const { bytes, row } = found;
+          if (bytes.length === 0) {
+            if (row === undefined) {
+              empties.push({
+                sourceFile: source.path,
+                bytesIngested: 0,
+                prefixSha256: sha256Hex(bytes),
+                dedupe: false,
+                lastIngestedAt: at,
+              });
+            }
+            continue;
+          }
           const from = row?.bytesIngested ?? 0;
           // The committed offset must still describe these bytes, and the tail must be one partial
           // line: complete lines past the offset are ingest's to read, not a torn write.
@@ -835,10 +853,13 @@ export function makeEventLogIngest(
             },
           });
         }
-        if (seals.length === 0) return [] as readonly string[];
+        if (seals.length === 0 && empties.length === 0) return [] as readonly string[];
         yield* inTransaction(Effect.gen(function* () {
-          yield* quarantine(new Map(seals.map(({ source, reject }) => [source, [reject]])), at);
+          if (seals.length > 0) {
+            yield* quarantine(new Map(seals.map(({ source, reject }) => [source, [reject]])), at);
+          }
           for (const { next } of seals) yield* upsertState(next);
+          for (const next of empties) yield* upsertState(next);
         }));
         for (const { source, reject, next } of seals) {
           yield* emit("warn", traceId, {

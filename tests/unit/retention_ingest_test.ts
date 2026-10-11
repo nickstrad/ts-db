@@ -606,6 +606,39 @@ test("a quarantine file left with a torn record still takes whole records after 
   });
 });
 
+test("an empty closed file gets an empty-prefix row, so it no longer pins its directory", async () => {
+  await withWorld(async (world) => {
+    const good = lines(2);
+    const empty = "server/2026-10-01/events-10-100-001.jsonl";
+    await put(world, OLD, `${good[0]}\nnot json\n${good[1]}\n`);
+    await put(world, empty, "");
+
+    // Plain ingest never writes a row for a 0-byte file.
+    await run(world, { ingestOnly: true });
+    const rowOf = () =>
+      query(world, `SELECT bytes_ingested, prefix_sha256 FROM _ingest_state WHERE source_file = '${empty}'`);
+    assert.deepEqual(await rowOf(), []);
+    world.events.length = 0;
+
+    const report = await run(world);
+
+    // The coordinator commits a complete empty-prefix watermark for it, so the gate passes it, and
+    // the directory's quarantine file and the directory go with it.
+    const [state] = await rowOf();
+    assert.equal(Number(state.bytes_ingested), 0);
+    assert.equal(state.prefix_sha256, createHash("sha256").update(new Uint8Array()).digest("hex"));
+    assert.deepEqual(report.retention.sealed, []);
+    assert.deepEqual(swept(report).blocked, []);
+    assert.deepEqual(
+      [...swept(report).deleted].sort(),
+      [OLD, empty, "server/2026-10-01/rejected.jsonl"].sort(),
+    );
+    assert.deepEqual(swept(report).removedDirs, ["server/2026-10-01"]);
+    assert.deepEqual(world.events.filter((e) => e.level === "warn"), [], "nothing left to warn about");
+    await assertIngestedOnce(world, good.map(idOf));
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Gzip crash and retry
 // ---------------------------------------------------------------------------

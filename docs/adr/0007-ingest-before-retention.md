@@ -65,10 +65,10 @@ deployed separately must be given the same `TZ`.
 The watermark check is a full identity check. The file's whole content must hash to the prefix hash that
 ingest committed. An append, a rewrite or a stale inventory therefore blocks destructive action.
 Reconciliation is exact: it compares sets of offsets, not counts. Every complete line, plus a trailing partial
-line if there is one, must appear exactly once, either as a `platform_events.source_offset` for the source or
-as a `sourceOffset` in its directory's `rejected.jsonl`. Nothing else may appear. A `dedupe` (rewritten)
-source drops lines whose `eventId` already exists under another source, so the watermark alone is its
-evidence.
+line if there is one, must appear in the union of the source's `platform_events.source_offset`s and the
+`sourceOffset`s its directory's `rejected.jsonl` records for it. Nothing else may appear in either set. The
+gate checks only that union; it does not assert that the two sets are disjoint. A `dedupe` (rewritten) source
+drops lines whose `eventId` already exists under another source, so the watermark alone is its evidence.
 
 A pinned file keeps counting toward `LOG_MAX_TOTAL_BYTES`, so the cap moves on to newer directories. The
 pinning loop repeats until no plan names a file that has not been judged. Pinned files are reported as
@@ -97,6 +97,11 @@ For each such source, one transaction quarantines the tail as a `torn-tail` reje
 offset to the end of the file. That offset now ends a partial line rather than sitting just past a `\n`. A
 byte appended later would fall outside the writers' model, and ingest would read it, and quarantine it, as a
 line of its own.
+
+The same transaction also covers an empty source. Ingest skips a 0-byte file, so it never gets a row; without
+one it would stay `no-watermark` and pin its directory and `rejected.jsonl` forever. A closed, settled, empty
+source with no row therefore gets an empty-prefix row (offset 0, the hash of no bytes), which the gate accepts
+as complete.
 
 Like a `line-too-large` reject, the quarantine record keeps only the tail's first 64 KiB, decoded lossily. A
 torn tail can never parse, so the record proves the tail was consumed and shows its start. Once the source
