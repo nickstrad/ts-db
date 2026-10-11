@@ -123,7 +123,7 @@ test("router rejects traversal and every non-canonical UUID form without I/O", a
   }
   const first = await Effect.runPromise(local.resolve(ids[0]));
   const second = await Effect.runPromise(local.resolve(ids[0]));
-  assert.equal(first.path, second.path);
+  assert.deepStrictEqual(first, second);
 });
 
 test("prepare is idempotent, rejects forged locations and refuses symlinks at prepare and open", async () => {

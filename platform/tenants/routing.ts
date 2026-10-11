@@ -49,6 +49,7 @@ export class TenantContext extends Context.Tag("ts-db/TenantContext")<
 export function makeLocalFolderRouter(tenantsDir: string, schema: Schema): TenantStorageRouterService {
   const root = absolute(tenantsDir);
   const issued = new WeakSet<StorageLocation>();
+  const locations = new Map<TenantId, StorageLocation>();
   const ddl = compileDDL(schema);
   let canonicalRoot: string | undefined;
 
@@ -92,6 +93,8 @@ export function makeLocalFolderRouter(tenantsDir: string, schema: Schema): Tenan
   return {
     resolve: (input) =>
       Effect.map(parseTenantId(input), (tenantId) => {
+        const existing = locations.get(tenantId);
+        if (existing) return existing;
         const path = join(root, `${tenantId}.db`);
         const location: StorageLocation = Object.freeze({
           [locationBrand]: true as const,
@@ -103,6 +106,7 @@ export function makeLocalFolderRouter(tenantsDir: string, schema: Schema): Tenan
           },
         });
         issued.add(location);
+        locations.set(tenantId, location);
         return location;
       }),
     prepare: (location) =>
