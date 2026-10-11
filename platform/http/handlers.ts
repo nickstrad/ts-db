@@ -22,19 +22,36 @@
  * loads it (ADR 0001). The analysis route takes a catalog name and scalar parameters only: no SQL
  * crosses the HTTP boundary, consistent with the repo's "never raw SQL from callers" posture; the
  * reader resolves the name against its catalog and answers `UnknownAnalysisQuery` (404) on a miss.
+ *
+ * ## Trace context (item 34)
+ *
+ * The router runs each request under its trace id (`platform/http/trace.ts`). Every handler here runs
+ * its *whole* dispatched Effect — lookup, authentication, body, and the mutation, query or admin
+ * call — as one child span (`withChildSpan`), so everything it causes carries the trace and the
+ * handler's `spanId`: the SQLite writer's `sql`/`tx` events (on commit and on rollback), backup
+ * phases, `Effect.log*` records, and the reader request, whose frame `platform/ipc.ts` stamps with
+ * this span as `parentSpanId`.
+ *
+ * `invoke` (an app handler) also records one `handler` event when it ends, under the same trace and
+ * span: `handlerKind`, `name`, `outcome`, `durationMs`, and on a failure the error columns —
+ * `errorTag` is the typed failure's tag, `Defect` for a defect, `Interrupted` for an interruption.
+ * Platform routes record only the router's `http` event; they have no app handler to describe.
  */
-import { Effect } from "effect";
+import { Cause, Clock, Effect, Exit, FiberId, Option } from "effect";
 import {
   type HandlerKind,
   HandlerKindMismatch,
   type PlatformError,
   type RequestTooLarge,
   SchemaError,
+  toHttpStatus,
   UnknownHandlerError,
 } from "../../core/errors.ts";
+import { fromPlatformError, handlerEvent, type Level } from "../../core/events.ts";
 import { AppServices } from "../registry.ts";
-import { AppRegistry, Config, ReaderClient } from "../services.ts";
+import { AppRegistry, Config, EventSink, ReaderClient } from "../services.ts";
 import { authenticateAdmin, authenticateApp } from "./auth.ts";
+import { currentTraceContext, newSpanId, withChildSpan } from "./trace.ts";
 
 /** What a handler may read from the request. */
 export interface RequestContext {
@@ -47,17 +64,75 @@ export interface RequestContext {
 }
 
 /** Every service a handler may use. */
-export type HandlerRequirements = Config | AppRegistry | AppServices | ReaderClient;
+export type HandlerRequirements = Config | AppRegistry | AppServices | ReaderClient | EventSink;
 
 export type Handler = Effect.Effect<unknown, PlatformError, HandlerRequirements>;
 
+/** Runs `handler` as a fresh child span of the request (see the module comment). */
+function inSpan(handler: Handler): Handler {
+  return Effect.flatMap(newSpanId, (spanId) => withChildSpan(spanId, handler));
+}
+
+/** What the `handler` event says about an exit: outcome, level, and error columns. */
+function handlerOutcome(exit: Exit.Exit<unknown, PlatformError>) {
+  if (Exit.isSuccess(exit)) return { outcome: "ok" as const, level: "info" as Level };
+  const failure = Cause.failureOption(exit.cause);
+  if (Option.isSome(failure)) {
+    return {
+      outcome: "error" as const,
+      level: (toHttpStatus(failure.value) >= 500 ? "error" : "warn") as Level,
+      ...fromPlatformError(failure.value),
+    };
+  }
+  const errorTag = Cause.isInterruptedOnly(exit.cause) ? "Interrupted" : "Defect";
+  return {
+    outcome: "error" as const,
+    level: (errorTag === "Defect" ? "error" : "warn") as Level,
+    errorTag,
+    errorDetail: { message: Cause.pretty(exit.cause).split("\n")[0] },
+  };
+}
+
+/**
+ * `handler` as an app handler's span: it runs inside a fresh child span, and records one `handler`
+ * event in that span when it ends — successfully, with a typed failure, a defect or an interruption.
+ */
+function appHandlerSpan(handlerKind: HandlerKind, name: string, appId: string, handler: Handler): Handler {
+  return inSpan(Effect.gen(function* () {
+    const started = yield* Clock.currentTimeNanos;
+    return yield* Effect.onExit(handler, (exit) =>
+      Effect.gen(function* () {
+        const finished = yield* Clock.currentTimeNanos;
+        const context = Option.getOrUndefined(yield* currentTraceContext);
+        const { level, ...columns } = handlerOutcome(exit);
+        yield* (yield* EventSink).emit(handlerEvent({
+          eventId: crypto.randomUUID(),
+          ts: new Date(Number(finished / 1_000_000n)).toISOString(),
+          level,
+          role: "server",
+          pid: Deno.pid,
+          // Outside a router-traced request (a direct call in a test), the fiber names the trace,
+          // as the SQLite writer's events do.
+          traceId: context?.traceId ?? FiberId.threadName(yield* Effect.fiberId),
+          ...(context?.spanId === undefined ? {} : { spanId: context.spanId }),
+          ...(context?.parentSpanId === undefined ? {} : { parentSpanId: context.parentSpanId }),
+          appId,
+          handlerKind,
+          name,
+          durationMs: Number(finished - started) / 1e6,
+          ...columns,
+        }));
+      }));
+  }));
+}
+
 /** `GET /health`: the reader answers a ping, and the apps this process serves. */
-export const health: Handler = Effect.gen(function* () {
+export const health: Handler = inSpan(Effect.gen(function* () {
   const reader = yield* ReaderClient;
   yield* reader.call({ kind: "ping" });
   const apps = yield* (yield* AppRegistry).all;
   return { ok: true, apps: apps.map((app) => app.id) };
-});
+}));
 
 /** `POST /apps/:appId/:kind/:name`: run one registered handler as a mutation or a query. */
 export function invoke(
@@ -66,37 +141,42 @@ export function invoke(
   kind: HandlerKind,
   name: string,
 ): Handler {
-  return Effect.gen(function* () {
-    const stack = yield* (yield* AppServices).get(appId);
-    yield* authenticateApp(context.headers, stack.app);
-    if (!Object.hasOwn(stack.app.functions, name)) {
-      return yield* new UnknownHandlerError({ appId, name });
-    }
-    const definition = stack.app.functions[name];
-    if (definition.kind !== kind) {
-      return yield* new HandlerKindMismatch({ appId, name, expected: kind, actual: definition.kind });
-    }
-    const args = yield* context.body;
-    if (kind === "mutation") return yield* stack.storage.mutation(definition, args);
-    return yield* (yield* ReaderClient).call({ kind: "query", appId, name, args });
-  });
+  return appHandlerSpan(
+    kind,
+    name,
+    appId,
+    Effect.gen(function* () {
+      const stack = yield* (yield* AppServices).get(appId);
+      yield* authenticateApp(context.headers, stack.app);
+      if (!Object.hasOwn(stack.app.functions, name)) {
+        return yield* new UnknownHandlerError({ appId, name });
+      }
+      const definition = stack.app.functions[name];
+      if (definition.kind !== kind) {
+        return yield* new HandlerKindMismatch({ appId, name, expected: kind, actual: definition.kind });
+      }
+      const args = yield* context.body;
+      if (kind === "mutation") return yield* stack.storage.mutation(definition, args);
+      return yield* (yield* ReaderClient).call({ kind: "query", appId, name, args });
+    }),
+  );
 }
 
 /** `POST /admin/backup/:appId`: one backup now. `BackupAlreadyRunning` (409) if one is in flight. */
 export function backup(context: RequestContext, appId: string): Handler {
-  return Effect.gen(function* () {
+  return inSpan(Effect.gen(function* () {
     yield* authenticateAdmin(context.headers, yield* Config);
     const stack = yield* (yield* AppServices).get(appId);
     return yield* stack.backups.take(appId);
-  });
+  }));
 }
 
 /** `POST /admin/logs/ingest`: the reader ingests new JSONL lines into the event-log DuckDB file. */
 export function ingestLogs(context: RequestContext): Handler {
-  return Effect.gen(function* () {
+  return inSpan(Effect.gen(function* () {
     yield* authenticateAdmin(context.headers, yield* Config);
     return yield* (yield* ReaderClient).call({ kind: "ingest" });
-  });
+  }));
 }
 
 /** A parameter value an analysis query may bind. Objects and arrays are refused. */
@@ -129,9 +209,9 @@ export function analysisParams(body: unknown): Effect.Effect<Readonly<Record<str
 
 /** `POST /admin/logs/analysis/:name`: run one named catalog query with the body as its parameters. */
 export function analysis(context: RequestContext, name: string): Handler {
-  return Effect.gen(function* () {
+  return inSpan(Effect.gen(function* () {
     yield* authenticateAdmin(context.headers, yield* Config);
     const params = yield* analysisParams(yield* context.body);
     return yield* (yield* ReaderClient).call({ kind: "analysis", name, params });
-  });
+  }));
 }

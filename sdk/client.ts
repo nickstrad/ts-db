@@ -9,8 +9,18 @@
  * `ClientError` is `RemoteError` alone, and widening that taxonomy belongs to the item that owns
  * the file.
  *
- * Every request carries `X-Trace-Id`, caller-supplied or generated, so a k6 run (workstream 6) and
- * the server-side event log (workstream 4) can be joined on one id.
+ * ## Trace ids
+ *
+ * Every request carries `X-Trace-Id`: the `traceId` argument when the caller passes one, verbatim,
+ * otherwise a fresh id from `newTraceId` (default `crypto.randomUUID()`). The server judges the id
+ * once, at ingress (`platform/http/trace.ts`): an id of 1–128 characters from `[A-Za-z0-9._:-]` is
+ * used as the request's trace across the server and the reader process (`http`, `handler`, `sql`,
+ * `tx` events and logs); anything else is replaced by a server-generated id, never refused. The
+ * response's `X-Trace-Id` always names the id the request ran under. A custom `newTraceId` should
+ * therefore return ids inside that bound, or its ids will be replaced.
+ *
+ * The argument positions and the default generator are a stable API (item 34): later items add
+ * behind them, they do not move them.
  */
 import { Cause, Effect, Exit } from "effect";
 import { type ClientError, RemoteError } from "../core/errors.ts";

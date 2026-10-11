@@ -6,6 +6,9 @@
  * request's `name`: echo after a delay, never answer, exit, emit garbage or an oversize frame, answer
  * an unknown id, send an error frame, or close its stdin. `--ignore-eof` makes it keep running after
  * stdin closes, so the finalizer has to kill it; `--ignore-sigterm` makes that take a SIGKILL.
+ * `--serial` makes it serve one request at a time, reading the next only after answering — the real
+ * reader's discipline — so later requests queue in the child behind a slow one. The `trace` request
+ * answers with the trace properties its frame carried (item 34).
  *
  * Every test runs its connection inside `Effect.scoped` and, after the scope closes, asserts the
  * child's `status` has settled — no test leaves a process behind.
@@ -13,6 +16,7 @@
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { Cause, Effect, Exit, Fiber, Layer, Option, Scope } from "effect";
+import type { LifecycleEventRecord, QueueEventRecord } from "../../core/events.ts";
 import type { EventRecord } from "../../core/events.ts";
 import {
   IpcError,
@@ -25,6 +29,7 @@ import { EventSink, ReaderClient } from "../../platform/services.ts";
 import {
   type CallError,
   makeReaderConnection,
+  outgoingTrace,
   ReaderClientLive,
   type ReaderClientOptions,
   type ReaderConnection,
@@ -32,6 +37,7 @@ import {
 
 const STUB = `
 const ignoreEof = Deno.args.includes("--ignore-eof");
+const serial = Deno.args.includes("--serial");
 if (Deno.args.includes("--ignore-sigterm")) Deno.addSignalListener("SIGTERM", () => {});
 const out = Deno.stdout.writable.getWriter();
 const enc = new TextEncoder();
@@ -47,6 +53,12 @@ async function handle(req) {
       return reply({ id: req.id, result: args });
     case "undefined":
       return reply({ id: req.id, result: undefined });
+    case "trace": {
+      if (args.delayMs) await new Promise((r) => setTimeout(r, args.delayMs));
+      const sent = {};
+      for (const key of ["traceId", "spanId", "parentSpanId"]) if (key in req) sent[key] = req[key];
+      return reply({ id: req.id, result: { tag: args.tag, keys: Object.keys(req).sort(), sent } });
+    }
     case "never":
       return;
     case "exit":
@@ -87,7 +99,8 @@ read: for await (const chunk of Deno.stdin.readable) {
       closing = req;
       break read;
     }
-    handle(req);
+    if (serial) await handle(req);
+    else handle(req);
   }
 }
 if (closing) {
@@ -486,4 +499,220 @@ test("ReaderClientLive provides the service and tears the child down with its la
   const after = await Effect.runPromise(Effect.either(client.call({ kind: "ping" })));
   assert.ok(after._tag === "Left" && after.left instanceof ReaderExitedError);
   assert.equal(after.left.code, 0);
+});
+
+// ===========================================================================
+// Trace context (item 34)
+// ===========================================================================
+
+/** What the `trace` stub request answers: the caller's tag and the frame's trace properties. */
+interface Traced {
+  readonly tag: string;
+  readonly keys: readonly string[];
+  readonly sent: { readonly traceId?: string; readonly spanId?: string; readonly parentSpanId?: string };
+}
+
+const traceCall = (connection: ReaderConnection, tag: string, delayMs = 0) =>
+  connection.call(query("trace", { tag, delayMs })) as Effect.Effect<Traced, CallError>;
+
+/** Runs `effect` as a request of trace `traceId`, inside span `spanId`, as the HTTP handlers do. */
+const asCaller = <A, E, R>(traceId: string, spanId: string, effect: Effect.Effect<A, E, R>) =>
+  Effect.annotateLogs(effect, { traceId, spanId });
+
+test("outgoingTrace: caller context, explicit properties, invalid values and no trace at all", () => {
+  const caller = { traceId: "t-caller", spanId: "s-handler" };
+  assert.deepEqual(outgoingTrace({}, caller, "s-new"), {
+    traceId: "t-caller",
+    spanId: "s-new",
+    parentSpanId: "s-handler",
+  });
+  assert.deepEqual(outgoingTrace({}, { traceId: "t-caller" }, "s-new"), {
+    traceId: "t-caller",
+    spanId: "s-new",
+  });
+  // Explicit properties win; the caller's span is a parent only within the caller's own trace.
+  assert.deepEqual(outgoingTrace({ traceId: "t-explicit" }, caller, "s-new"), {
+    traceId: "t-explicit",
+    spanId: "s-new",
+  });
+  assert.deepEqual(outgoingTrace({ traceId: "t-caller", spanId: "s-mine" }, caller, "s-new"), {
+    traceId: "t-caller",
+    spanId: "s-mine",
+    parentSpanId: "s-handler",
+  });
+  assert.deepEqual(outgoingTrace({ traceId: "t-x", spanId: "s-x", parentSpanId: "p-x" }, caller, "s-new"), {
+    traceId: "t-x",
+    spanId: "s-x",
+    parentSpanId: "p-x",
+  });
+  // An invalid explicit value is dropped and the next source applies.
+  assert.deepEqual(outgoingTrace({ traceId: "has space", spanId: "x".repeat(129) }, caller, "s-new"), {
+    traceId: "t-caller",
+    spanId: "s-new",
+    parentSpanId: "s-handler",
+  });
+  // No trace anywhere: a legacy frame, even if spans were given.
+  assert.deepEqual(outgoingTrace({}, undefined, "s-new"), {});
+  assert.deepEqual(outgoingTrace({ spanId: "s-orphan", parentSpanId: "p-orphan" }, undefined, "s-new"), {});
+  assert.deepEqual(outgoingTrace({ traceId: "bad trace" }, undefined, "s-new"), {});
+});
+
+test("a call carries the caller's trace, a fresh span and the caller's span as parent", async () => {
+  const { value } = await withStub(({ connection }) =>
+    Effect.all([
+      asCaller("trace-one", "handler-span-1", traceCall(connection, "one")),
+      asCaller("trace-one", "handler-span-1", traceCall(connection, "one-again")),
+    ])
+  );
+  const [first, second] = value;
+  assert.equal(first.sent.traceId, "trace-one");
+  assert.equal(first.sent.parentSpanId, "handler-span-1");
+  assert.ok(first.sent.spanId && /^[A-Za-z0-9._:-]{1,128}$/.test(first.sent.spanId));
+  assert.notEqual(first.sent.spanId, second.sent.spanId, "every call is its own span");
+  assert.notEqual(first.sent.spanId, "handler-span-1");
+});
+
+test("explicit request properties win over the caller's; invalid ones are never sent", async () => {
+  const { value } = await withStub(({ connection }) =>
+    asCaller(
+      "trace-caller",
+      "span-caller",
+      Effect.all([
+        connection.call({
+          ...query("trace", { tag: "explicit" }),
+          traceId: "trace-explicit",
+          spanId: "span-x",
+        }),
+        connection.call({ ...query("trace", { tag: "invalid" }), traceId: "not valid", parentSpanId: "p\n" }),
+      ]),
+    ) as Effect.Effect<[Traced, Traced], CallError>
+  );
+  const [explicit, invalid] = value;
+  assert.deepEqual(explicit.sent, { traceId: "trace-explicit", spanId: "span-x" });
+  assert.equal(invalid.sent.traceId, "trace-caller");
+  assert.equal(invalid.sent.parentSpanId, "span-caller");
+});
+
+test("a call outside any trace sends a legacy frame: no trace properties at all", async () => {
+  const { value } = await withStub(({ connection }) => traceCall(connection, "untraced"));
+  assert.deepEqual(value.sent, {});
+  assert.deepEqual(value.keys, ["appId", "args", "id", "kind", "name"]);
+});
+
+test("overlapping callers with distinct traces never swap contexts, even queued in a serial child", async () => {
+  const callers = Array.from(
+    { length: 40 },
+    (_, i) => ({ trace: `caller-${i}`, span: `span-${i}`, delay: (i * 7) % 13 }),
+  );
+  const { value } = await withStub(
+    ({ connection }) =>
+      Effect.all(
+        callers.map((c) => asCaller(c.trace, c.span, traceCall(connection, c.trace, c.delay))),
+        { concurrency: "unbounded" },
+      ).pipe(Effect.zip(connection.pendingCount)),
+    { args: ["--serial"] },
+  );
+  const [results, pending] = value;
+  assert.equal(pending, 0);
+  results.forEach((result, i) => {
+    assert.equal(result.tag, callers[i].trace, "each caller gets its own reply");
+    assert.equal(result.sent.traceId, callers[i].trace, "and its frame carried its own trace");
+    assert.equal(result.sent.parentSpanId, callers[i].span);
+  });
+  assert.equal(new Set(results.map((r) => r.sent.spanId)).size, callers.length);
+});
+
+test("an interrupted call's late reply is logged under its own trace and never reaches the next caller", async () => {
+  const { value, events } = await withStub(
+    ({ connection }) =>
+      Effect.gen(function* () {
+        // A is slow; B queues behind it in the serial child. A is cancelled while both are in flight.
+        const a = yield* Effect.fork(asCaller("trace-A", "span-A", traceCall(connection, "A", 200)));
+        yield* waitForPending(connection, 1);
+        const b = yield* Effect.fork(asCaller("trace-B", "span-B", traceCall(connection, "B")));
+        yield* waitForPending(connection, 2);
+        yield* Fiber.interrupt(a);
+        const fromB = yield* Fiber.join(b);
+        return { fromB, pending: yield* connection.pendingCount };
+      }),
+    { args: ["--serial"] },
+  );
+  assert.equal(value.fromB.tag, "B");
+  assert.equal(value.fromB.sent.traceId, "trace-B");
+  assert.equal(value.pending, 0);
+  const anomalies = events.filter((e): e is LifecycleEventRecord =>
+    e.kind === "lifecycle" && e.phase === "reader-reply-anomaly"
+  );
+  assert.equal(anomalies.length, 1, "A's reply arrives late, once");
+  const [anomaly] = anomalies;
+  assert.equal(anomaly.traceId, "trace-A", "the late reply is attributed to the call it answers");
+  assert.equal(anomaly.parentSpanId, "span-A");
+  assert.deepEqual(
+    {
+      requestId: (anomaly.detail as { requestId: number }).requestId,
+      late: (anomaly.detail as { late: boolean }).late,
+    },
+    { requestId: 1, late: true },
+  );
+  assert.ok(
+    !events.some((e) => e.traceId === "trace-B" && e.kind === "lifecycle"),
+    "nothing of A's lands on B",
+  );
+});
+
+test("a timed-out call's late reply, arriving while another caller waits, keeps its own trace", async () => {
+  const { value, events } = await withStub(
+    ({ connection }) =>
+      Effect.gen(function* () {
+        const a = yield* Effect.fork(
+          failure(asCaller("trace-late", "span-late", traceCall(connection, "A", 250))),
+        );
+        yield* waitForPending(connection, 1);
+        // B is admitted at ~150 ms, while A is pending, so it queues behind A in the child. A times
+        // out at 200 ms and its reply comes at ~250 ms, while B (deadline ~350 ms) still waits.
+        yield* Effect.sleep("150 millis");
+        const b = yield* Effect.fork(asCaller("trace-waiting", "span-waiting", traceCall(connection, "B")));
+        yield* waitForPending(connection, 2);
+        const timedOut = yield* Fiber.join(a);
+        const fromB = yield* Fiber.join(b);
+        return { timedOut, fromB };
+      }),
+    { args: ["--serial"], callTimeout: "200 millis" },
+  );
+  assert.ok(value.timedOut instanceof IpcError && value.timedOut.reason === "timeout");
+  assert.equal(value.fromB.tag, "B");
+  assert.equal(value.fromB.sent.traceId, "trace-waiting");
+  const anomaly = events.find((e) => e.kind === "lifecycle" && e.phase === "reader-reply-anomaly");
+  assert.equal(anomaly?.traceId, "trace-late");
+});
+
+test("a stray reply with no abandoned call stays on the connection's trace", async () => {
+  const { events } = await withStub(({ connection }) =>
+    asCaller("trace-stray", "span-stray", connection.call(query("unknownId")))
+  );
+  const anomaly = events.find((e): e is LifecycleEventRecord =>
+    e.kind === "lifecycle" && e.phase === "reader-reply-anomaly"
+  );
+  assert.ok(anomaly?.traceId.startsWith("reader-client-"), anomaly?.traceId);
+  assert.equal((anomaly?.detail as { late: boolean }).late, false);
+});
+
+test("queue events name the trace of the call that crossed the mark or was rejected", async () => {
+  const { events } = await withStub(
+    ({ connection }) =>
+      Effect.gen(function* () {
+        yield* Effect.fork(asCaller("trace-first", "s1", connection.call(query("never"))));
+        yield* waitForPending(connection, 1);
+        yield* Effect.fork(asCaller("trace-second", "s2", connection.call(query("never"))));
+        yield* waitForPending(connection, 2);
+        return yield* failure(asCaller("trace-rejected", "s3", connection.call({ kind: "ping" })));
+      }),
+    { cap: 2, highWaterMarks: [1, 2] },
+  );
+  const queue = events.filter((e): e is QueueEventRecord => e.kind === "queue");
+  assert.deepEqual(queue.map((e) => [e.event, e.traceId]), [
+    ["high-water", "trace-first"],
+    ["high-water", "trace-second"],
+    ["rejected", "trace-rejected"],
+  ]);
 });

@@ -28,9 +28,27 @@
  *   child is killed (it is out of sync with us), and the failure is logged as a `lifecycle` event.
  *   A defect in the receiver or writer fiber does the same, as `stream-failure`.
  * - A reply for an id nobody is waiting on (typically one that already timed out) is logged as an
- *   anomaly event and dropped; the connection stays up.
+ *   anomaly event and dropped; the connection stays up. Ids are never reused on a connection, so a
+ *   late reply can never resolve a later call.
  * - The 1000-call cap is `QueueFullError({ queue: "reader" })`; each call has a timeout
  *   (`IpcError({ reason: "timeout" })`); a timed-out or interrupted call removes its pending entry.
+ *
+ * ## Trace context (item 34)
+ *
+ * `call` captures the calling fiber's trace context (`platform/http/trace.ts`) when the call is
+ * submitted — on the caller's fiber, before the frame is queued — and encodes it into that call's
+ * frame as the optional `traceId` / `spanId` / `parentSpanId` wire properties
+ * (`ReaderTraceContext`). The frame's bytes are final at that point; the shared writer fiber only
+ * copies bytes to stdin and never reads a fiber's context, so overlapping callers cannot swap
+ * contexts however their frames queue. See `outgoingTrace` for the rules. A call made outside any
+ * trace (a timer, the startup ping) sends no trace properties, exactly as before item 34, and the
+ * reader runs it under its local fallback.
+ *
+ * The context is also kept beside each pending entry. Events a call causes (`queue` rejection and
+ * high-water) carry the caller's trace, and a late reply to a call that timed out or was interrupted
+ * is logged as an anomaly under *that* call's trace (`detail.requestId`, `detail.late`), not under
+ * whichever call happens to be waiting. Connection-level events, and a late reply to an untraced
+ * call, keep the connection's own `reader-client-<uuid>` trace.
  *
  * The per-call timeout is a layer option; the composition root (`platform/layers.ts`) passes in
  * `Config.reader.callTimeoutMs` (`READER_CALL_TIMEOUT_MS`).
@@ -54,6 +72,7 @@ import {
   type Scope,
 } from "effect";
 import { decoder } from "../core/ipc/framing.ts";
+import { currentTraceContext, isTraceToken, newSpanId, type TraceContext } from "./http/trace.ts";
 import {
   AnalysisError,
   CompileError,
@@ -91,9 +110,10 @@ import {
   type ReaderReply,
   type ReaderRequest,
   type ReaderRequestFrame,
+  type ReaderTraceContext,
 } from "./services.ts";
 
-export type { ReaderRequest };
+export type { ReaderRequest, ReaderTraceContext };
 
 /**
  * Small JSON-lines transport. Only trusted named handler requests cross it.
@@ -153,10 +173,16 @@ export const DEFAULT_READER_CAP = 1000;
 
 type Pending = Deferred.Deferred<unknown, CallError>;
 
+/** One call awaiting its reply, and the trace context it was submitted under. */
+interface Entry {
+  readonly deferred: Pending;
+  readonly trace: ReaderTraceContext;
+}
+
 type State =
   | {
     readonly _tag: "open";
-    readonly pending: HashMap.HashMap<number, Pending>;
+    readonly pending: HashMap.HashMap<number, Entry>;
     readonly nextId: number;
     /** Index into the sorted high-water marks of the next mark not yet reached. */
     readonly nextMark: number;
@@ -227,15 +253,15 @@ export function makeReaderConnection(
       expected = false,
     ): Effect.Effect<void> =>
       Effect.uninterruptible(Effect.gen(function* () {
-        const drained = yield* Ref.modify(state, (s): [Option.Option<Iterable<Pending>>, State] =>
+        const drained = yield* Ref.modify(state, (s): [Option.Option<Iterable<Entry>>, State] =>
           s._tag === "closed"
             ? [Option.none(), s]
             : [Option.some(HashMap.values(s.pending)), { _tag: "closed", error }]);
         if (Option.isNone(drained)) {
           return;
         }
-        for (const deferred of drained.value) {
-          yield* Deferred.fail(deferred, error);
+        for (const entry of drained.value) {
+          yield* Deferred.fail(entry.deferred, error);
         }
         const level: Level = expected ? "info" : error._tag === "IpcError" ? "error" : "warn";
         yield* events.emit(level, (env) =>
@@ -326,9 +352,9 @@ export function makeReaderConnection(
       );
     };
 
-    /** Remove `id` from the pending map; returns the `Deferred` if it was still there. */
+    /** Remove `id` from the pending map; returns its entry if it was still there. */
     const take = (id: number) =>
-      Ref.modify(state, (s): [Option.Option<Pending>, State] => {
+      Ref.modify(state, (s): [Option.Option<Entry>, State] => {
         if (s._tag === "closed") return [Option.none(), s];
         const found = HashMap.get(s.pending, id);
         return Option.isNone(found) ? [found, s] : [found, { ...s, pending: HashMap.remove(s.pending, id) }];
@@ -336,6 +362,34 @@ export function makeReaderConnection(
 
     const isPending = (id: number) =>
       Effect.map(Ref.get(state), (s) => s._tag === "open" && HashMap.has(s.pending, id));
+
+    /**
+     * The trace contexts of calls that left without a reply (timed out or interrupted), by id, so a
+     * late reply is logged under the trace of the call it answers (an untraced call's under the
+     * connection's). Bounded at `cap` entries, oldest evicted first: a reply that never comes must
+     * not grow memory.
+     */
+    const abandoned = new Map<number, ReaderTraceContext>();
+
+    /**
+     * `take`, and if the entry was still pending, record it as abandoned — in the same step, so a
+     * late reply can never find the id neither pending nor abandoned.
+     */
+    const takeAbandoned = (id: number) =>
+      Ref.update(state, (s) => {
+        if (s._tag === "closed") return s;
+        const found = HashMap.get(s.pending, id);
+        if (Option.isNone(found)) return s;
+        abandoned.set(id, found.value.trace);
+        if (abandoned.size > Math.max(cap, 1)) abandoned.delete(abandoned.keys().next().value!);
+        return { ...s, pending: HashMap.remove(s.pending, id) };
+      });
+    const lateTrace = (id: number) =>
+      Effect.sync(() => {
+        const trace = abandoned.get(id);
+        abandoned.delete(id);
+        return trace;
+      });
 
     const settle = (reply: ReaderReply) =>
       Effect.gen(function* () {
@@ -345,13 +399,22 @@ export function makeReaderConnection(
             reason: "unknown-reply-id",
             detail: `no pending call with id ${reply.id}`,
           });
-          yield* events.emit("warn", (env) =>
-            lifecycleEvent({ ...env, phase: "reader-reply-anomaly", detail: fromPlatformError(anomaly) }));
+          const late = yield* lateTrace(reply.id);
+          yield* events.emit(
+            "warn",
+            (env) =>
+              lifecycleEvent({
+                ...env,
+                phase: "reader-reply-anomaly",
+                detail: { ...fromPlatformError(anomaly), requestId: reply.id, late: late !== undefined },
+              }),
+            late,
+          );
           return;
         }
         if ("error" in reply && reply.error !== undefined) {
-          yield* Deferred.fail(found.value, rehydrate(reply.error));
-        } else yield* Deferred.succeed(found.value, "result" in reply ? reply.result : undefined);
+          yield* Deferred.fail(found.value.deferred, rehydrate(reply.error));
+        } else yield* Deferred.succeed(found.value.deferred, "result" in reply ? reply.result : undefined);
       });
 
     const receiver = Effect.gen(function* () {
@@ -397,7 +460,14 @@ export function makeReaderConnection(
     const call = (request: ReaderRequest): Effect.Effect<unknown, CallError> =>
       Effect.uninterruptibleMask((restore) =>
         Effect.gen(function* () {
+          // Captured here, on the caller's fiber, at submission; see the module comment.
+          const trace = outgoingTrace(
+            request,
+            Option.getOrUndefined(yield* currentTraceContext),
+            yield* newSpanId,
+          );
           const deferred = yield* Deferred.make<unknown, CallError>();
+          const entry: Entry = { deferred, trace };
           const admission = yield* Ref.modify(state, (s): [Admission, State] => {
             if (s._tag === "closed") return [{ _tag: "rejected", error: s.error }, s];
             const depth = HashMap.size(s.pending);
@@ -409,30 +479,37 @@ export function makeReaderConnection(
             while (nextMark < marks.length && depth + 1 >= marks[nextMark]) nextMark++;
             return [
               { _tag: "admitted", id, depth: depth + 1, marked: nextMark !== s.nextMark },
-              { _tag: "open", pending: HashMap.set(s.pending, id, deferred), nextId: id + 1, nextMark },
+              { _tag: "open", pending: HashMap.set(s.pending, id, entry), nextId: id + 1, nextMark },
             ];
           });
           if (admission._tag === "rejected") {
             const error = admission.error;
             if (error._tag === "QueueFullError") {
-              yield* events.emit("warn", (env) =>
-                queueEvent({
-                  ...env,
-                  queue: "reader",
-                  depth: error.depth,
-                  cap,
-                  event: "rejected",
-                  dropped: 0,
-                }));
+              yield* events.emit(
+                "warn",
+                (env) =>
+                  queueEvent({
+                    ...env,
+                    queue: "reader",
+                    depth: error.depth,
+                    cap,
+                    event: "rejected",
+                    dropped: 0,
+                  }),
+                trace,
+              );
             }
             return yield* error;
           }
           const { id, depth } = admission;
           if (admission.marked) {
-            yield* events.emit("info", (env) =>
-              queueEvent({ ...env, queue: "reader", depth, cap, event: "high-water", dropped: 0 }));
+            yield* events.emit(
+              "info",
+              (env) => queueEvent({ ...env, queue: "reader", depth, cap, event: "high-water", dropped: 0 }),
+              trace,
+            );
           }
-          const encoded = encodeFrame({ ...request, id });
+          const encoded = encodeFrame({ ...withoutTrace(request), ...trace, id });
           if (Either.isLeft(encoded)) {
             yield* take(id);
             return yield* encoded.left;
@@ -459,8 +536,9 @@ export function makeReaderConnection(
           // still sees the call through; an interruptible one interrupts it via `ensuring`.
           const reply = yield* Effect.forkDaemon(Effect.interruptible(awaitReply));
           return yield* restore(Fiber.join(reply)).pipe(
-            // Timeout, interruption and success all leave the map without this id and no fiber.
-            Effect.ensuring(Effect.zipRight(take(id), Fiber.interrupt(reply))),
+            // Timeout, interruption and success all leave the map without this id and no fiber. An
+            // entry still here was abandoned (no reply yet): remember its trace for a late reply.
+            Effect.ensuring(Effect.zipRight(takeAbandoned(id), Fiber.interrupt(reply))),
           );
         })
       );
@@ -479,6 +557,39 @@ export function ReaderClientLive(options: ReaderClientOptions): Layer.Layer<Read
 // ---------------------------------------------------------------------------
 // Wire helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * The trace properties a call's frame carries, from the request's explicit ones and the calling
+ * fiber's context (`current`), with `freshSpanId` as the reader span's id when none is given:
+ *
+ * - The trace is the request's valid `traceId`, else the caller's; with neither, the frame carries
+ *   no trace properties at all (a legacy frame — the reader applies its local fallback).
+ * - `spanId` is the request's valid one, else `freshSpanId`: the parent names the reader's span, so
+ *   both processes can refer to it.
+ * - `parentSpanId` is the request's valid one, else the caller's current span when the trace is the
+ *   caller's own trace.
+ *
+ * An explicit property that is not a `TRACE_TOKEN` is dropped, not sent: the reader would ignore it.
+ */
+export function outgoingTrace(
+  request: ReaderTraceContext,
+  current: TraceContext | undefined,
+  freshSpanId: string,
+): ReaderTraceContext {
+  const valid = (value: string | undefined) => (isTraceToken(value) ? value : undefined);
+  const traceId = valid(request.traceId) ?? current?.traceId;
+  if (traceId === undefined) return {};
+  const spanId = valid(request.spanId) ?? freshSpanId;
+  const parentSpanId = valid(request.parentSpanId) ??
+    (current?.traceId === traceId ? current.spanId : undefined);
+  return parentSpanId === undefined ? { traceId, spanId } : { traceId, spanId, parentSpanId };
+}
+
+/** `request` without its trace properties, which `outgoingTrace` decides. */
+function withoutTrace(request: ReaderRequest): ReaderRequest {
+  const { traceId: _traceId, spanId: _spanId, parentSpanId: _parentSpanId, ...rest } = request;
+  return rest as ReaderRequest;
+}
 
 function defaultMarks(cap: number): number[] {
   return [...new Set([0.1, 0.25, 0.5, 0.75, 0.9, 1].map((f) => Math.max(1, Math.ceil(f * cap))))];
@@ -585,9 +696,13 @@ function withMessage<E extends Error>(error: E, message: string): E {
 // Events
 // ---------------------------------------------------------------------------
 
+/**
+ * Emits events under the connection's own trace id, or under `trace` — a call's context — when it
+ * carries one.
+ */
 function eventEmitter(sink: EventSinkService, role: Role, traceId: string) {
   return {
-    emit: (level: Level, build: (envelope: EventEnvelope) => EventRecord) =>
+    emit: (level: Level, build: (envelope: EventEnvelope) => EventRecord, trace?: ReaderTraceContext) =>
       Effect.flatMap(Clock.currentTimeMillis, (ms) =>
         sink.emit(build({
           eventId: crypto.randomUUID(),
@@ -595,7 +710,7 @@ function eventEmitter(sink: EventSinkService, role: Role, traceId: string) {
           level,
           role,
           pid: Deno.pid,
-          traceId,
+          ...(trace?.traceId === undefined ? { traceId } : trace as ReaderTraceContext & { traceId: string }),
         }))),
   };
 }

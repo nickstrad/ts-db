@@ -99,26 +99,55 @@ export type Row = Readonly<Record<string, unknown>>;
 export type ReaderRequestId = number;
 
 /**
+ * The caller's trace context, carried beside any request (item 34). Every property is optional, and
+ * a frame without them — what every sender before item 34 wrote — is still valid: the reader then
+ * runs the request under its local fallback trace `reader-<pid>-<id>`.
+ *
+ * - `traceId` — the caller's trace. The reader never replaces a valid one.
+ * - `spanId` — the span the reader request runs as; the parent assigns it so both processes can name it.
+ * - `parentSpanId` — the caller's span that issued the request.
+ *
+ * Each must be a `TRACE_TOKEN` (1–128 of `[A-Za-z0-9._:-]`, `platform/reader_context.ts`). The
+ * reader validates them as unknown JSON *before* narrowing to this type and ignores an invalid one
+ * (logged as `ignoredTraceFields`), so on the receiving side these properties are untrusted until
+ * `readTraceContext` has read them. `spanId`/`parentSpanId` without a `traceId` are ignored.
+ *
+ * `ReaderClientLive` (`platform/ipc.ts`) fills absent properties from the calling fiber's trace
+ * context when the call is submitted; explicit values here take precedence.
+ */
+export interface ReaderTraceContext {
+  readonly traceId?: string;
+  readonly spanId?: string;
+  readonly parentSpanId?: string;
+}
+
+/**
  * What the parent may ask the reader process to do. The reader owns DuckDB, so both the event-log
  * ingest (item 21) and the analysis catalog (item 23) are reached through this protocol rather than
  * by opening DuckDB in the writer process — see ADR 0001.
  */
 export type ReaderRequest =
-  | { readonly kind: "ping" }
-  | {
-    readonly kind: "query";
-    readonly appId: string;
-    readonly name: string;
-    readonly args: unknown;
-  }
-  | { readonly kind: "ingest" }
-  | {
-    readonly kind: "analysis";
-    readonly name: string;
-    readonly params: Readonly<Record<string, unknown>>;
-  };
+  & (
+    | { readonly kind: "ping" }
+    | {
+      readonly kind: "query";
+      readonly appId: string;
+      readonly name: string;
+      readonly args: unknown;
+    }
+    | { readonly kind: "ingest" }
+    | {
+      readonly kind: "analysis";
+      readonly name: string;
+      readonly params: Readonly<Record<string, unknown>>;
+    }
+  )
+  & ReaderTraceContext;
 
-/** A request as it appears on the wire: one JSON object per line, correlation id included. */
+/**
+ * A request as it appears on the wire: one JSON object per line, correlation id included. The `id`
+ * pairs a reply with its call on one connection; it is a correlation id, never a trace id.
+ */
 export type ReaderRequestFrame = ReaderRequest & { readonly id: ReaderRequestId };
 
 /**
