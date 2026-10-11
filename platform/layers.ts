@@ -77,7 +77,7 @@ import { TenantRegistryLazy } from "./tenants/store.ts";
 import { LocalFolderRouter, TenantStorageRouter } from "./tenants/routing.ts";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Cause, Context, Duration, Effect, Exit, Layer } from "effect";
+import { Cause, Context, Deferred, Duration, Effect, Exit, Layer, Ref, Scope } from "effect";
 import { StorageError } from "../core/errors.ts";
 import { lifecycleEvent } from "../core/events.ts";
 import { BackupsLive } from "./backup.ts";
@@ -85,7 +85,7 @@ import { ConfigLive } from "./config.ts";
 // Type-only, on purpose: see "The reader process root" above.
 import type { EventLogIngestLive } from "./eventlog/ingest.ts";
 import type { StagedLine } from "./eventlog/tables.ts";
-import { makeReaderConnection } from "./ipc.ts";
+import { makeReaderConnection, type ReaderConnection } from "./ipc.ts";
 import { LoggingLive } from "./logging/logger.ts";
 import { ObjectStoreLive } from "./object_store.ts";
 import { AppRegistryLive, AppServices, type AppStack, makeAppServices } from "./registry.ts";
@@ -97,6 +97,7 @@ import {
   EventSink,
   type EventSinkService,
   ReaderClient,
+  type ReaderClientService,
   Storage,
   TenantRegistry,
 } from "./services.ts";
@@ -245,10 +246,13 @@ export const AppServicesLive = makeAppServicesLive();
 
 /** The reader child as a process: what the server watches besides the calls it makes. */
 export interface ReaderProcessService {
+  /** The current reader child's pid; changes across restarts. */
   readonly pid: number;
   /**
-   * Completes when the child exits, for any reason — its own death, a kill, or this scope's
-   * shutdown. The server treats an exit while it is serving as fatal (`platform/server.ts`).
+   * Completes only when the supervisor gives up restarting the child (circuit breaker tripped).
+   * An unexpected child death while serving is *not* fatal: the supervisor respawns the child
+   * (`reader-restarting` / `reader-restarted` lifecycle events) and the server keeps serving.
+   * The server treats this completing as fatal (`platform/server.ts`), as before.
    */
   readonly exited: Effect.Effect<Deno.CommandStatus>;
 }
@@ -257,23 +261,130 @@ export class ReaderProcess
   extends Context.Tag("ts-db/ReaderProcess")<ReaderProcess, ReaderProcessService>() {}
 
 /**
- * `ReaderClient` over one scoped child running the reader module, with the per-call deadline from
- * `READER_CALL_TIMEOUT_MS`, plus `ReaderProcess` for the same child. The child inherits this
- * process's environment, which `ConfigLive` has already decoded, so both processes read one
+ * `ReaderClient` over a supervised child running the reader module, with the per-call deadline
+ * from `READER_CALL_TIMEOUT_MS`, plus `ReaderProcess` for the current child. The child inherits
+ * this process's environment, which `ConfigLive` has already decoded, so both processes read one
  * configuration.
+ *
+ * Supervision (segfault mitigation): if the child exits unexpectedly while the server is serving,
+ * a supervisor fiber respawns it with backoff instead of failing the server. `ReaderClient.call`
+ * always goes through the current connection, so calls made during the restart window fail with
+ * `ReaderExitedError` (HTTP 502) and resume on the new child once it answers its ready-ping.
+ * `ReaderProcess.exited` completes only when the supervisor gives up (more than 5 restarts within
+ * 10 minutes), at which point the server shuts down as it did before supervision.
  */
 export const ReaderClientConfigured: Layer.Layer<ReaderClient | ReaderProcess, never, Config | EventSink> =
   Layer.scopedContext(
     Effect.gen(function* () {
       const config = yield* Config;
-      const connection = yield* makeReaderConnection({
+      const sink = yield* EventSink;
+      const options = {
         module: READER_MODULE,
         callTimeout: Duration.millis(config.reader.callTimeoutMs),
-      });
-      const { child } = connection;
-      return Context.make(ReaderClient, { call: connection.call }).pipe(
-        Context.add(ReaderProcess, { pid: child.pid, exited: Effect.promise(() => child.status) }),
+      };
+
+      // The current connection, swapped for a fresh child on every restart. `call` always goes
+      // through the ref, so callers see the new child as soon as it answers its ping. Each
+      // connection lives in its own child scope so a restart can release the old one.
+      const initialScope = yield* Scope.make();
+      const initial = yield* Scope.extend(makeReaderConnection(options), initialScope);
+      const current = yield* Ref.make(initial);
+      const scopeRef = yield* Ref.make(initialScope);
+      const shuttingDown = yield* Ref.make(false);
+      const gaveUp = yield* Deferred.make<Deno.CommandStatus>();
+      let currentPid = initial.child.pid;
+
+      /**
+       * Spawn a child in a fresh scope and ping it. On success the caller owns the scope; on
+       * failure (or interruption) the scope is closed and nothing leaks.
+       */
+      const spawnReady = Effect.acquireUseRelease(
+        Scope.make(),
+        (scope) =>
+          Scope.extend(makeReaderConnection(options), scope).pipe(
+            Effect.flatMap((conn) => Effect.as(conn.call({ kind: "ping" }), { conn, scope })),
+          ),
+        (scope, exit) => (Exit.isSuccess(exit) ? Effect.void : Scope.close(scope, Exit.void)),
       );
+
+      const restartDelaysMs = [1000, 2000, 4000, 8000];
+      const maxRestarts = 5;
+      const restartWindowMs = 10 * 60 * 1000;
+
+      const supervise: Effect.Effect<void, never, EventSink> = Effect.gen(function* () {
+        const restarts: number[] = [];
+        while (true) {
+          const conn = yield* Ref.get(current);
+          const status = yield* Effect.promise(() => conn.child.status);
+          if (yield* Ref.get(shuttingDown)) return;
+
+          // The child died unexpectedly. Respawn with backoff, or give up.
+          let replacement: { conn: ReaderConnection; scope: Scope.CloseableScope } | undefined;
+          while (replacement === undefined) {
+            const now = Date.now();
+            while (restarts.length > 0 && now - restarts[0] > restartWindowMs) restarts.shift();
+            restarts.push(now);
+            const attempt = restarts.length;
+            if (attempt > maxRestarts) {
+              yield* emitServerLifecycle(sink, "reader-restart-abandoned", { attempts: attempt }, "error");
+              yield* Deferred.succeed(gaveUp, status);
+              return;
+            }
+            const backoffMs = restartDelaysMs[Math.min(attempt - 1, restartDelaysMs.length - 1)];
+            yield* emitServerLifecycle(
+              sink,
+              "reader-restarting",
+              { attempt, backoffMs, code: status.code, signal: status.signal ?? null },
+              "warn",
+            );
+            yield* Effect.sleep(Duration.millis(backoffMs));
+            if (yield* Ref.get(shuttingDown)) return;
+            const spawned = yield* Effect.either(spawnReady);
+            if (spawned._tag === "Right") replacement = spawned.right;
+          }
+
+          // Install the new child atomically: uninterruptible, so a shutdown racing the swap
+          // either sees the old child (and closes it via the finalizer) or the new one.
+          // If we are shutting down after all, close the replacement instead of installing it.
+          const install = yield* Effect.uninterruptible(
+            Effect.gen(function* () {
+              if (yield* Ref.get(shuttingDown)) {
+                yield* Scope.close(replacement.scope, Exit.void);
+                return false;
+              }
+              const oldScope = yield* Ref.getAndSet(scopeRef, replacement.scope);
+              yield* Ref.set(current, replacement.conn);
+              currentPid = replacement.conn.child.pid;
+              yield* emitServerLifecycle(sink, "reader-restarted", { pid: currentPid });
+              yield* Scope.close(oldScope, Exit.void);
+              return true;
+            }),
+          );
+          if (!install) return;
+        }
+      });
+
+      yield* Effect.forkScoped(supervise);
+      // Registered after the fork, so it runs before the fiber is interrupted on scope close
+      // (LIFO): stops the supervisor from starting a restart mid-shutdown, then releases the
+      // current child scope.
+      yield* Effect.addFinalizer(() =>
+        Effect.zipRight(
+          Ref.set(shuttingDown, true),
+          Effect.flatMap(Ref.get(scopeRef), (scope) => Scope.close(scope, Exit.void)),
+        )
+      );
+
+      const client: ReaderClientService = {
+        call: (request) => Effect.flatMap(Ref.get(current), (conn) => conn.call(request)),
+      };
+      const process: ReaderProcessService = {
+        get pid() {
+          return currentPid;
+        },
+        exited: Deferred.await(gaveUp),
+      };
+      return Context.make(ReaderClient, client).pipe(Context.add(ReaderProcess, process));
     }),
   );
 
