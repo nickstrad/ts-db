@@ -93,8 +93,8 @@ phases, in order:
    both the `*.github.md` (Mermaid) and `*.terminal.md` (box-drawing) versions; `render.py --check` must pass.
    Fix any drift found.
 2. **Tests**: run the full test suite; report the results (counts, failures).
-3. **Queries**: run the DuckDB analysis queries in `scripts/duckdb/` (and the item-23 analysis catalog) against
-   real ingested data. Add new queries or adjust stale ones so they reflect the latest architecture.
+3. **Queries**: run the DuckDB analysis queries in `scripts/duckdb/` (and the item-23 analysis catalog)
+   against real ingested data. Add new queries or adjust stale ones so they reflect the latest architecture.
 4. **Verdict**: identify concrete improvements, architectural refactorings, or changes that need to be made —
    with file-level specificity — or declare the architecture good to go, with the evidence for that call.
 

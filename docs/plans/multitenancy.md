@@ -112,14 +112,15 @@ only a `db-shell` convenience target.
 ### 2.4 New npm dependencies under the `deno.json` freeze
 
 MT-03 needs a Postgres driver (`postgres` or `pg` — pinned, choice justified in a code comment) and MT-08
-needs `better-auth`. The main plan's §2.2 freezes `deno.json` after item 01, so neither item may add import-map
-entries.
+needs `better-auth`. The main plan's §2.2 freezes `deno.json` after item 01, so neither item may add
+import-map entries.
 
-**Decision:** builders use **inline pinned `npm:` specifiers** (e.g. `import postgres from "npm:postgres@3.4.5"`)
-— exact versions, no ranges — which Deno resolves without touching `deno.json`. The resulting `deno.lock`
-entries are owned by the item that first introduces each package: **MT-03** owns the lock entries for the
-Postgres driver, **MT-08** owns the lock entries for `better-auth`; each item regenerates the lock (via the
-test run) and commits the lockfile delta in the same commit. Reviewers reject unpinned specifiers.
+**Decision:** builders use **inline pinned `npm:` specifiers** (e.g.
+`import postgres from "npm:postgres@3.4.5"`) — exact versions, no ranges — which Deno resolves without
+touching `deno.json`. The resulting `deno.lock` entries are owned by the item that first introduces each
+package: **MT-03** owns the lock entries for the Postgres driver, **MT-08** owns the lock entries for
+`better-auth`; each item regenerates the lock (via the test run) and commits the lockfile delta in the same
+commit. Reviewers reject unpinned specifiers.
 
 ## 3. Batch table
 
@@ -173,15 +174,16 @@ auth item landed, and item 27 documents it, so it can neither move earlier nor r
   `tests/unit/config_test.ts` (additive rows only — owned by main-plan item 08; listed here as an allowed
   edit).
 - **Reads:** `platform/config.ts` (options table).
-- **Work:** Add `tenancyMode` (env `TENANCY`, default `"off"`, validated against `off | api-key |
-  better-auth`), `databaseUrl` (default `postgres://tsdb:tsdb@localhost:5432/tsdb`), `tenantsDir` (default
-  `<dataDir>/tenants`), `tenantRouter` (default `"local"`; validated against the known router kinds —
-  `"local"` today, `"control-plane"` reserved for the future), `betterAuthSecret` (no default — required when
-  `tenancyMode` is `better-auth`), `betterAuthUrl` (default `http://localhost:3000`-style platform base URL).
-  Semantics: `off` = pre-tenancy behavior (single SQLite file, existing app-token auth) — MT-07's middleware
-  must be a no-op in this mode so the default app-token path keeps working; `api-key` = tenant API-key
-  resolution enforced on `/apps/*`; `better-auth` = session tokens accepted alongside API keys. Keep the README
-  section in sync (reviewer verifies parity, per the item-08 precedent).
+- **Work:** Add `tenancyMode` (env `TENANCY`, default `"off"`, validated against
+  `off | api-key |
+  better-auth`), `databaseUrl` (default `postgres://tsdb:tsdb@localhost:5432/tsdb`),
+  `tenantsDir` (default `<dataDir>/tenants`), `tenantRouter` (default `"local"`; validated against the known
+  router kinds — `"local"` today, `"control-plane"` reserved for the future), `betterAuthSecret` (no default —
+  required when `tenancyMode` is `better-auth`), `betterAuthUrl` (default `http://localhost:3000`-style
+  platform base URL). Semantics: `off` = pre-tenancy behavior (single SQLite file, existing app-token auth) —
+  MT-07's middleware must be a no-op in this mode so the default app-token path keeps working; `api-key` =
+  tenant API-key resolution enforced on `/apps/*`; `better-auth` = session tokens accepted alongside API keys.
+  Keep the README section in sync (reviewer verifies parity, per the item-08 precedent).
 - **Acceptance criteria:**
   - `ConfigLive` decodes the new options; missing `betterAuthSecret` fails with `ConfigError` only when
     `tenancyMode` is `better-auth`; an unknown `TENANCY` value fails with `ConfigError`.
@@ -220,8 +222,8 @@ auth item landed, and item 27 documents it, so it can neither move earlier nor r
   idle eviction).
 - **Owns:** `platform/tenants/routing.ts`, `platform/sqlite.ts` (additive),
   `tests/unit/tenant_routing_test.ts`, `platform/services.ts` (additive only: the `TenantStorageRouter`
-  `Context.Tag` appended to the tag-declaration section — disjoint from MT-03's `TenantRegistry` tag;
-  existing lines are never reordered so the concurrent MT-03 append merges cleanly).
+  `Context.Tag` appended to the tag-declaration section — disjoint from MT-03's `TenantRegistry` tag; existing
+  lines are never reordered so the concurrent MT-03 append merges cleanly).
 - **Reads:** `platform/sqlite.ts` (item 15).
 - **Work:**
   1. **Define the interface** in `routing.ts` — `TenantStorageRouter` as a `Context.Tag`, in the `services.ts`
@@ -315,9 +317,9 @@ auth item landed, and item 27 documents it, so it can neither move earlier nor r
 - **Model:** **Opus.** Auth is a security boundary; the spike needs judgment.
 - **Owns:** `platform/auth/*`, `scripts/auth.ts` (admin user commands), `platform/http/auth.ts` (additive:
   session-token branch in MT-07's middleware), `platform/http/router.ts` (additive: `/api/auth/*` mount — or
-  `platform/server.ts` if item 22 hasn't landed, builder checks; exactly one),
-  `platform/tenants/schema.sql` (additive only: `memberships(user_id, tenant_id, role)` table — disjoint from
-  MT-01's `tenants`/`api_keys` DDL).
+  `platform/server.ts` if item 22 hasn't landed, builder checks; exactly one), `platform/tenants/schema.sql`
+  (additive only: `memberships(user_id, tenant_id, role)` table — disjoint from MT-01's `tenants`/`api_keys`
+  DDL).
 - **Reads:** `platform/tenants/registry.ts`, MT-07's middleware, Better Auth docs.
 - **Work:**
   1. **SPIKE FIRST (go/no-go):** mount
