@@ -1,27 +1,12 @@
 /**
- * Request authentication (plan item 22, work 3): the per-app bearer token and the admin token, as
- * Effects failing with `AuthError` (→ 401 via `toHttpStatus`).
- *
- * This is the seam every routed request passes before its handler runs. A successful check yields a
- * `Principal`, and the router hands the handler nothing but that principal and the request — so a
- * later credential scheme (the multitenancy plan's MT-07 tenant API keys, MT-08 sessions) replaces
- * or extends `authenticateApp` and the principal it returns, and provides its `TenantContext` from
- * there, without touching routing or handlers.
- *
- * Behaviour kept from the pre-port server:
- * - The header must be exactly `Authorization: Bearer <token>`; anything else is a 401.
- * - App routes compare against the app's own token (`COLUMN_APP_TOKEN` / `JSON_APP_TOKEN`), admin
- *   routes against `ADMIN_TOKEN`. All three default to the documented `dev-only` token
- *   (README "Configuration"); `devTokensInUse` names the ones still on it, and `platform/server.ts`
- *   reports them at startup as one `lifecycle` warning, replacing the old unconditional stderr
- *   banner (item 08's hook, owned by item 22).
- *
- * New: comparison is constant-time in the token's bytes, and an `AuthError` never carries the
- * presented token — only which scope failed and why.
+ * Request authentication. TENANCY=off keeps legacy app tokens; enabled tenancy hashes
+ * API keys and provides request-local TenantContext. Admin credentials stay separate.
  */
-import { Effect } from "effect";
-import { AuthError } from "../../core/errors.ts";
-import type { App, ConfigService } from "../services.ts";
+import { Clock, Effect, Either } from "effect";
+import { AuthError, type StorageError, type TenantError } from "../../core/errors.ts";
+import { type App, Config, type ConfigService, TenantRegistry } from "../services.ts";
+import type { Tenant, TenantRegistryService } from "../tenants/registry.ts";
+import { TenantContext } from "../tenants/routing.ts";
 
 /** The documented default for every token (`platform/config.ts`). */
 export const DEV_TOKEN = "dev-only";
@@ -99,4 +84,128 @@ export function devTokensInUse(config: ConfigService): readonly string[] {
     if (app.token === DEV_TOKEN) inUse.push(`token for ${app.id}`);
   }
   return inUse;
+}
+
+/**
+ * Scope-owned key cache. Only SHA-256 hashes enter this service. Expiry is fixed at the
+ * start of each lookup, never extended on a hit; both successful and negative lookups
+ * count toward the bound. Driver failures are never cached. Other server instances see
+ * revocation/deactivation within one TTL. Local mutations invalidate even on failure
+ * (a connection can fail after the database commits).
+ */
+export const makeCachedTenantRegistry = (
+  registry: TenantRegistryService,
+  ttlMs: number,
+  capacity = 1024,
+): Effect.Effect<TenantRegistryService> =>
+  Effect.gen(function* () {
+    if (
+      !Number.isSafeInteger(ttlMs) || ttlMs <= 0 || ttlMs > 300_000 ||
+      !Number.isSafeInteger(capacity) || capacity <= 0
+    ) {
+      return yield* Effect.die(new Error("Invalid tenant key cache limits"));
+    }
+    const clock = yield* Effect.clock;
+    const lock = yield* Effect.makeSemaphore(1);
+    const entries = new Map<string, {
+      expires: number;
+      result: Either.Either<Tenant, TenantError>;
+    }>();
+    const invalidate = Effect.sync(() => entries.clear());
+    const change = <A, E>(effect: Effect.Effect<A, E>) =>
+      lock.withPermits(1)(effect.pipe(Effect.ensuring(invalidate)));
+    return {
+      ...registry,
+      updateTenant: (id, patch) => change(registry.updateTenant(id, patch)),
+      deactivateTenant: (id) => change(registry.deactivateTenant(id)),
+      revokeApiKey: (id, tenantId) => change(registry.revokeApiKey(id, tenantId)),
+      issueApiKey: (id, name) => change(registry.issueApiKey(id, name)),
+      resolveTenantByKeyHash: (hash) =>
+        lock.withPermits(1)(Effect.gen(function* () {
+          const now = clock.unsafeCurrentTimeMillis();
+          const cached = entries.get(hash);
+          if (cached && now < cached.expires) return yield* cached.result;
+          entries.delete(hash);
+          const result = yield* registry.resolveTenantByKeyHash(hash).pipe(
+            Effect.map((tenant) => Either.right(tenant)),
+            Effect.catchIf(
+              (error): error is TenantError => error._tag !== "StorageError",
+              (error) => Effect.succeed(Either.left(error)),
+            ),
+          );
+          if (entries.size >= capacity) entries.delete(entries.keys().next().value!);
+          entries.set(hash, { expires: now + ttlMs, result });
+          return yield* result;
+        })),
+    };
+  });
+
+// One constant-size rate limiter per scope-owned registry, no caller-controlled log content.
+const warningTimes = new WeakMap<TenantRegistryService, number>();
+function warnTenantIdentity(registry: TenantRegistryService): Effect.Effect<void> {
+  return Effect.gen(function* () {
+    const now = yield* Clock.currentTimeMillis;
+    if (now < (warningTimes.get(registry) ?? -Infinity)) return;
+    warningTimes.set(registry, now + 60_000);
+    yield* Effect.logWarning("Ignored client-supplied tenant identity; credentials determine tenant");
+  });
+}
+
+/** Never passes the plaintext key to the registry or includes it in an error/log. */
+export function resolveRequestTenant(headers: Headers, appId: string) {
+  return Effect.gen(function* () {
+    const registry = yield* TenantRegistry;
+    if (headers.has("x-tenant-id")) yield* warnTenantIdentity(registry);
+    const presented = bearerToken(headers);
+    const fail = (reason: AuthError["reason"]) => new AuthError({ scope: "app", appId, reason });
+    if (presented._tag !== "token") return yield* fail(presented._tag);
+    if (!/^[^\s]+$/.test(presented.token)) return yield* fail("malformed");
+    const hash = yield* Effect.promise(async () => {
+      const digest = await crypto.subtle.digest("SHA-256", encoder.encode(presented.token));
+      return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+    });
+    const tenant = yield* registry.resolveTenantByKeyHash(hash).pipe(
+      Effect.catchIf((error) => error._tag !== "StorageError", () => Effect.fail(fail("mismatch"))),
+    );
+    if (tenant.status !== "active") return yield* fail("mismatch");
+    return tenant.id;
+  });
+}
+
+/**
+ * Authenticate before reading the body; provide tenant context only to this request's
+ * continuation. TENANCY=off preserves the legacy app-token path and body unchanged.
+ * Body identity fields are ignored, not forwarded as application arguments.
+ */
+export function withAppAuthentication<A, E, R, E2, R2>(
+  headers: Headers,
+  app: App,
+  body: Effect.Effect<unknown, E2, R2>,
+  run: (args: unknown) => Effect.Effect<A, E, R>,
+): Effect.Effect<
+  A,
+  E | E2 | AuthError | StorageError | TenantError,
+  R | R2 | Config | TenantRegistry
+> {
+  return Effect.gen(function* () {
+    const config = yield* Config;
+    if (config.tenancy.mode === "off") {
+      yield* authenticateApp(headers, app);
+      return yield* Effect.flatMap(body, run);
+    }
+    const tenantId = yield* resolveRequestTenant(headers, app.id);
+    return yield* Effect.gen(function* () {
+      const args = yield* body;
+      if (args !== null && typeof args === "object" && !Array.isArray(args)) {
+        const fields = ["tenant", "tenantId", "tenant_id"];
+        if (fields.some((field) => Object.hasOwn(args, field))) {
+          yield* warnTenantIdentity(yield* TenantRegistry);
+          return yield* run(
+            Object.fromEntries(Object.entries(args).filter(([key]) => !fields.includes(key))),
+          );
+        }
+      }
+      return yield* run(args);
+    }).pipe(Effect.provideService(TenantContext, { tenantId }));
+  });
 }

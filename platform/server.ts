@@ -58,7 +58,6 @@
  */
 import {
   Cause,
-  Context,
   Data,
   Deferred,
   Duration,
@@ -75,9 +74,8 @@ import { fromPlatformError } from "../core/events.ts";
 import { devTokensInUse } from "./http/auth.ts";
 import { handle, type RouterRequirements } from "./http/router.ts";
 import { type AfterStep, emitServerLifecycle, makePlatformLive, ReaderProcess } from "./layers.ts";
-import { TenantRegistryLazy } from "./tenants/store.ts";
 import { AppServices } from "./registry.ts";
-import { Config, EventSink, ReaderClient, TenantRegistry } from "./services.ts";
+import { Config, EventSink, ReaderClient } from "./services.ts";
 
 /**
  * The HTTP listener could not bind (`Deno.serve` threw: the port is taken, the address is not
@@ -196,12 +194,7 @@ const backupTimer = Effect.gen(function* () {
 const listen = Effect.gen(function* () {
   const { server: settings } = yield* Config;
   const sink = yield* EventSink;
-  const tenants = Context.get(yield* Layer.build(TenantRegistryLazy), TenantRegistry);
-  const run = Runtime.runPromise(
-    yield* Effect.runtime<RouterRequirements>().pipe(
-      Effect.provideService(TenantRegistry, tenants),
-    ),
-  );
+  const run = Runtime.runPromise(yield* Effect.runtime<RouterRequirements>());
   const internalError = () =>
     Response.json({ error: { tag: "Defect", message: "internal error" } }, { status: 500 });
   return yield* Effect.acquireRelease(
