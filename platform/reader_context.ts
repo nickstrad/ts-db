@@ -1,7 +1,10 @@
 /**
  * Request reception for the reader process (plan item 33): one stdin line becomes a validated
  * `ReaderRequestFrame` plus the caller's trace context, and that context annotates the request's
- * Effect so every log record and event the request produces carries it.
+ * Effect so every log record the request produces carries it. Events carry less: a query's `sql`
+ * and `tx` events take its `traceId` (not its `spanId`); ingest and seal events use
+ * `ingest-<runId>`, retention events `retention-<uuid>`, lifecycle events `reader-lifecycle`.
+ * Threading the context into those is item 34's.
  *
  * ## Wire properties
  *
@@ -14,7 +17,8 @@
  * Each value must match `TRACE_TOKEN` — the same bound the HTTP ingress applies to `X-Trace-Id`
  * (`platform/http/router.ts`). A missing value is normal (an old sender); an invalid one is ignored,
  * never a protocol violation: a bad trace must not end the process that serves every query. Ignored
- * fields are listed in the request's `ignoredTraceFields` annotation.
+ * fields — invalid ones, and valid spans dropped for want of a trace (below) — are listed in the
+ * request's `ignoredTraceFields` annotation.
  *
  * ## Resolution
  *
@@ -148,17 +152,30 @@ export function resolveRequestContext(
   });
 }
 
+/**
+ * The trace fields the log names as unused: the invalid ones, plus any valid `spanId` /
+ * `parentSpanId` that a missing trace left unplaceable, so the log still shows the caller sent them.
+ */
+function unusedTraceFields(trace: WireTraceContext, context: RequestContext): readonly TraceField[] {
+  if (context.origin === "caller") return context.ignored;
+  return TRACE_FIELDS.filter((field) =>
+    context.ignored.includes(field) || (field !== "traceId" && trace[field] !== undefined)
+  );
+}
+
 /** The log annotations one request carries: its context, plus the app for a query. */
 export function requestAnnotations(
-  frame: ReaderRequestFrame,
+  received: ReceivedRequest,
   context: RequestContext,
 ): Record<string, unknown> {
+  const { frame, trace } = received;
+  const unused = unusedTraceFields(trace, context);
   return {
     traceId: context.traceId,
     spanId: context.spanId,
     ...(context.parentSpanId === undefined ? {} : { parentSpanId: context.parentSpanId }),
     traceOrigin: context.origin,
-    ...(context.ignored.length === 0 ? {} : { ignoredTraceFields: context.ignored }),
+    ...(unused.length === 0 ? {} : { ignoredTraceFields: unused }),
     ...(frame.kind === "query" ? { appId: frame.appId } : {}),
   };
 }
@@ -171,6 +188,6 @@ export function withRequestContext<A, E, R>(
 ): Effect.Effect<A, E, R | IdGen> {
   return Effect.flatMap(
     resolveRequestContext(received, pid),
-    (context) => Effect.annotateLogs(effect, requestAnnotations(received.frame, context)),
+    (context) => Effect.annotateLogs(effect, requestAnnotations(received, context)),
   );
 }

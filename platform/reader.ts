@@ -99,8 +99,10 @@ function toFrame(error: RemoteReaderError): ReaderErrorFrame {
  * `ReaderError.operation` is a closed union (`core/errors.ts`) with no label for "the reply could
  * not be encoded" or "the handler died": every `ReaderError` this process raises outside the
  * transaction steps is attributed to the query itself, `"select"`, and `detail` says what really
- * happened (`handler defect: …`, `unencodable reply: …`). Both are bug-class failures that were
- * already logged in full; a dedicated label needs a `core/errors.ts` change.
+ * happened (`handler defect: …`, `unencodable reply: …`). That includes a defect in an `ingest` or
+ * `ping` request, which is no query at all: the defect handler is shared by every request kind. All
+ * of these are bug-class failures that were already logged in full; a dedicated label needs a
+ * `core/errors.ts` change.
  */
 const QUERY_OPERATION = "select" as const;
 

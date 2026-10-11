@@ -49,9 +49,9 @@
 import { join } from "node:path";
 import { Cause, Duration, Effect, ExecutionStrategy, Exit, Layer, Option, Scope } from "effect";
 import type { ConfigError, IngestError } from "../core/errors.ts";
-import { lifecycleEvent } from "../core/events.ts";
 import { compareSourceFiles, parseSourceFile, type SourceFile } from "../core/eventlog/offsets.ts";
 import { ConfigLive } from "./config.ts";
+import { emitLifecycle } from "./duckdb.ts";
 import {
   type EventLogDriver,
   type IngestThenSweepReport,
@@ -59,30 +59,7 @@ import {
   type RetentionCoordinatorOptions,
 } from "./eventlog/ingest.ts";
 import { LoggingReaderLive } from "./logging/logger.ts";
-import { Config, EventLogIngest, EventSink, type EventSinkService, IdGen } from "./services.ts";
-
-/** A `lifecycle` event from the reader process, outside any request. */
-export function emitReaderLifecycle(
-  sink: EventSinkService,
-  phase: string,
-  detail?: unknown,
-  level: "info" | "warn" | "error" = "info",
-): Effect.Effect<void> {
-  return Effect.flatMap(
-    Effect.clockWith((clock) => clock.currentTimeMillis),
-    (ms) =>
-      sink.emit(lifecycleEvent({
-        eventId: crypto.randomUUID(),
-        ts: new Date(ms).toISOString(),
-        level,
-        role: "reader",
-        pid: Deno.pid,
-        traceId: "reader-lifecycle",
-        phase,
-        ...(detail === undefined ? {} : { detail }),
-      })),
-  );
-}
+import { Config, EventLogIngest, EventSink, IdGen } from "./services.ts";
 
 /**
  * The reader's own `IdGen`. `IdGenLive` lives in `platform/sqlite.ts`, which loads `node:sqlite`
@@ -153,7 +130,7 @@ export function makeReaderEventLog(
       // Added first, so it runs last: after the connection and then the instance have closed.
       yield* Scope.addFinalizer(
         scope,
-        Effect.suspend(() => opened ? emitReaderLifecycle(sink, "eventlog-closed", { path }) : Effect.void),
+        Effect.suspend(() => opened ? emitLifecycle(sink, "eventlog-closed", { path }) : Effect.void),
       );
       const exit = yield* Effect.exit(
         Scope.extend(
@@ -166,7 +143,7 @@ export function makeReaderEventLog(
         return yield* exit;
       }
       opened = true;
-      yield* emitReaderLifecycle(sink, "eventlog-opened", { path });
+      yield* emitLifecycle(sink, "eventlog-opened", { path });
       return exit.value;
     });
 
@@ -179,7 +156,7 @@ export function makeReaderEventLog(
         Effect.tapErrorCause((cause) =>
           Effect.zipRight(
             invalidate,
-            emitReaderLifecycle(sink, "eventlog-open-failed", {
+            emitLifecycle(sink, "eventlog-open-failed", {
               path,
               ...Option.match(Cause.failureOption(cause), {
                 onNone: () => ({ defect: Cause.pretty(cause) }),
