@@ -6,29 +6,34 @@
  * closing the scope releases them in exactly the reverse order:
  *
  * ```text
+ * main          signal listeners
  * PlatformLive  Config → logging → shutdown marker → IdGen → ObjectStore, AppRegistry
  *               → per-app Storage + Backups → ReaderClient (child process)      (platform/layers.ts)
- * program       signal listeners → backup fiber → HTTP listener
+ * program       backup fiber → HTTP listener
  *
- * shutdown:     HTTP drain → backup fiber → signal listeners → reader child → DB handles
- *               → `lifecycle` shutdown event → log drain + close
+ * shutdown:     HTTP drain → backup fiber → reader child → DB handles
+ *               → `lifecycle` shutdown event → log drain + close → signal listeners
  * ```
  *
  * - **HTTP drain first.** `server.shutdown()` stops accepting and waits for in-flight requests, so a
  *   mutation that was admitted completes (or rolls back on its own failure) against a still-open
  *   database before anything below it closes. The storage finalizer additionally waits for its
- *   writer queue to drain.
- * - **Signals interrupt the root fiber.** SIGINT/SIGTERM complete a `Deferred`; the program emits a
- *   `lifecycle` `stopping` event naming the signal and then interrupts itself, which closes the scope.
- *   The listeners stay installed until the scope has nearly closed, so a second signal during
- *   shutdown cannot kill the process half-way.
+ *   writer queue to drain. The reader child runs in its own process group (`platform/ipc.ts`), so a
+ *   group signal (Ctrl-C, a systemd stop) reaches only this process and cannot stop the reader
+ *   ahead of the drain.
+ * - **Signals interrupt the root fiber.** SIGINT/SIGTERM complete a `Deferred`. Once serving, the
+ *   program emits a `lifecycle` `stopping` event naming the signal and then interrupts itself, which
+ *   closes the scope. The listeners are installed before `PlatformLive` builds, and a signal while it
+ *   builds or while the startup ping waits interrupts startup at once (releasing whatever was
+ *   acquired, log included). They are removed last, so a second signal during shutdown cannot kill
+ *   the process half-way.
  * - **The log flushes last.** The `lifecycle` `shutdown` event is emitted by a finalizer that sits
  *   directly above the logging layer, so it is the final line of the server's log file.
  *
  * Only a failure to *start* (bad configuration, schema drift, a reader that will not answer) reaches
  * stderr, because the event log may not exist yet; the process then exits 1.
  */
-import { Cause, Deferred, Duration, Effect, Exit, Option, Runtime, Schedule } from "effect";
+import { Cause, Deferred, Duration, Effect, Exit, Layer, Option, Runtime, Schedule } from "effect";
 import type { AnyError } from "../core/errors.ts";
 import { fromPlatformError } from "../core/events.ts";
 import { devTokensInUse } from "./http/auth.ts";
@@ -109,38 +114,59 @@ const listen = Effect.gen(function* () {
   return server;
 });
 
-const program = Effect.gen(function* () {
-  const signals = yield* signalHandlers;
-  const sink = yield* EventSink;
-  const config = yield* Config;
+const program = (signal: Deferred.Deferred<Deno.Signal>) =>
+  Effect.gen(function* () {
+    const sink = yield* EventSink;
+    const config = yield* Config;
 
-  const devTokens = devTokensInUse(config);
-  if (devTokens.length > 0) {
-    yield* emitServerLifecycle(sink, "config", {
-      message: "default dev-only token in use",
-      tokens: devTokens,
-      note: "Local/trusted-app MVP: set these before exposing this server.",
-    }, "warn");
-  }
+    const devTokens = devTokensInUse(config);
+    if (devTokens.length > 0) {
+      yield* emitServerLifecycle(sink, "config", {
+        message: "default dev-only token in use",
+        tokens: devTokens,
+        note: "Local/trusted-app MVP: set these before exposing this server.",
+      }, "warn");
+    }
 
-  // The reader must answer before the server takes traffic, as before the port.
-  yield* (yield* ReaderClient).call({ kind: "ping" });
-  yield* backupTimer;
-  const server = yield* listen;
-  yield* emitServerLifecycle(sink, "ready", {
-    hostname: server.addr.hostname,
-    port: server.addr.port,
-    apps: (yield* AppServices).all.map((stack) => stack.app.id),
-    backupIntervalMs: config.backup.intervalMs,
+    // The reader must answer before the server takes traffic, as before the port. A signal while it
+    // has not yet answered stops startup instead of waiting out the call timeout.
+    yield* Effect.raceFirst(
+      (yield* ReaderClient).call({ kind: "ping" }),
+      Effect.flatMap(Deferred.await(signal), (reason) =>
+        Effect.zipRight(emitServerLifecycle(sink, "stopping", { reason }), Effect.interrupt)),
+    );
+    yield* backupTimer;
+    const server = yield* listen;
+    yield* emitServerLifecycle(sink, "ready", {
+      hostname: server.addr.hostname,
+      port: server.addr.port,
+      apps: (yield* AppServices).all.map((stack) =>
+        stack.app.id
+      ),
+      backupIntervalMs: config.backup.intervalMs,
+    });
+
+    const reason = yield* Effect.raceFirst(
+      Deferred.await(signal),
+      Effect.as(Effect.promise(() => server.finished), "listener-closed"),
+    );
+    yield* emitServerLifecycle(sink, "stopping", { reason });
+    return yield* Effect.interrupt;
   });
 
-  const reason = yield* Effect.raceFirst(
-    Deferred.await(signals.received),
-    Effect.as(Effect.promise(() => server.finished), "listener-closed"),
+/**
+ * The root: signal listeners first, then `PlatformLive` and the program, all in one scope. A signal
+ * during the layer build interrupts it; the build's finalizers are already in the scope, so what was
+ * acquired is released in order and the log drains.
+ */
+const main = Effect.scoped(Effect.gen(function* () {
+  const { received } = yield* signalHandlers;
+  const context = yield* Effect.raceFirst(
+    Layer.build(PlatformLive),
+    Effect.zipRight(Deferred.await(received), Effect.interrupt),
   );
-  yield* emitServerLifecycle(sink, "stopping", { reason });
-  return yield* Effect.interrupt;
-});
+  return yield* Effect.provide(program(received), context);
+}));
 
 /** A startup failure as one line: the tag and its payload, or the rendered cause. */
 function describeFailure(cause: Cause.Cause<unknown>): string {
@@ -157,7 +183,7 @@ function describeFailure(cause: Cause.Cause<unknown>): string {
 }
 
 if (import.meta.main) {
-  const exit = await Effect.runPromiseExit(program.pipe(Effect.scoped, Effect.provide(PlatformLive)));
+  const exit = await Effect.runPromiseExit(main);
   if (Exit.isFailure(exit) && !Cause.isInterruptedOnly(exit.cause)) {
     Deno.stderr.writeSync(new TextEncoder().encode(`ts-db server failed: ${describeFailure(exit.cause)}\n`));
     Deno.exit(1);

@@ -7,7 +7,10 @@
  *
  * 1. The child process, under `Effect.acquireRelease`. Release closes stdin, waits up to
  *    `shutdownTimeout` for a graceful exit, then sends SIGTERM, waits again, then SIGKILL; it
- *    always awaits `child.status`, so closing the scope never leaves a stray process.
+ *    always awaits `child.status`, so closing the scope never leaves a stray process. The child
+ *    runs in its own session (`detached`), so a signal sent to the parent's process group (Ctrl-C,
+ *    `kill -INT -<pgid>`) does not reach it: this scope alone decides when it stops, after
+ *    everything acquired later has released.
  * 2. One `forkScoped` writer fiber draining a `Queue` of request frames into stdin — the only
  *    writer, which is what keeps lines whole without a promise chain.
  * 3. One `forkScoped` receiver fiber decoding stdout with the pure `core/ipc/framing.ts` decoder
@@ -275,6 +278,8 @@ export function makeReaderConnection(
           stdin: "piped",
           stdout: "piped",
           stderr: "inherit",
+          // Own process group: group signals stop the parent, which then stops the child in order.
+          detached: true,
         }).spawn();
         return {
           child,
