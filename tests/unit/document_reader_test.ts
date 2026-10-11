@@ -110,8 +110,16 @@ test("document execution is capped, queued reads are interruptible, and health p
           assert.ok(maximum > 1, "execution was accidentally serialized");
           assert.ok(maximum <= DOCUMENT_READ_CONCURRENCY_CAP);
           assert.equal(active, 0);
-          assert.equal(entered, 100, "cancelled waiter executed after permits were released");
+          assert.equal(entered, 100, "cancelled waiter never entered the handler");
           assert.deepEqual(yield* client.call(request), { id: "game-1" });
+          // Second full wave: proves permits and admission slots fully recovered
+          // after the cancellation above (a leaked `pending` slot would fail here).
+          const wave2 = yield* Effect.all(
+            Array.from({ length: 100 }, () => client.call(request)),
+            { concurrency: "unbounded" },
+          );
+          assert.equal(wave2.length, 100);
+          assert.ok(wave2.every((result) => (result as { id: string }).id === "game-1"));
         }).pipe(Effect.provide(AppRegistryTest([app])));
       })).pipe(
         Effect.provide(ConfigTest({ reader: { callTimeoutMs: 5000 } })),
