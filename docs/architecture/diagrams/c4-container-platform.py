@@ -30,18 +30,18 @@ server_bottom = cv.box(row, 3, 30, [
     "",
     "platform/server.ts",
     "HTTP API, auth, mutation",
-    "handlers, one SQLite",
-    "writer per app, backup",
-    "fiber. No DuckDB.",
+    "handlers, SQLite writer",
+    "per app, backup fiber,",
+    "ingest timer. No DuckDB.",
 ], bottom=(3, 14), right=(3,))
 reader_bottom = cv.box(row, 40, 30, [
     "Reader process",
     "[Deno child process]",
     "",
     "platform/reader.ts",
-    "query handlers + DuckDB",
-    "with the sqlite extension.",
-    "Effect program (item 16).",
+    "query handlers + DuckDB,",
+    "event-log ingest. Root:",
+    "reader_layers.ts (33).",
     "Never imports node:sqlite.",
 ], bottom=(14,))
 cv.right(row + 3, 33, 39, "(2)")

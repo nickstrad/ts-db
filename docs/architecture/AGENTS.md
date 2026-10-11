@@ -65,19 +65,26 @@ Both files for one diagram share the stem exactly, so `ls docs/architecture/` pa
 
 ## 3. Marking what is not built yet
 
-This repo is mid-way through the Effect-TS port in
-[`docs/plans/effect-port-and-observability.md`](../plans/effect-port-and-observability.md). The diagrams draw
-the **target** architecture from that plan, so most of them contain elements that do not exist in the source
-tree yet. Those must be unmistakable:
+The diagrams draw the **current** tree, so that a reader can trust a solid box. This repo is mid-way through
+the Effect-TS port in
+[`docs/plans/effect-port-and-observability.md`](../plans/effect-port-and-observability.md); a target view is
+allowed only as an explicitly labelled element or edge inside a current diagram. Anything that does not exist
+on `main` must be unmistakable:
 
-- The literal word **`(planned)`** in the element's label, or a plan item reference (`(item 15)`), which means
-  the same thing — if the item has not landed on `main`, it is planned.
+- The literal word **`(planned)`** or **`[planned]`** in the element's label, with the plan item reference
+  (`(item 23)`) if the item has not landed on `main`.
 - In the Mermaid format: the `planned` CSS class (dashed stroke), declared in every diagram as
-  `classDef planned stroke-dasharray: 5 3`.
+  `classDef planned stroke-dasharray: 5 3`, and a dashed edge (`-.->`) for a planned relationship.
 - In the terminal format: dashed box borders (`┄` and `┆`) instead of solid (`─` and `│`).
 
 Belt and braces is deliberate. A reader with a font that renders `┄` as `─`, or a Mermaid viewer that drops
 the `classDef`, still sees the word. **Never rely on styling alone to mark something as planned.**
+
+Separate **available** from **connected**. A library that exists but is mounted by no process (for example
+`startRetentionSweeper`) is not drawn as a running component. A solid edge means the relationship is wired in
+a process that runs, and it must be checked against the code that wires it, not against a unit test of the
+library. Do not present a reflection snapshot or a past test run as the current state; record the date and
+commit of any evidence.
 
 When a plan item lands, the element's borders go solid, the `planned` class is dropped, and the `(item NN)`
 reference stays as provenance.

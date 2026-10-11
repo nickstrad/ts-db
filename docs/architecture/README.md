@@ -8,12 +8,12 @@ Conventions, naming and the maintenance contract: [`AGENTS.md`](AGENTS.md).
 
 ## Index
 
-| Level | Diagram                        | What it shows                                                                                                                                         | GitHub                                         | Terminal                                           |
-| ----- | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- | -------------------------------------------------- |
-| 1     | System Context                 | The platform as one box: app developers, players, the operator, and the external object store, DuckDB analytics consumer and k6 load generator.       | [github](c4-context-document-db.github.md)     | [terminal](c4-context-document-db.terminal.md)     |
-| 2     | Container — request path       | The server process, the DuckDB reader child process, the per-app SQLite files and the object store, and how a request and a backup move between them. | [github](c4-container-platform.github.md)      | [terminal](c4-container-platform.terminal.md)      |
-| 2     | Container — observability path | Server/reader JSONL, k6 artifacts, and the implemented DuckDB event-log format with its missing runtime wiring.                                       | [github](c4-container-observability.github.md) | [terminal](c4-container-observability.terminal.md) |
-| 3     | Component — server process     | The mounted HTTP/lifecycle components and services, including per-app AppServices, storage, backups, logging and dependencies.                        | [github](c4-component-server.github.md)        | [terminal](c4-component-server.terminal.md)        |
+| Level | Diagram                        | What it shows                                                                                                                                              | GitHub                                         | Terminal                                           |
+| ----- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- | -------------------------------------------------- |
+| 1     | System Context                 | The platform as one box: app developers, players, the operator, and the external object store, DuckDB analytics consumer and k6 load generator.            | [github](c4-context-document-db.github.md)     | [terminal](c4-context-document-db.terminal.md)     |
+| 2     | Container — request path       | The server process, the DuckDB reader child process, the per-app SQLite files and the object store, and how a request and a backup move between them.      | [github](c4-container-platform.github.md)      | [terminal](c4-container-platform.terminal.md)      |
+| 2     | Container — observability path | Server/reader JSONL, the reader's connected ingest-then-sweep into the derived DuckDB event log, the reader composition, and the planned item 23/25 edges. | [github](c4-container-observability.github.md) | [terminal](c4-container-observability.terminal.md) |
+| 3     | Component — server process     | The mounted HTTP/lifecycle components and services, including per-app AppServices, storage, backups, reader client, logging and dependencies.              | [github](c4-component-server.github.md)        | [terminal](c4-component-server.terminal.md)        |
 
 Level 2 is split in two so neither picture is cluttered; together they cover one container set.
 
@@ -28,30 +28,46 @@ glow docs/architecture/c4-component-server.terminal.md
 
 ## Audited state
 
-This sync pass inspected the landed source at local `origin/main`, `1761d09ecd22d6cb481819dec3d5b3eed6763c0c`
-(2026-10-11). Remote freshness could not be verified in the editing environment: Git metadata was read-only
-and the GitHub hostname did not resolve. No changes were copied from `reflection/astra` or in-flight item
-branches.
+These diagrams describe the **current** tree; elements that are not built are drawn dashed and labelled
+`(planned)` or `[planned]`. Source: branch `item/37-docs-reconciliation` at `e423ed1` (local `origin/main`,
+2026-10-11), after items 22, 24 and 30-36 landed. Every claim below was checked against the landed diff, not
+against the plan. Remote freshness was not re-verified from the editing environment.
 
-- Item 22 mounts the server layers, per-app `AppServices`, HTTP router, logging and backup fiber.
-- Item 21 implements the persistent event-log service, but `platform/reader.ts` still returns stub failures
-  for ingest and analysis. Its actual layer root contains only config and logging; app query readers are
-  opened lazily with a separate in-memory DuckDB instance per app.
-- Item 24 implements retention and a daily fiber helper; neither the server nor reader starts it.
-- Item 23's `scripts/logs.ts` and `platform/analysis/catalog.ts` are absent. The claim that every item from 01
-  through 24 is landed is therefore not supported by this tree or its log.
-- Items 30 and 35 are omitted. Planned event-log runtime wiring and item-25 k6 ingest use explicitly labelled
-  dashed arrows. Solid implemented artifacts do not imply their integration is active.
+| Item | Landed as                     | What the diagrams rely on                                                                                      |
+| ---- | ----------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| 22   | `89c4c40` (builder `47e0ac6`) | `PlatformLive`, per-app `AppServices`, HTTP router/auth/handlers, backup fiber, shutdown order.                |
+| 24   | `1761d09` (builder `d961ce1`) | `platform/logging/retention.ts` sweeper; reworked by item 36.                                                  |
+| 30   | `abf54ba` (builder `cfd24f4`) | json-layout number reads cast to REAL in the SQLite compiler (no new component).                               |
+| 31   | `f879fc7` (builder `ef50a8a`) | U+0000 rejected before commit in `core/schema.ts` and `Storage` (ADR 0005).                                    |
+| 32   | `bf884c6` (builder `632554c`) | `makeServer`, `ReaderProcess`, reader-exit shutdown, hourly ingest-then-sweep timer, `ListenError`.            |
+| 33   | `5108825` (builder `cdb6164`) | `platform/reader_layers.ts` and `reader_context.ts`; the reader's `ingest` RPC reaches `EventLogIngestLive`.   |
+| 34   | `33f16ff`                     | `X-Trace-Id` ingress rule, handler spans and `handler` events, trace captured into the reader frame.           |
+| 35   | `1f00391` (builder `a08e39c`) | Event-log schema v2: `event_id`, `event_kind`/`handler_kind`, backup `emitter`/`run_id`/`attempts` (ADR 0006). |
+| 36   | `827bdc4` (builder `6944503`) | Retention gated on committed ingest, ingest-then-sweep coordinator, derived-DB budget reporting (ADR 0007).    |
 
-The diagrams distinguish runtime wiring from available implementations. Their numbered relationship keys are
-identical in both formats. Component and observability terminal pictures use the keys to avoid crossing
-arrows; their boxes keep the same reading order as the Mermaid definitions.
+What is connected at runtime, what is only a library, and what is a target:
+
+- **Connected:** server layers and listener; reader child with its own root; ingest RPC (hourly timer,
+  `POST /admin/logs/ingest`); retention, only inside that RPC; caller trace from SDK to server to reader.
+- **Library only:** `startRetentionSweeper` (exported, mounted nowhere); `upgradeEventLog` (operator step, no
+  CLI).
+- **Target, not built:** item 23 (`platform/analysis/catalog.ts`, `scripts/logs.ts`, `docs/observability.md`;
+  `deno.json` declares `logs:*` tasks whose script is absent), item 25 (`perf/ingest_k6.ts`), event-table
+  pruning (`logs:compact`), and the multitenancy items.
+- **Tested composition:** `tests/unit/trace_e2e_test.ts`, `reader_ingest_test.ts`, `retention_ingest_test.ts`
+  and `server_scope_test.ts` run the real SDK, server, reader child and event-log file together. The test
+  counts and the date of the last full runs are recorded in the root [`README.md`](../../README.md).
+
+Each diagram pair's numbered relationship keys are identical in both formats. Component and observability
+terminal pictures use the keys to avoid crossing arrows; their boxes keep the same reading order as the
+Mermaid definitions.
 
 ## Not drawn yet
 
-- **Level 3 — reader components.** The current reader root is `ReaderProcessLive` in `platform/reader.ts`,
-  with a lazy pool from `platform/duckdb.ts`; there is no live Analysis catalog.
-- **Level 4 — Code.** No additional type-structure diagram is needed for this sync pass.
+- **Level 3 — reader components.** The reader composition is described in prose in the observability pair
+  (`platform/reader_layers.ts`: Config, reader logging, IdGen, EventLogIngest, plus lazily opened per-app
+  readers). A separate reader-component diagram is deferred; there is no live analysis catalog.
+- **Level 4 — Code.** No additional type-structure diagram is needed.
 
 ## Regenerating the terminal format
 

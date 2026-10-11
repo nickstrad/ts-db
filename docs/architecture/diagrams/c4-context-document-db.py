@@ -32,7 +32,7 @@ cv.box(0, 48, 22, [
     "Platform operator",
     "[Person]",
     "",
-    "triggers backups;",
+    "backups, ingest;",
     "inspects logs with",
     "offline SQL tools",
 ], bottom=(11,))

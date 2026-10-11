@@ -7,8 +7,9 @@ Renderings: [GitHub](c4-context-document-db.github.md) · [terminal](c4-context-
 The platform as a single box, the people who use it, and the systems outside it. Everything inside the box is
 expanded at [Level 2](c4-container-platform.github.md).
 
-The actors and tools shown are available today. Planned k6 analysis tooling is called out in the relationship
-key; it is not part of the running service.
+The actors and tools shown are available today. The operator can trigger backups and event-log ingest over
+HTTP; the named analysis catalog and logs CLI (item 23) and the k6 loader (item 25) do not exist and are
+called out in the relationship key.
 
 <!-- c4-render: diagrams/c4-context-document-db.py -->
 
@@ -17,7 +18,7 @@ key; it is not part of the running service.
 │ App developer      │  │ Player             │  │ Platform operator  │
 │ [Person]           │  │ [Person]           │  │ [Person]           │
 │                    │  │                    │  │                    │
-│ declares a schema  │  │ plays tic-tac-toe  │  │ triggers backups;  │
+│ declares a schema  │  │ plays tic-tac-toe  │  │ backups, ingest;   │
 │ and the handlers   │  │ via the sample app │  │ inspects logs with │
 │ in app/; runs it   │  │ or the CLI demo    │  │ offline SQL tools  │
 └──────────┬─────────┘  └──────────┬─────────┘  └──────────┬─────────┘
@@ -45,14 +46,14 @@ key; it is not part of the running service.
 
 ## Relationships
 
-| # | From                 | To                           | What travels over it                                                                                                                                                                                                                                                                                                                                 |
-| - | -------------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1 | App developer        | Document DB platform         | Declares the schema in `app/schema.ts` and the handlers in `app/functions.ts`, then runs `deno task serve`. Handlers are statically registered modules — there is no code upload path.                                                                                                                                                               |
-| 2 | Player               | Document DB platform         | `POST /apps/<appId>/<query\|mutation>/<name>` with a JSON argument object and a per-app bearer token. Default body cap 64 KiB (configurable). Never SQL.                                                                                                                                                                                             |
-| 3 | Platform operator    | Document DB platform         | `POST /admin/backup/<appId>` with the admin token. The admin ingest and analysis routes exist, but the reader returns `IngestError` (500) and `UnknownAnalysisQuery` (404). The logs CLI and catalog are absent.                                                                                                                                     |
-| 4 | Document DB platform | S3-compatible object storage | `VACUUM INTO` snapshot → `PRAGMA quick_check` → SHA-256 → PUT the snapshot, PUT its manifest, and only then PUT `apps/<appId>/latest.json`. `scripts/restore.ts` reads the same objects back.                                                                                                                                                        |
-| 5 | Document DB platform | DuckDB analytics consumer    | Offline SQL in `scripts/duckdb/`: `log-level-distribution.sql` reads JSONL directly; the other queries need a populated event-log file. Item 21 implements `EventLogIngestLive`, but the running reader does not mount it. `EVENTLOG_DUCKDB` defaults to `<DATA_DIR>/eventlog.duckdb`.                                                               |
-| 6 | k6 load generator    | Document DB platform         | Load scenarios against the same HTTP API. The k6 binary and `perf/smoke.js` landed with plan item 03; the mutation/query/mixed scenarios landed with item 14. The `X-Trace-Id` header is sent per iteration (`${__VU}-${__ITER}-${runId}`, via `perf/lib/api.js`); joining client-side latency to server-side event durations is planned in item 25. |
+| # | From                 | To                           | What travels over it                                                                                                                                                                                                                                                                                                                                                                                         |
+| - | -------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1 | App developer        | Document DB platform         | Declares the schema in `app/schema.ts` and the handlers in `app/functions.ts`, then runs `deno task serve`. Handlers are statically registered modules — there is no code upload path.                                                                                                                                                                                                                       |
+| 2 | Player               | Document DB platform         | `POST /apps/<appId>/<query\|mutation>/<name>` with a JSON argument object and a per-app bearer token. Default body cap 64 KiB (configurable). Never SQL.                                                                                                                                                                                                                                                     |
+| 3 | Platform operator    | Document DB platform         | `POST /admin/backup/<appId>` with the admin token. `POST /admin/logs/ingest` with the admin token runs the reader's ingest-then-sweep (the server also does it hourly). The analysis route returns `UnknownAnalysisQuery` (404); the logs CLI and catalog (item 23) are absent.                                                                                                                              |
+| 4 | Document DB platform | S3-compatible object storage | `VACUUM INTO` snapshot → `PRAGMA quick_check` → SHA-256 → PUT the snapshot, PUT its manifest, and only then PUT `apps/<appId>/latest.json`. `scripts/restore.ts` reads the same objects back.                                                                                                                                                                                                                |
+| 5 | Document DB platform | DuckDB analytics consumer    | Offline SQL in `scripts/duckdb/`: `log-level-distribution.sql` reads JSONL directly; the other queries need a populated event-log file. The running reader mounts `EventLogIngestLive` (item 33) and fills the derived event-log file, `EVENTLOG_DUCKDB`, default `<DATA_DIR>/eventlog.duckdb`, on each ingest.                                                                                              |
+| 6 | k6 load generator    | Document DB platform         | Load scenarios against the same HTTP API. The k6 binary and `perf/smoke.js` landed with plan item 03; the mutation/query/mixed scenarios landed with item 14. The `X-Trace-Id` header is sent per iteration (`${__VU}-${__ITER}-${runId}`, via `perf/lib/api.js`) and the server records it on its events (item 34); loading k6 output into the event log to join client-side latency is planned in item 25. |
 
 ## Notes on scope
 

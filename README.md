@@ -6,31 +6,49 @@ TypeScript control flow (the tic-tac-toe rules) still runs as TypeScript.
 
 ## Verification status
 
-- **Executed successfully:** 20 core tests using Node 22.16.0's real `node:sqlite` adapter. Tests cover both
-  storage layouts, transactional rollback, competing moves, validation, SQL parameter binding, app-file
-  separation, generated read SQL, result decoding, schema-drift rejection, and WAL-safe snapshots. See
-  `tests/CORE_TEST_RESULTS.txt`.
-- **Type-checked successfully:** SDK, tic-tac-toe schema/handlers, compiler, SQLite adapter, core tests, and
-  compile-only API type tests with TypeScript 5.8.3.
-- **Not executed here:** Deno server/subprocess transport, the native DuckDB adapter, the end-to-end
-  integration test, and actual S3 uploads. This build environment did not have Deno/DuckDB and could not
-  download them. Do not treat this as a fully integration-tested service.
-- DuckDB native API calls were checked against official documentation and source. The package pins
-  `@duckdb/node-api@1.5.6` and `aws4fetch@1.0.20`. No dependency lockfile was fabricated; generate and commit
-  `deno.lock` after resolving dependencies locally.
+Evidence recorded on 2026-10-11 on this build host (Deno 2.9.5, DuckDB `@duckdb/node-api` 1.5.6-r.1), tree
+`e423ed1` plus the documentation changes of plan item 37. It is a dated snapshot, not a standing claim.
+
+| Check                                                                    | Result                                                                                 |
+| ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------- |
+| `deno task fmt:check`, `lint`, `check` (steps of `ci`)                   | passed                                                                                 |
+| `deno task ci` (fmt:check, lint, check, test, test:prop)                 | **passed on the third attempt**; `test` 539 passed, `test:prop` 71 passed, 0 failed    |
+| `deno task test` (full suite, one process)                               | passed on the third run, after two exit-139 runs (native segfault; see below)          |
+| Same unit files and `tests/core_test.ts`, one at a time                  | 26 files, 539 tests passed, 0 failed (one ignored case in `backup_test.ts`)            |
+| `deno task test:prop`                                                    | 71 passed, 0 failed                                                                    |
+| `deno task integration`                                                  | `PASS`: both layouts, DuckDB read-after-write, aggregation, isolation, backup, restore |
+| `trace_e2e_test.ts`, `reader_ingest_test.ts`, `retention_ingest_test.ts` | 1 + 6 + 15 = 22 passed: the real SDK, server, reader child and event-log file          |
+| `python3 docs/architecture/diagrams/render.py --check`                   | all embeds current                                                                     |
+
+- **Flake, recorded.** A single-process `deno task test` intermittently ends in exit 139 inside the DuckDB
+  native worker; it reproduces on clean `main` without item code. The first two attempts here died that way,
+  so the 26 unit files plus `tests/core_test.ts` were also run one at a time as the interim evidence (539
+  passed, 0 failed). The third attempt completed `deno task ci` end to end. Treat the exit-139 as
+  environmental, and re-run `ci` where it is stable.
+- **Not executed here:** real S3 uploads (`S3_INTEGRATION=1` suites need an S3-compatible endpoint, and
+  `backup_test.ts` skips its real-S3 case without it) and k6 load runs (`deno task perf:*` need the k6 binary
+  and a running server). The unit tests use the local object-store stand-in.
+- **Not present:** the item 23 logs CLI and analysis catalog, and item 25's k6 loader. Their `deno.json` tasks
+  (`logs:*`, `perf:ingest`) fail until those scripts exist.
+- `tests/CORE_TEST_RESULTS.txt` is an older Node 22 run of the first 20 core tests; it is historical.
+- DuckDB native API calls were checked against official documentation and source. `deno.lock` is committed;
+  the package pins `@duckdb/node-api@1.5.6-r.1` and `aws4fetch@1.0.20` in `deno.json`.
 
 ## Start here to skim
 
-| File                   | What it demonstrates                                                                       |
-| ---------------------- | ------------------------------------------------------------------------------------------ |
-| `app/schema.ts`        | The developer's schema builder: typed fields and indexes.                                  |
-| `app/functions.ts`     | All application code: create/move/delete mutations, reads, grouped statistics. No SQL.     |
-| `sdk/db.ts`            | Document operations become an engine-neutral query plan.                                   |
-| `platform/compiler.ts` | Schema to DDL; query plan to dialect-specific SQL; document writes to SQL; row decoding.   |
-| `platform/sqlite.ts`   | Per-app mutation serialization and SQLite transactions, including mutation-internal reads. |
-| `platform/duckdb.ts`   | Read-only attachment of the same SQLite file; generated DuckDB queries.                    |
-| `platform/server.ts`   | Named-handler routing and the second-process lifecycle.                                    |
-| `platform/backup.ts`   | Consistent SQLite snapshot, checksum, immutable object, latest manifest.                   |
+| File                   | What it demonstrates                                                                         |
+| ---------------------- | -------------------------------------------------------------------------------------------- |
+| `app/schema.ts`        | The developer's schema builder: typed fields and indexes.                                    |
+| `app/functions.ts`     | All application code: create/move/delete mutations, reads, grouped statistics. No SQL.       |
+| `sdk/db.ts`            | Document operations become an engine-neutral query plan.                                     |
+| `platform/compiler.ts` | Schema to DDL; query plan to dialect-specific SQL; document writes to SQL; row decoding.     |
+| `platform/sqlite.ts`   | Per-app mutation serialization and SQLite transactions, including mutation-internal reads.   |
+| `platform/duckdb.ts`   | Read-only attachment of the same SQLite file; generated DuckDB queries.                      |
+| `platform/server.ts`   | Server entrypoint: scoped listener, backup and ingest-then-sweep timers, signal shutdown.    |
+| `platform/layers.ts`   | `PlatformLive`: the server's ordered layer chain (config, logging, per-app storage, reader). |
+| `platform/http/`       | Router, auth, handlers, and the `X-Trace-Id` / span contract (`trace.ts`).                   |
+| `platform/reader.ts`   | Reader child entrypoint; its layer root is `platform/reader_layers.ts`.                      |
+| `platform/backup.ts`   | Consistent SQLite snapshot, checksum, immutable object, latest manifest.                     |
 
 `GENERATED_SQL.txt` shows actual compiler output for the two layouts and two dialects. `deno task explain`
 regenerates it without running either database engine.
@@ -42,20 +60,24 @@ TypeScript client / browser
      |
      | named handler + JSON args (never raw SQL)
      v
-Deno process 1: HTTP API + SQLite mutation handlers + optional backup timer
+Deno process 1: HTTP API + SQLite mutation handlers + backup and ingest-then-sweep timers
      |                  |
-     | write/read tx    | JSON-lines RPC over stdin/stdout
+     | write/read tx    | JSON-lines RPC over stdin/stdout (query, ping, ingest)
      v                  v
 app.sqlite <------ Deno process 2: query handlers + DuckDB SQLite extension
-     |
-     | consistent VACUUM INTO snapshot
-     v
+     |                  |
+     | consistent       | JSONL logs -> event-log DuckDB file (derived; reader only)
+     | VACUUM INTO      v
+     v              <DATA_DIR>/eventlog.duckdb
 local snapshot -> S3-compatible object store
 ```
 
 Both long-lived processes run on **the same machine with the same local filesystem**. The server starts the
-reader automatically. The two demo app IDs share these processes but have independent files. There is no
-persistent DuckDB database, no CDC pipeline, no replica-copy refresh loop, and no extra backup daemon.
+reader automatically. The two demo app IDs share these processes but have independent files. App data has no
+second copy: no CDC pipeline, no replica-copy refresh loop, and no extra backup daemon. The only persistent
+DuckDB file is the **derived** event-log file written by the reader's ingest from the JSONL logs
+(`EVENTLOG_DUCKDB`, default `<DATA_DIR>/eventlog.duckdb`); the server never opens it. See "Observability and
+the event log" below.
 
 SQLite writes use `node:sqlite`. DuckDB uses its SQLite extension to read the live file. The processes are
 separated because DuckDB documents a warning about linking multiple SQLite-library copies into one
@@ -91,7 +113,8 @@ deno task integration
 
 The service binds to `127.0.0.1:8000`. Default app/admin tokens are `dev-only`, deliberately unsuitable for
 deployment. Set `PORT`, `DATA_DIR`, `COLUMN_APP_TOKEN`, `JSON_APP_TOKEN`, and `ADMIN_TOKEN` as needed. Do not
-expose this service to untrusted users. `TRACE_SQL=1` includes bound application values in logs.
+expose this service to untrusted users. `TRACE_SQL=1` logs every compiled SQL statement at `info`; bound
+application values are included only when `LOG_INCLUDE_BIND_VALUES` is also set.
 
 ## App-facing client
 
@@ -120,6 +143,9 @@ const stats = await client.query("winsByMark", {});
 
 `import type` does not send server handlers or database libraries to the client. Handler names, argument
 types, and result types are inferred. There is no code-generation step in this small example.
+
+Every request carries an `X-Trace-Id`: the `traceId` argument to `client.query`/`client.mutation` if given,
+otherwise a generated UUID. See "Trace propagation" below for what the server does with it.
 
 ## Query language and semantics
 
@@ -160,6 +186,25 @@ ordering.
 `_id`, `_creationTime`, and `_version` are platform-owned metadata; each patch increments `_version`. Typed
 clients cannot patch metadata. Arguments and writes also receive runtime validation.
 
+### Number and text contracts
+
+- **Numbers.** A `number` field is a JS double. In the columns layout it is a REAL column. In the json layout
+  the document is stored as `JSON.stringify` text, which writes an integral double at or beyond 2^53 as
+  integer text; SQLite's `json_extract` would read that back as an exact INTEGER rather than the double it
+  denotes (item 30). The SQLite compiler therefore wraps a json-layout number read in `CAST(... AS REAL)`, so
+  filters, ordering, `countBy` keys and index expressions agree with the columns layout and with DuckDB's
+  DOUBLE cast. Integer, boolean, text and metadata reads are unchanged. Known gaps, pinned by
+  `tests/unit/number_dialects_test.ts`: a database created before item 30 keeps its old bare `json_extract`
+  index on a json-layout number field (results stay correct; drop and recreate the `idx_*` to use it again),
+  and the DuckDB bind path throws for integral numbers with `|x| >= 2^63` in either layout.
+- **Embedded NUL.** `node:sqlite` binds U+0000 intact but truncates TEXT at it on read, so an accepted string
+  could commit and read back as a different value. Item 31 rejects it before commit (ADR 0005): a string or
+  enum field value (at any array depth), a `get`/`patch`/`delete` id or a filter value containing U+0000 fails
+  with `SchemaError { reason: "type-mismatch", expected: "text without U+0000" }`, and an `IdGen` id
+  containing it fails as a `StorageError`. Nothing runs, so nothing is written. Reading a row that already
+  holds NUL text (written before the contract) fails with a `StorageError` instead of returning a truncated
+  value. Both layouts and both `Storage` implementations apply the same rules.
+
 ## Two physical layouts, same logical schema
 
 `tic-tac-toe` uses columns. Strings/enums become TEXT, integers/booleans INTEGER, numbers REAL, and board
@@ -193,6 +238,69 @@ The mutation response returns the locally committed game immediately. DuckDB is 
 transactional write decisions. There is no second data copy that needs to catch up. This does not establish a
 remotely replicated/linearizable database service; concurrent readers may legitimately see the state before an
 overlapping write.
+
+## Observability and the event log
+
+Every process writes structured JSONL under `LOG_DIR/<role>/<date>/` (`server` and `reader` roles). The reader
+additionally ingests those files into a derived DuckDB event-log file. This section separates what is
+**available** (code exists), **connected** (mounted in a running process), **tested** (a named test exercises
+the composition) and **target** (not built). Detailed diagrams: `docs/architecture/`.
+
+| Capability                              | Available | Connected in a running process                                                  | Tested by                                                                        | Target (not built)                                                                   |
+| --------------------------------------- | --------- | ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| JSONL logging, both processes           | yes       | yes: `LoggingLive` (server), `LoggingReaderLive` (reader)                       | `tests/unit/logger_test.ts`, `http_test.ts`                                      |                                                                                      |
+| Event-log ingest into DuckDB            | yes       | yes: reader `ingest` RPC, hourly timer in the server, `POST /admin/logs/ingest` | `tests/unit/reader_ingest_test.ts`, `eventlog_test.ts`                           |                                                                                      |
+| Retention (gzip/delete) after ingest    | yes       | yes: runs inside that same `ingest` RPC, never on its own                       | `tests/unit/retention_ingest_test.ts`, `tests/property/retention_ingest_test.ts` |                                                                                      |
+| Caller trace propagation                | yes       | yes: SDK to server to reader child                                              | `tests/unit/trace_test.ts`, `ipc_test.ts`, `trace_e2e_test.ts`                   |                                                                                      |
+| Named analysis queries, logs CLI        | no        | no: `analysis` answers `UnknownAnalysisQuery` (404)                             |                                                                                  | item 23 (`platform/analysis/catalog.ts`, `scripts/logs.ts`, `docs/observability.md`) |
+| k6 results into the event log           | no        | no                                                                              |                                                                                  | item 25 (`perf/ingest_k6.ts`)                                                        |
+| Event-table pruning / DuckDB compaction | no        | no                                                                              |                                                                                  | a future `logs:compact`                                                              |
+
+`deno.json` declares `logs:ingest`, `logs:query`, `logs:sweep` and `perf:ingest`, but `scripts/logs.ts` and
+`perf/ingest_k6.ts` do not exist yet; those tasks fail until items 23 and 25 land. The only live paths to
+ingest are the ones in the table.
+
+### Trace propagation (item 34)
+
+- **Ingress.** The server accepts the caller's `X-Trace-Id` when it is 1-128 characters of `[A-Za-z0-9._:-]`.
+  Anything else (absent, empty, too long, a space, a repeated header) is not an error: the request runs under
+  a generated id. The id the request actually ran under is echoed in the response `X-Trace-Id` on every
+  status.
+- **Server fibers.** Each handler runs its whole dispatched Effect as a child span. The `http` event, the
+  `handler` event (app invocations only: outcome `ok`, a typed failure, a defect or an interruption), the
+  SQLite writer's `sql` and `tx` events (including rollback), backup phases and log records carry the trace
+  id; handler-scoped ones also carry the handler's `spanId`.
+- **Reader child.** `ReaderClient` captures the caller's trace when a call is submitted and writes it into
+  that call's frame (`traceId`, a fresh `spanId`, the handler span as `parentSpanId`). The reader restores it
+  as annotations, so its `sql`/`tx` events and logs share the trace id. Calls made outside any request (the
+  startup ping, the ingest timer) send no trace properties and run under the reader's fallback
+  `reader-<pid>-<requestId>`. A late reply to a timed-out call is logged under that call's trace.
+- **Not yet joined.** k6 sends `X-Trace-Id` per iteration, but nothing loads k6 output into the event log
+  (item 25), so client-side latency is not joined to server events.
+- Tested end to end by `tests/unit/trace_e2e_test.ts` (real SDK, server and reader child).
+
+### Runtime ingest and retention (items 32, 33, 35, 36)
+
+- **Ingest.** The reader's `ingest` request runs the ingest-then-sweep coordinator against the persistent
+  event-log file. The server never loads DuckDB: it sends the RPC every hour (first run one interval after
+  startup) and on `POST /admin/logs/ingest` (admin token). The handle opens on the first ingest; a file that
+  cannot be opened or has an incompatible schema fails that one RPC with `IngestError` and does not affect
+  queries. The call shares `READER_CALL_TIMEOUT_MS`; a longer run is logged by the server as
+  `ingest-sweep-failed` while the reader still commits.
+- **Event schema v2.** Every typed event row carries `event_id` and joins exactly one `platform_events` row;
+  `event_kind` is always the record's kind and `handler_kind` is the explicit query/mutation mapping; backup
+  records carry `emitter`, `run_id` and `attempts` (ADR 0006). Ingest refuses an unversioned (v1) or foreign
+  file; `upgradeEventLog` (`platform/eventlog/tables.ts`) rebuilds v1 from retained JSONL and is an explicit
+  operator step with no CLI yet.
+- **Retention follows ingest.** A JSONL file is gzipped or deleted only when it is closed (dated before today,
+  not open, settled) and committed ingest accounts for all of it (ADR 0007). A file that fails the gate is
+  kept, still counts toward `LOG_MAX_TOTAL_BYTES`, and is reported as blocked. Nothing in the server or reader
+  starts a retention sweep on its own; it runs only inside the ingest RPC.
+- **Limits.** `LOG_MAX_TOTAL_BYTES` bounds the JSONL tree only, and even there today's files and blocked files
+  can exceed it. The derived DuckDB file is never pruned, so it grows without bound; the reply reports both
+  budgets separately. Gzipped files are never re-ingested, so rebuilding the event log reconstructs only
+  events whose JSONL is still retained. The DuckDB file is a derived cache: the JSONL is the source of truth.
+  Server and reader must run in one timezone (they do, by inheriting one environment).
 
 ## Backups and restore
 
@@ -247,9 +355,9 @@ app files are initialized empty.
 **This is asynchronous backup, not high availability.** A successful mutation acknowledges local SQLite
 commit, not S3 durability. A host loss can lose commits newer than the last completed snapshot. Backup
 intervals do not guarantee a fixed RPO during upload delays or failures. There is no leader election,
-replicated WAL, failover, incremental upload, retention policy, or live restore. Full snapshots read the
-entire database into memory before upload; replace that path before using large databases. Local
-`object-store/` is not off-host redundancy.
+replicated WAL, failover, incremental upload, snapshot retention policy, or live restore. (Log retention is
+separate; see "Observability and the event log".) Full snapshots read the entire database into memory before
+upload; replace that path before using large databases. Local `object-store/` is not off-host redundancy.
 
 ## Configuration
 
