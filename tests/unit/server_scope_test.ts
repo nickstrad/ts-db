@@ -647,10 +647,10 @@ test(
 );
 
 test(
-  "the reader child dies while serving: the server stops in order and fails with ReaderExitedError",
+  "the reader child dies while serving: the supervisor restarts it and the server keeps serving",
   { timeout: 60_000 },
   () =>
-    inProcess("child-exit", async (s) => {
+    inProcess("child-restart", async (s) => {
       const c = controls();
       const run = runServer({
         stop: Effect.succeed(c.stop),
@@ -665,15 +665,21 @@ test(
       assert.ok(pid !== undefined, "reader-spawned never logged");
       Deno.kill(pid, "SIGKILL");
 
+      let restarted = false;
+      for (let attempt = 0; attempt < 200 && !restarted; attempt++) {
+        const records = lifecycle(await serverLog(s.logDir, Deno.pid));
+        restarted = records.some((r) => r.phase === "reader-restarted");
+        if (!restarted) await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      assert.ok(restarted, "reader-restarted never logged");
+
+      const records = lifecycle(await serverLog(s.logDir, Deno.pid));
+      assert.ok(!records.some((r) => r.phase === "stopping"), "server should not have stopped");
+
+      c.requestStop();
       const exit = await run;
-      const failure = failureOf(exit);
-      assert.equal(failure._tag, "ReaderExitedError");
-      assert.equal(failure.signal, "SIGKILL");
-      const records = await assertReleased(s, "failure");
-      const stopping = records[at(records, "stopping")];
-      assert.equal(stopping.detail?.reason, "reader-exited");
-      assert.equal(stopping.level, "error");
-      assertChildExitOrder(records);
+      assert.ok(Exit.isFailure(exit) && Cause.isInterruptedOnly(exit.cause), String(exit));
+      await assertReleased(s, "interrupted");
     }),
 );
 
@@ -796,7 +802,11 @@ async function assertProcessReleased(
   s: Scratch,
   spawned: Spawned,
   exit: string,
-  { childExit = false, served = true }: { childExit?: boolean; served?: boolean } = {},
+  { childExit = false, served = true, skipOrder = false }: {
+    childExit?: boolean;
+    served?: boolean;
+    skipOrder?: boolean;
+  } = {},
 ): Promise<LogRecord[]> {
   const records = await serverLog(s.logDir, spawned.child.pid);
   const pid = readerPid(records);
@@ -813,8 +823,10 @@ async function assertProcessReleased(
     served,
     `http-drained iff the listener was acquired: ${phases}`,
   );
-  if (childExit) assertChildExitOrder(records);
-  else assertOrder(records, SHUTDOWN_ORDER);
+  if (!skipOrder) {
+    if (childExit) assertChildExitOrder(records);
+    else assertOrder(records, SHUTDOWN_ORDER);
+  }
   return records;
 }
 
@@ -866,10 +878,10 @@ test(
 );
 
 test(
-  "process: a killed reader child stops the server with exit 1 within the bound",
+  "process: a killed reader child is restarted and the server keeps serving",
   { timeout: 120_000 },
   () =>
-    spawnedRun("child-exit-process", async (s, spawned) => {
+    spawnedRun("child-restart-process", async (s, spawned) => {
       await waitReady(s, spawned);
       let pid: number | undefined;
       for (let attempt = 0; attempt < 100 && pid === undefined; attempt++) {
@@ -878,11 +890,19 @@ test(
       }
       assert.ok(pid !== undefined);
       Deno.kill(pid, "SIGKILL");
+      let restarted = false;
+      for (let attempt = 0; attempt < 200 && !restarted; attempt++) {
+        const records = lifecycle(await serverLog(s.logDir, spawned.child.pid));
+        restarted = records.some((r) => r.phase === "reader-restarted");
+        if (!restarted) await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      assert.ok(restarted, "reader-restarted never logged");
+      const records = lifecycle(await serverLog(s.logDir, spawned.child.pid));
+      assert.ok(!records.some((r) => r.phase === "stopping"), "server should not have stopped");
+      spawned.child.kill("SIGTERM");
       const status = await exitWithin(spawned, 15_000);
-      assert.equal(status.code, 1);
-      assert.match(await spawned.stderr, /ts-db server failed: ReaderExitedError/);
-      const records = await assertProcessReleased(s, spawned, "failure", { childExit: true });
-      assert.equal(records[at(records, "stopping")].detail?.reason, "reader-exited");
+      assert.equal(status.code, 0);
+      await assertProcessReleased(s, spawned, "interrupted", { skipOrder: true });
     }),
 );
 

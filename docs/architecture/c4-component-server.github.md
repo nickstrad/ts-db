@@ -7,7 +7,7 @@ Audited against landed main `643b706` on 2026-10-11 (item 27). Both formats are 
 flowchart TB
     subgraph platform["Server process: PlatformLive"]
         http["HTTP API / auth<br/>[Component]<br/>platform/http/; platform/auth/<br/>Named routes, traces, tenant/API-key/session authentication"]
-        life["Server lifecycle<br/>[Component]<br/>platform/server.ts<br/>Scoped listener, backup and ingest timers, reader-exit watch"]
+        life["Server lifecycle<br/>[Component]<br/>platform/server.ts<br/>Scoped listener, backup and ingest timers, reader supervision"]
         apps["AppRegistry / AppServices<br/>[Effect services]<br/>platform/registry.ts; platform/layers.ts<br/>App schema/handlers; Storage and Backups stack per app"]
         tenant["TenantRegistry<br/>[Effect service]<br/>platform/tenants/store.ts<br/>Lazy Postgres registry; bounded hashed-key TTL cache"]
         route["TenantStorageRouter<br/>[Effect service]<br/>platform/tenants/routing.ts<br/>LocalFolderRouter per app; validated locations"]
@@ -38,8 +38,8 @@ flowchart TB
     backup -->|"(13) Consistent VACUUM INTO snapshot"| storage
     backup -->|"(14) Verified snapshot and manifest publication"| objects
     tenant -->|"(15) Parameterized registry SQL; lazy scoped pool"| pg
-    life -->|"(16) Ping; hourly ingest; reader-exit watch and finalizer"| rpc
-    rpc -->|"(17) JSONL RPC; scoped child shutdown"| reader
+    life -->|"(16) Ping; hourly ingest; reader supervision (restart/backoff)"| rpc
+    rpc -->|"(17) JSONL RPC; supervised child (restart on exit)"| reader
     storage -->|"(18) SQL/tx/queue events"| logging
     http -->|"(19) HTTP/handler spans and failures"| logging
     life -->|"(20) Startup/shutdown and timer events"| logging
@@ -78,8 +78,8 @@ flowchart TB
 | 13 | Backups / ObjectStore        | Storage                      | Consistent VACUUM INTO snapshot                                |
 | 14 | Backups / ObjectStore        | Object storage               | Verified snapshot and manifest publication                     |
 | 15 | TenantRegistry               | Central registry             | Parameterized registry SQL; lazy scoped pool                   |
-| 16 | Server lifecycle             | ReaderClient / ReaderProcess | Ping; hourly ingest; reader-exit watch and finalizer           |
-| 17 | ReaderClient / ReaderProcess | Reader child                 | JSONL RPC; scoped child shutdown                               |
+| 16 | Server lifecycle             | ReaderClient / ReaderProcess | Ping; hourly ingest; reader supervision (restart/backoff)      |
+| 17 | ReaderClient / ReaderProcess | Reader child                 | JSONL RPC; supervised child (restart on exit)                  |
 | 18 | Storage                      | Logger / EventSink           | SQL/tx/queue events                                            |
 | 19 | HTTP API / auth              | Logger / EventSink           | HTTP/handler spans and failures                                |
 | 20 | Server lifecycle             | Logger / EventSink           | Startup/shutdown and timer events                              |
@@ -102,4 +102,5 @@ requests lease handles, and shutdown drains leases before closing them. Retentio
 in the reader, never as server-side DuckDB components. Item 26 removes compatibility wrappers and
 platform/compiler.ts; pure compilation now lives in core/compile/ and introduces no new runtime component.
 HTTP status mapping lives in core/errors.ts. Better Auth connections are bounded to each request/CLI
-operation, separate from the lazy registry pool.
+operation, separate from the lazy registry pool. Reader supervision: unexpected reader exit restarts the child
+with backoff (1s-8s, 502s during the window); more than 5 restarts in 10 minutes gives up and shuts down.
