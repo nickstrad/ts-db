@@ -1,9 +1,6 @@
 /**
  * Generators and SQL-auditing helpers for the item-13 property suites (compiler, plan, decode, SQLite
- * oracle).
- *
- * Deliberately self-contained: it does not import `tests/property/arbitraries.ts`, which item 12 owns
- * and builds concurrently. Everything the four item-13 files share lives here.
+ * oracle). Everything the four item-13 files share lives here.
  *
  * Two families of things:
  *
@@ -18,30 +15,24 @@
  *   keyword from a closed vocabulary, or a single-quoted literal of a known safe shape. Any value,
  *   identifier or comment that slips into the text unbound shows up as a token outside that set.
  *
- * The seed is fixed so a failure is reproducible; `FC_SEED=<n>` overrides it for exploration. Each
- * test name prints the seed in use.
+ * Seed and run count come from the suite-wide harness in `tests/property/arbitraries.ts`, which
+ * importing this module installs: `PROP_SEED=<n>` overrides the seed, test names go through its
+ * `titled()`, and a failure prints the replay command. Only that module calls `fc.configureGlobal`.
  */
 import fc from "fast-check";
 import { Either } from "effect";
 import { type Fields, type Node, type Schema, Table } from "../../core/schema.ts";
 import type { Filter, SelectPlan } from "../../core/plan.ts";
 import type { Dialect } from "../../core/compile/dialect.ts";
+import { NUM_RUNS } from "./arbitraries.ts";
 
 // ---------------------------------------------------------------------------
 // Run configuration
 // ---------------------------------------------------------------------------
 
-export const SEED = Number(Deno.env.get("FC_SEED") ?? 13_2026);
-export const NUM_RUNS = 200;
-
-/** Per-assert parameters. Passed explicitly rather than via `fc.configureGlobal`, which other suites own. */
+/** Per-assert run count. The seed and the failure reporter are the harness's global configuration. */
 export function runs<T = unknown>(numRuns = NUM_RUNS): fc.Parameters<T> {
-  return { seed: SEED, numRuns };
-}
-
-/** Test name with the seed appended, so a red run names the seed that reproduces it. */
-export function named(name: string): string {
-  return `${name} (seed ${SEED})`;
+  return { numRuns };
 }
 
 /** `JSON.stringify` that survives bigints and shows `undefined`, for failure messages. */

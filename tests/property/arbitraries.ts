@@ -1,9 +1,21 @@
 /**
- * fast-check generators for the schema layer (plan item 12), plus the suite-wide seed and run count.
+ * fast-check generators for the schema layer (plan item 12), plus **the** seed harness for every
+ * property suite under `tests/property/`.
  *
- * Importing this module configures fast-check globally: a fixed seed (so a failure reproduces
- * bit-for-bit) and `numRuns: 200`. Override the seed with `PROP_SEED=<int>` to explore, and replay a
- * failure with the `seed` and `path` fast-check prints in its counterexample report.
+ * ## Seed harness
+ *
+ * Every property suite imports this module (directly, or through `compiler_arbitraries.ts`), and this
+ * is the only module that calls `fc.configureGlobal`. Importing it sets, for every `fc.assert` in the
+ * process:
+ *
+ * - a fixed seed, `DEFAULT_SEED`, so a failure reproduces bit-for-bit;
+ * - `numRuns: NUM_RUNS` (200), which a suite may lower per assert for expensive properties;
+ * - a reporter that, on failure, appends a `PROP_SEED=<seed> deno task test:prop` replay line to
+ *   fast-check's counterexample report (which already carries the seed, the shrink path and the
+ *   counterexample).
+ *
+ * `PROP_SEED=<int>` is the single override: set it to explore new cases, or to replay a red run. Use
+ * `titled()` for test names so the seed in use is printed next to every test, pass or fail.
  *
  * Recursive generators follow `docs/haiku-experiments/findings/sq-03.md`: depth is an explicit parameter
  * (`nodeArb(maxDepth)`), not `fc.letrec`, so nesting is bounded by construction and shrinks cleanly.
@@ -45,11 +57,27 @@ export const SEED: number = readSeed();
 /** Runs per property. The plan's acceptance bar is >= 200. */
 export const NUM_RUNS = 200;
 
-fc.configureGlobal({ seed: SEED, numRuns: NUM_RUNS });
+/** The command that replays a run with `seed`. Printed under every failing property's report. */
+export function replayCommand(seed: number): string {
+  return `PROP_SEED=${seed} deno task test:prop`;
+}
+
+/**
+ * fast-check's default failure, plus the replay command. Installed globally, so it covers `fc.assert`
+ * calls that pass their own parameters too; fast-check routes async properties here as well when no
+ * `asyncReporter` is set.
+ */
+function reporter(details: fc.RunDetails<unknown>): void {
+  if (!details.failed) return;
+  const message = `${fc.defaultReportMessage(details)}\n\nReplay: ${replayCommand(details.seed)}`;
+  throw new Error(message, { cause: details.errorInstance });
+}
+
+fc.configureGlobal({ seed: SEED, numRuns: NUM_RUNS, reporter });
 
 /** Suffixes a test title with the configured seed, so the seed shows in `deno test` output. */
 export function titled(title: string): string {
-  return `${title} [seed=${SEED}, runs=${NUM_RUNS}]`;
+  return `${title} [seed=${SEED}]`;
 }
 
 /** Runs one property with the suite's run count. A failure message carries the shrunk counterexample. */

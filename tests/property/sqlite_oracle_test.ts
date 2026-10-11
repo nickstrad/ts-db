@@ -48,7 +48,6 @@ import { decode } from "../../core/compile/decode.ts";
 import {
   bodyArb,
   type Doc,
-  named,
   rightOf,
   runs,
   show,
@@ -58,6 +57,7 @@ import {
   textValue,
   validPlanArb,
 } from "./compiler_arbitraries.ts";
+import { titled } from "./arbitraries.ts";
 
 // ---------------------------------------------------------------------------
 // Reference implementation
@@ -212,7 +212,7 @@ function bodyOf(doc: Doc): Record<string, unknown> {
   return body;
 }
 
-Deno.test(named("oracle: compiled selects on real SQLite return what the plan means"), () => {
+Deno.test(titled("oracle: compiled selects on real SQLite return what the plan means"), () => {
   fc.assert(
     fc.property(scenario, ({ name, table, inserted, mutations, final, plans }) => {
       const schema: Schema = { [name]: table };
