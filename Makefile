@@ -110,5 +110,16 @@ POSTGRES_DB   ?= tsdb
 db-shell: ## Open an interactive psql shell in the postgres service
 	docker compose exec postgres psql -U $(POSTGRES_USER) -d $(POSTGRES_DB)
 
-db-migrate: ## Apply platform/tenants/schema.sql to postgres (idempotent)
-	docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U $(POSTGRES_USER) -d $(POSTGRES_DB) < platform/tenants/schema.sql
+# `make db-migrate down`: when db-migrate is the first goal, any further goals are runner
+# arguments, not make targets. (A real `down` target stops the stack; this shadow applies ONLY
+# when db-migrate leads, so plain `make down` is unaffected. The explicit noop rule wins over
+# the real `down` target for this invocation with an "overriding recipe" warning on stderr.)
+ifeq (db-migrate,$(firstword $(MAKECMDGOALS)))
+  MIGRATE_ARGS := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
+  ifneq ($(strip $(MIGRATE_ARGS)),)
+    $(MIGRATE_ARGS): ; @:
+  endif
+endif
+
+db-migrate: ## Apply pending Postgres migrations (no-op when current). `make db-migrate down` rolls back the latest.
+	deno task db:migrate $(MIGRATE_ARGS)

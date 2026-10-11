@@ -21,6 +21,7 @@
     "explain": "deno run scripts/explain.ts",
     "integration": "deno run -A tests/integration.ts",
     "serve": "deno run -A platform/server.ts",
+    "db:migrate": "deno run --allow-read --allow-net --allow-env scripts/db/migrate.ts",
     "logs:ingest": "deno run -A scripts/logs.ts ingest",
     "logs:query": "deno run -A scripts/logs.ts query",
     "logs:sweep": "deno run -A scripts/logs.ts sweep",
