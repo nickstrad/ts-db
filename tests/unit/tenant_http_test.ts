@@ -162,6 +162,11 @@ test("tenant HTTP: CLI keys, reads, forged identity, concurrent mutations, revoc
     await new Promise((resolve) => setTimeout(resolve, 30_050));
     assert.equal((await send(externalKey.plaintext, "query", "getGame", { gameId: aId })).status, 401);
 
+    assert.equal(
+      (await send(keyA, "query", "getGame", { gameId: aId })).status,
+      200,
+      "rewarm the local key after the external revocation TTL elapsed",
+    );
     await adminCall(`/admin/tenants/${a.tenant.id}/keys/${a.apiKey.id}`);
     assert.equal(
       (await send(keyA, "query", "getGame", { gameId: aId })).status,

@@ -314,7 +314,8 @@ export function makePlatformLive(options: PlatformOptions = {}) {
         TenantRegistry,
         Effect.gen(function* () {
           const registry = yield* TenantRegistry;
-          return yield* makeCachedTenantRegistry(registry, 30_000);
+          const config = yield* Config;
+          return yield* makeCachedTenantRegistry(registry, config.tenancy.tenantKeyCacheTtlMs ?? 30_000);
         }),
       ).pipe(Layer.provide(TenantRegistryLazy)),
     ),

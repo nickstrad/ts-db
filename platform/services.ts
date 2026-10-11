@@ -237,6 +237,8 @@ export interface ReaderConfig {
 }
 
 export interface TenancyConfig {
+  /** Fixed key-cache TTL. Defaults to 30000 until MT-02's environment decoder supplies it. */
+  readonly tenantKeyCacheTtlMs?: number;
   /** `TENANCY`. `off` = pre-tenancy behavior (single SQLite file, existing app-token auth). */
   readonly mode: "off" | "api-key" | "better-auth";
   /** `DATABASE_URL`. Postgres central DB for the tenant registry (reserved; MT-01 provisions it). */

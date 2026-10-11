@@ -106,3 +106,8 @@ The key cache stores hashes only, including negative results, with a fixed (non-
 mutations and authentication must use the same cached registry instance for immediate local invalidation.
 Another server instance observes revocation/deactivation within one TTL; there is no cross-instance
 invalidation protocol.
+
+MT-07 consumes `Config.tenancy.tenantKeyCacheTtlMs` with the specified 30000 ms default. This base lacks
+MT-02's promised `TENANT_KEY_CACHE_TTL_MS` decoder; adding that option, its README row and config tests
+remains a configuration-owner follow-up. Do not claim the environment variable is honored until that follow-up
+lands. The injected Config field already controls the cache and rejects invalid limits.
