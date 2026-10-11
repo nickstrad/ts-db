@@ -8,12 +8,12 @@ Conventions, naming and the maintenance contract: [`AGENTS.md`](AGENTS.md).
 
 ## Index
 
-| Level | Diagram                        | What it shows                                                                                                                                              | GitHub                                         | Terminal                                           |
-| ----- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- | -------------------------------------------------- |
-| 1     | System Context                 | The platform as one box: app developers, players, the operator, and the external object store, DuckDB analytics consumer and k6 load generator.            | [github](c4-context-document-db.github.md)     | [terminal](c4-context-document-db.terminal.md)     |
-| 2     | Container — request path       | The server process, the DuckDB reader child process, the per-app SQLite files and the object store, and how a request and a backup move between them.      | [github](c4-container-platform.github.md)      | [terminal](c4-container-platform.terminal.md)      |
-| 2     | Container — observability path | Server/reader JSONL, the reader's connected ingest-then-sweep into the derived DuckDB event log, the reader composition, and the planned item 23/25 edges. | [github](c4-container-observability.github.md) | [terminal](c4-container-observability.terminal.md) |
-| 3     | Component — server process     | The mounted HTTP/lifecycle components and services, including per-app AppServices, storage, backups, reader client, logging and dependencies.              | [github](c4-component-server.github.md)        | [terminal](c4-component-server.terminal.md)        |
+| Level | Diagram                        | What it shows                                                                                                                                                         | GitHub                                         | Terminal                                           |
+| ----- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- | -------------------------------------------------- |
+| 1     | System Context                 | The platform as one box: app developers, players, the operator, and the external object store, DuckDB analytics consumer and k6 load generator.                       | [github](c4-context-document-db.github.md)     | [terminal](c4-context-document-db.terminal.md)     |
+| 2     | Container — request path       | The server process, the DuckDB reader child process, the per-app SQLite files and the object store, and how a request and a backup move between them.                 | [github](c4-container-platform.github.md)      | [terminal](c4-container-platform.terminal.md)      |
+| 2     | Container — observability path | Server/reader JSONL, the reader's connected ingest-then-sweep into the derived DuckDB event log, the reader composition, live named analysis, logs CLI and k6 loader. | [github](c4-container-observability.github.md) | [terminal](c4-container-observability.terminal.md) |
+| 3     | Component — server process     | The mounted HTTP/lifecycle components and services, including per-app AppServices, storage, backups, reader client, logging and dependencies.                         | [github](c4-component-server.github.md)        | [terminal](c4-component-server.terminal.md)        |
 
 Level 2 is split in two so neither picture is cluttered; together they cover one container set.
 
@@ -28,35 +28,34 @@ glow docs/architecture/c4-component-server.terminal.md
 
 ## Audited state
 
-These diagrams describe the **current** tree; elements that are not built are drawn dashed and labelled
-`(planned)` or `[planned]`. Source: branch `item/37-docs-reconciliation` at `e423ed1` (local `origin/main`,
-2026-10-11), after items 22, 24 and 30-36 landed. Every claim below was checked against the landed diff, not
-against the plan. Remote freshness was not re-verified from the editing environment.
+These diagrams describe landed main `643b706`, audited on 2026-10-11 for item 27. The earlier audit at
+`e423ed1` covered items 22/24/30–36; this refresh reads the landed changes since that snapshot, including
+items 23/25/26 and MT-01 through MT-10. All four pairs change: request/auth context, central Postgres and CLI
+containers, tenant components, and connected analysis/k6 observability paths.
 
-| Item | Landed as                     | What the diagrams rely on                                                                                      |
-| ---- | ----------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| 22   | `89c4c40` (builder `47e0ac6`) | `PlatformLive`, per-app `AppServices`, HTTP router/auth/handlers, backup fiber, shutdown order.                |
-| 24   | `1761d09` (builder `d961ce1`) | `platform/logging/retention.ts` sweeper; reworked by item 36.                                                  |
-| 30   | `abf54ba` (builder `cfd24f4`) | json-layout number reads cast to REAL in the SQLite compiler (no new component).                               |
-| 31   | `f879fc7` (builder `ef50a8a`) | U+0000 rejected before commit in `core/schema.ts` and `Storage` (ADR 0005).                                    |
-| 32   | `bf884c6` (builder `632554c`) | `makeServer`, `ReaderProcess`, reader-exit shutdown, hourly ingest-then-sweep timer, `ListenError`.            |
-| 33   | `5108825` (builder `cdb6164`) | `platform/reader_layers.ts` and `reader_context.ts`; the reader's `ingest` RPC reaches `EventLogIngestLive`.   |
-| 34   | `33f16ff`                     | `X-Trace-Id` ingress rule, handler spans and `handler` events, trace captured into the reader frame.           |
-| 35   | `1f00391` (builder `a08e39c`) | Event-log schema v2: `event_id`, `event_kind`/`handler_kind`, backup `emitter`/`run_id`/`attempts` (ADR 0006). |
-| 36   | `827bdc4` (builder `6944503`) | Retention gated on committed ingest, ingest-then-sweep coordinator, derived-DB budget reporting (ADR 0007).    |
+| Item        | Landed as         | Diagram impact verified against code/diff                                                                                                                                    |
+| ----------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 22/24/30–36 | Through `e423ed1` | Existing Effect roots, native process split, trace/event schema v2 and ingest-gated retention retained.                                                                      |
+| 23          | `f9e882d`         | Logs CLI and named analysis catalog now built; offline read-only query and ingest/sweep paths.                                                                               |
+| 25          | `7828552`         | k6 point loader and bucket-overlap comparison now built; test port adds no service.                                                                                          |
+| 26          | `df31cdd`         | Removed platform/compiler.ts and throwing compatibility wrappers; pure compilation stays within existing components.                                                         |
+| MT-01       | `c2cc3fa`         | Postgres 17 central tenant/key schema and persistent dev volume; new Level 2 store/process.                                                                                  |
+| MT-01b      | `69cbd77`         | Journaled/advisory-locked migration CLI; used by MT-10.                                                                                                                      |
+| MT-02       | `d71ea77`         | Config tenancy modes, database URL, tenant directories and router selection; no separate process.                                                                            |
+| MT-03       | `6f448f8`         | Postgres TenantRegistry service; live scope-owned lazy acquisition in server root.                                                                                           |
+| MT-04       | `4eeacbf`         | TenantContext and per-app LocalFolderRouter; validated tenant files and leased, scope-owned Storage cache.                                                                   |
+| MT-05       | `6d7df35`         | Admin tenant/key HTTP operations backed by registry.                                                                                                                         |
+| MT-06       | `027e177`         | Tenant administration CLI and direct registry SQL path.                                                                                                                      |
+| MT-07       | `ebd89fa`         | Credential-derived tenant context, hashed-key cache and trusted tenant reader IPC.                                                                                           |
+| MT-08       | `9ff9859`         | Headless Better Auth HTTP/CLI, Postgres users/sessions/memberships; no external identity provider.                                                                           |
+| MT-09       | `c9ba958`         | Tenant-routing properties; no new runtime C4 surface.                                                                                                                        |
+| MT-10       | `643b706`         | Reader live analysis wired to catalog/shared ingest instance; E2E uses distinct tenants for incompatible layouts (not per-app storage directories). Seven-scenario E2E gate. |
 
-What is connected at runtime, what is only a library, and what is a target:
-
-- **Connected:** server layers and listener; reader child with its own root; ingest RPC (hourly timer,
-  `POST /admin/logs/ingest`); retention, only inside that RPC; caller trace from SDK to server to reader.
-- **Library only:** `startRetentionSweeper` (exported, mounted nowhere); `upgradeEventLog` (operator step, no
-  CLI).
-- **Target, not built:** item 23 (`platform/analysis/catalog.ts`, `scripts/logs.ts`, `docs/observability.md`;
-  `deno.json` declares `logs:*` tasks whose script is absent), item 25 (`perf/ingest_k6.ts`), event-table
-  pruning (`logs:compact`), and the multitenancy items.
-- **Tested composition:** `tests/unit/trace_e2e_test.ts`, `reader_ingest_test.ts`, `retention_ingest_test.ts`
-  and `server_scope_test.ts` run the real SDK, server, reader child and event-log file together. The test
-  counts and the date of the last full runs are recorded in the root [`README.md`](../../README.md).
+**Connected:** server layers, tenant auth/registry/routing when enabled, reader queries and named analysis,
+admin/hourly ingest-then-sweep, standalone logs/tenant/auth/migration CLIs, k6 point loader. **Library only:**
+`startRetentionSweeper` (not mounted), `upgradeEventLog` (explicit operator API, no CLI). **Future:**
+control-plane routing, event-table pruning and DuckDB compaction. No future work is drawn as a running
+service. Tests and counts are dated in the root [README.md](../../README.md).
 
 Each diagram pair's numbered relationship keys are identical in both formats. Component and observability
 terminal pictures use the keys to avoid crossing arrows; their boxes keep the same reading order as the
@@ -66,14 +65,16 @@ Mermaid definitions.
 
 - **Level 3 — reader components.** The reader composition is described in prose in the observability pair
   (`platform/reader_layers.ts`: Config, reader logging, IdGen, EventLogIngest, plus lazily opened per-app
-  readers). A separate reader-component diagram is deferred; there is no live analysis catalog.
+  readers). A separate reader-component diagram is deferred; the live catalog is described in the
+  observability pair.
 - **Level 4 — Code.** No additional type-structure diagram is needed.
 
-## Regenerating the terminal format
+## Regenerating both formats
 
-The box-drawing is generated from the sources in [`diagrams/`](diagrams), not hand-edited:
+Both Mermaid documents and terminal box-drawing are generated from the sources in [`diagrams/`](diagrams), not
+hand-edited:
 
 ```sh
-python3 docs/architecture/diagrams/render.py           # rewrite every terminal embed
-python3 docs/architecture/diagrams/render.py --check   # non-zero exit if an embed is stale
+python3 docs/architecture/diagrams/render.py           # regenerate both formats
+python3 docs/architecture/diagrams/render.py --check   # non-zero exit if either format is stale
 ```

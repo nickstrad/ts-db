@@ -1,151 +1,105 @@
-# C4 Level 3 — Component: inside the server process
+# Component — server process
 
-Renderings: [GitHub](c4-component-server.github.md) · [terminal](c4-component-server.terminal.md).
-
-## What this shows
-
-The live server composition is `PlatformLive` in `platform/layers.ts` (item 22), driven by `makeServer` in
-`platform/server.ts` (item 32). The HTTP router resolves per-app stacks through `AppServices`; it is not
-provided a single global `Storage`. All components shown inside the boundary are implemented and mounted. The
-reader and persistent stores are boundary elements; the reader's own composition is described in the
-[observability diagram](c4-container-observability.github.md). The pure kernel and service tags are
-compile-time modules used by these components, not runtime services.
-
-Current state at the audited commit (see [`README.md`](README.md#audited-state)): the server reaches the event
-log only through the reader's `ingest` RPC, and it carries the caller's trace to the reader (item 34). Item
-23's catalog and CLI are not drawn because they do not exist.
+Audited against landed main `643b706` on 2026-10-11 (item 27). Both formats are generated from
+`diagrams/c4-component-server.py`; numbered relationships are identical. All boxes describe landed code.
 
 ```mermaid
 flowchart TB
-    subgraph scope["Server process - PlatformLive (items 22, 32)"]
-        http["HTTP API<br/>[Component] (items 22, 34)<br/>platform/http/<br/>router.ts, auth.ts, handlers.ts<br/>Bearer auth; body cap; X-Trace-Id ingress;<br/>handler spans (item 34); typed errors"]
-        life["Server lifecycle<br/>[Component] (items 22, 32)<br/>platform/server.ts<br/>Scoped HTTP listener; backup and ingest-sweep<br/>timers; reader-exit watch; signals"]
-        apps["AppServices<br/>[Effect service] (item 22)<br/>platform/registry.ts<br/>AppServicesLive: platform/layers.ts<br/>One Storage + Backups stack per app"]
-        registry["AppRegistry<br/>[Effect service] (item 22)<br/>platform/registry.ts<br/>Config apps -&gt; schema, handlers, token, SQLite path"]
-        storage["Storage<br/>[Effect service] (item 15)<br/>platform/sqlite.ts<br/>Per-app scoped SQLite handle; serialized mutation/snapshot queue"]
-        backups["Backups<br/>[Effect service] (item 19)<br/>platform/backup.ts<br/>Per-app snapshot, verification, hash and publication"]
-        rpc["ReaderClient<br/>[Effect service] (items 17, 34)<br/>platform/ipc.ts<br/>Scoped child; Deferred replies; queue cap<br/>and deadline; caller trace captured per call"]
-        objects["ObjectStore<br/>[Effect service] (item 18)<br/>platform/object_store.ts<br/>Local files or signed S3; transient S3 retries"]
-        logs["Logger + EventSink<br/>[Effect logger/service] (11)<br/>platform/logging/<br/>logger.ts, file_sink.ts<br/>Dropping queue; JSONL batches; scope finalizer drains"]
-        config["Config<br/>[Effect service] (item 08)<br/>platform/config.ts<br/>Validated environment options; startup failure on invalid config"]
-        ids["IdGen<br/>[Effect service]<br/>platform/sqlite.ts<br/>IdGenLive: random UUIDs<br/>Clock: Effect runtime service"]
+    subgraph platform["Server process: PlatformLive"]
+        http["HTTP API / auth<br/>[Component]<br/>platform/http/; platform/auth/<br/>Named routes, traces, tenant/API-key/session authentication"]
+        life["Server lifecycle<br/>[Component]<br/>platform/server.ts<br/>Scoped listener, backup and ingest timers, reader-exit watch"]
+        apps["AppRegistry / AppServices<br/>[Effect services]<br/>platform/registry.ts; platform/layers.ts<br/>App schema/handlers; Storage and Backups stack per app"]
+        tenant["TenantRegistry<br/>[Effect service]<br/>platform/tenants/store.ts<br/>Lazy Postgres registry; bounded hashed-key TTL cache"]
+        route["TenantStorageRouter<br/>[Effect service]<br/>platform/tenants/routing.ts<br/>LocalFolderRouter per app; validated locations"]
+        context["TenantContext<br/>[Request-local Effect service]<br/>platform/tenants/routing.ts<br/>Trusted credential-derived tenant id; scoped continuation"]
+        storage["Storage<br/>[Effect service]<br/>platform/sqlite.ts<br/>Scoped handles; serialization; rollback and context expiry"]
+        backup["Backups / ObjectStore<br/>[Effect services]<br/>platform/backup.ts; platform/object_store.ts<br/>Snapshot/hash/manifest; local or signed S3"]
+        rpc["ReaderClient / ReaderProcess<br/>[Effect services]<br/>platform/ipc.ts; platform/layers.ts<br/>Scoped child, capped queue, deadline, trace/tenant frames"]
+        logging["Logger / EventSink<br/>[Effect logger/service]<br/>platform/logging/<br/>Dropping queue; batched JSONL; final drain"]
+        config["Config / IdGen<br/>[Effect services]<br/>platform/config.ts; platform/sqlite.ts<br/>Validated options; UUIDs; Effect runtime Clock"]
     end
-        reader["Reader process<br/>[Deno child process]<br/>platform/reader.ts<br/>Root: platform/reader_layers.ts (item 33)"]
-        files["App SQLite files<br/>[SQLite 3, WAL]<br/>&lt;DATA_DIR&gt;/&lt;appId&gt;.sqlite"]
-        store["Object storage<br/>[External system/filesystem]<br/>S3_BASE_URL or OBJECT_STORE_DIR<br/>apps/&lt;appId&gt;/"]
-        jsonl["JSONL directories<br/>[filesystem]<br/>&lt;LOG_DIR&gt;/server/&lt;date&gt;/"]
-    life -->|"(1) serves HTTP requests"| http
-    http -->|"(2) resolve per-app stack"| apps
-    life -->|"(3) scheduled backups"| apps
-    apps -->|"(4) enumerate app definitions"| registry
-    apps -->|"(5) build/expose per-app writer"| storage
-    apps -->|"(6) build/expose per-app backup"| backups
-    http -->|"(7) health app list"| registry
-    http -->|"(8) query, ping, ingest, analysis"| rpc
-    backups -->|"(9) snapshot(path)"| storage
-    backups -->|"(10) PUT snapshot and manifests"| objects
-    http -->|"(11) HTTP and defect records"| logs
-    life -->|"(12) lifecycle records"| logs
-    storage -->|"(13) SQL, tx and queue records"| logs
-    rpc -->|"(14) IPC lifecycle and queue records"| logs
-    backups -->|"(15) backup phase records"| logs
-    objects -->|"(16) object operation records"| logs
-    config -->|"(17) auth and request limits"| http
-    config -->|"(18) listener and backup settings"| life
-    config -->|"(19) registered app settings"| registry
-    config -->|"(20) logging settings"| storage
-    config -->|"(21) configured call deadline"| rpc
-    config -->|"(22) object-store settings"| objects
-    config -->|"(23) sink and log settings"| logs
-    ids -->|"(24) new trace IDs"| http
-    ids -->|"(25) generated IDs"| storage
-    ids -->|"(26) generated IDs"| backups
-    ids -->|"(27) generated IDs"| objects
-    storage -->|"(28) node:sqlite writes"| files
-    rpc -->|"(29) stdin/stdout JSON-lines RPC"| reader
-    objects -->|"(30) signed HTTP or local file I/O"| store
-    logs -->|"(31) append JSONL"| jsonl
-    life -->|"(32) hourly ingest request"| rpc
-    life -->|"(33) watch child exit"| rpc
-    apps -->|"(34) storage-opened/closed records"| logs
+        pg["Central registry<br/>[Postgres process/store]<br/>DATABASE_URL<br/>Tenant/key and headless auth data"]
+        files["Application files<br/>[SQLite 3 WAL]<br/>DATA_DIR; TENANTS_DIR<br/>Legacy app files or tenant locations"]
+        reader["Reader child<br/>[Deno process]<br/>platform/reader.ts<br/>DuckDB reads, ingest and analysis"]
+        objects["Object storage<br/>[External system / filesystem]<br/>S3_BASE_URL or LOCAL_OBJECT_DIR<br/>Snapshot and manifest objects"]
+        jsonl["Server JSONL<br/>[Filesystem]<br/>LOG_DIR/server/date/<br/>Durable structured records"]
+    http -->|"(1) Resolve app and named handler"| apps
+    http -->|"(2) Resolve hashed credentials; admin tenant/key CRUD"| tenant
+    http -->|"(3) Better Auth session/registration SQL"| pg
+    http -->|"(4) Provide authenticated tenant per request"| context
+    context -->|"(5) Resolve tenant writer; never use caller selectors"| storage
+    apps -->|"(6) Build per-app LocalFolderRouter"| route
+    route -->|"(7) Prepare validated SQLite capability and schema"| files
+    storage -->|"(8) Resolve/prepare tenant location before opening a cached writer"| route
+    http -->|"(9) Mutation Effect inside serialized transaction"| storage
+    http -->|"(10) Query/ingest/analysis frames; trace and trusted tenant path"| rpc
+    storage -->|"(11) node:sqlite transaction and snapshot reads"| files
+    life -->|"(12) Scoped backup timer"| backup
+    backup -->|"(13) Consistent VACUUM INTO snapshot"| storage
+    backup -->|"(14) Verified snapshot and manifest publication"| objects
+    tenant -->|"(15) Parameterized registry SQL; lazy scoped pool"| pg
+    life -->|"(16) Ping; hourly ingest; reader-exit watch and finalizer"| rpc
+    rpc -->|"(17) JSONL RPC; scoped child shutdown"| reader
+    storage -->|"(18) SQL/tx/queue events"| logging
+    http -->|"(19) HTTP/handler spans and failures"| logging
+    life -->|"(20) Startup/shutdown and timer events"| logging
+    backup -->|"(21) Backup and object-transfer events"| logging
+    logging -->|"(22) Batched append; rotation and scope drain"| jsonl
+    config -->|"(23) App schemas, tokens and paths; generated ids"| apps
+    config -->|"(24) DATABASE_URL and scope-owned cache"| tenant
+    config -->|"(25) TENANTS_DIR and router selection"| route
+    config -->|"(26) Level, queue, flush and rotation settings"| logging
     classDef planned stroke-dasharray: 5 3
     classDef person fill:#fff,stroke-width:2px
     classDef external fill:#f4f4f4
-    class reader external
+    class pg external
     class files external
-    class store external
+    class reader external
+    class objects external
     class jsonl external
 ```
 
 ## Relationships
 
-All arrows are listed here in both formats. The terminal uses this key instead of crossing lines.
-
-| #  | From               | To                 | Relationship                                                                                                                                                                                      |
-| -- | ------------------ | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1  | Server lifecycle   | HTTP API           | `Deno.serve` invokes the router on the Effect runtime; shutdown drains requests before closing dependencies.                                                                                      |
-| 2  | HTTP API           | AppServices        | Mutation and admin-backup handlers resolve `AppServices.get(appId)`, then call the stack storage or backups.                                                                                      |
-| 3  | Server lifecycle   | AppServices        | A scoped `Schedule.spaced` fiber enumerates app stacks and calls backups sequentially. Disabled when `BACKUP_INTERVAL_MS=0`.                                                                      |
-| 4  | AppServices        | AppRegistry        | `AppServicesLive` enumerates `AppRegistry.all` while building per-app stacks.                                                                                                                     |
-| 5  | AppServices        | Storage            | One scoped writer per registered app, shared with that app's backups.                                                                                                                             |
-| 6  | AppServices        | Backups            | `BackupsLive` is provided the matching `StorageLive`.                                                                                                                                             |
-| 7  | HTTP API           | AppRegistry        | Health lists registered apps and pings the reader.                                                                                                                                                |
-| 8  | HTTP API           | ReaderClient       | JSON RPC: `query`, `ping`, and `ingest` (the reader's ingest-then-sweep). `analysis` returns `UnknownAnalysisQuery` (404) until item 23. A reader exit, timeout or protocol failure is HTTP 502.  |
-| 9  | Backups            | Storage            | `VACUUM INTO` serializes with mutations; verification and upload run after releasing the writer queue.                                                                                            |
-| 10 | Backups            | ObjectStore        | Snapshot -> quick_check -> SHA-256 -> immutable object -> manifest -> latest.json. Failure cannot publish latest early.                                                                           |
-| 11 | HTTP API           | Logger + EventSink | One `http` record per request, plus a `handler` record for app invocations (ok, typed failure, defect or interruption); trace ID echoed in the response. Each handler runs as a child span.       |
-| 12 | Server lifecycle   | Logger + EventSink | Startup, stopping, HTTP drain and shutdown events. Shutdown marker runs before final log drain.                                                                                                   |
-| 13 | Storage            | Logger + EventSink | SQL tracing honors configuration; failed statements and transaction outcomes are recorded, carrying the handler's `traceId` and `spanId`.                                                         |
-| 14 | ReaderClient       | Logger + EventSink | Queue and anomaly records. A call's events carry the trace captured at submission; connection-level events and untraced calls use the connection's `reader-client-<uuid>` trace.                  |
-| 15 | Backups            | Logger + EventSink | Snapshot, verify, hash, put-manifest and publish-latest events; snapshot object PUT is normally recorded by ObjectStore.                                                                          |
-| 16 | ObjectStore        | Logger + EventSink | PUT emits backup/put-object; GET emits lifecycle records, with outcome and duration.                                                                                                              |
-| 17 | Config             | HTTP API           | The HTTP components consume the validated admin token and body-size limit.                                                                                                                        |
-| 18 | Config             | Server lifecycle   | Bind host, port, backup interval and startup token warnings.                                                                                                                                      |
-| 19 | Config             | AppRegistry        | App IDs, layouts, tokens and data directory.                                                                                                                                                      |
-| 20 | Config             | Storage            | Storage consumes logging configuration; file/schema/appId arrive through AppServicesLive.                                                                                                         |
-| 21 | Config             | ReaderClient       | `ReaderClientConfigured` reads `READER_CALL_TIMEOUT_MS` (default 30 seconds).                                                                                                                     |
-| 22 | Config             | ObjectStore        | Local directory or S3 endpoint/credentials and signing region.                                                                                                                                    |
-| 23 | Config             | Logger + EventSink | Directory, log level, queue capacity and file rotation policy.                                                                                                                                    |
-| 24 | IdGen              | HTTP API           | Fallback when the presented X-Trace-Id is absent or invalid.                                                                                                                                      |
-| 25 | IdGen              | Storage            | Document/event IDs from IdGen; times from Effect Clock.                                                                                                                                           |
-| 26 | IdGen              | Backups            | Backup IDs and events; phase timings use Effect Clock.                                                                                                                                            |
-| 27 | IdGen              | ObjectStore        | Temporary object names and operation events.                                                                                                                                                      |
-| 28 | Storage            | App SQLite files   | `DatabaseSync`; one BEGIN IMMEDIATE transaction per mutation, including handler reads; scoped rollback on failure/interruption.                                                                   |
-| 29 | ReaderClient       | Reader process     | Child in its own process group; finalizer closes stdin, waits, then escalates SIGTERM/SIGKILL. A frame carries `traceId`, `spanId` and `parentSpanId` when the call was made inside a request.    |
-| 30 | ObjectStore        | Object storage     | S3 PUT/GET signed with aws4fetch, or local temp-file + rename publication.                                                                                                                        |
-| 31 | Logger + EventSink | JSONL directories  | Batched append writes with per-role/date/hour/pid/sequence file names.                                                                                                                            |
-| 32 | Server lifecycle   | ReaderClient       | A scoped `Schedule.spaced` fiber sends `ingest` every `INGEST_SWEEP_INTERVAL` (1 hour, first run after one interval). Failures are `ingest-sweep-failed` warnings; the server never opens DuckDB. |
-| 33 | Server lifecycle   | ReaderClient       | `ReaderProcess.exited` is raced against the stop signal; a reader exit while serving logs `stopping` (`reader-exited`), shuts down in order and exits 1.                                          |
-| 34 | AppServices        | Logger + EventSink | `storage-opened` / `storage-closed` lifecycle records per app (closed only after the handle and writer queue have closed).                                                                        |
+| #  | From                         | To                           | Relationship                                                   |
+| -- | ---------------------------- | ---------------------------- | -------------------------------------------------------------- |
+| 1  | HTTP API / auth              | AppRegistry / AppServices    | Resolve app and named handler                                  |
+| 2  | HTTP API / auth              | TenantRegistry               | Resolve hashed credentials; admin tenant/key CRUD              |
+| 3  | HTTP API / auth              | Central registry             | Better Auth session/registration SQL                           |
+| 4  | HTTP API / auth              | TenantContext                | Provide authenticated tenant per request                       |
+| 5  | TenantContext                | Storage                      | Resolve tenant writer; never use caller selectors              |
+| 6  | AppRegistry / AppServices    | TenantStorageRouter          | Build per-app LocalFolderRouter                                |
+| 7  | TenantStorageRouter          | Application files            | Prepare validated SQLite capability and schema                 |
+| 8  | Storage                      | TenantStorageRouter          | Resolve/prepare tenant location before opening a cached writer |
+| 9  | HTTP API / auth              | Storage                      | Mutation Effect inside serialized transaction                  |
+| 10 | HTTP API / auth              | ReaderClient / ReaderProcess | Query/ingest/analysis frames; trace and trusted tenant path    |
+| 11 | Storage                      | Application files            | node:sqlite transaction and snapshot reads                     |
+| 12 | Server lifecycle             | Backups / ObjectStore        | Scoped backup timer                                            |
+| 13 | Backups / ObjectStore        | Storage                      | Consistent VACUUM INTO snapshot                                |
+| 14 | Backups / ObjectStore        | Object storage               | Verified snapshot and manifest publication                     |
+| 15 | TenantRegistry               | Central registry             | Parameterized registry SQL; lazy scoped pool                   |
+| 16 | Server lifecycle             | ReaderClient / ReaderProcess | Ping; hourly ingest; reader-exit watch and finalizer           |
+| 17 | ReaderClient / ReaderProcess | Reader child                 | JSONL RPC; scoped child shutdown                               |
+| 18 | Storage                      | Logger / EventSink           | SQL/tx/queue events                                            |
+| 19 | HTTP API / auth              | Logger / EventSink           | HTTP/handler spans and failures                                |
+| 20 | Server lifecycle             | Logger / EventSink           | Startup/shutdown and timer events                              |
+| 21 | Backups / ObjectStore        | Logger / EventSink           | Backup and object-transfer events                              |
+| 22 | Logger / EventSink           | Server JSONL                 | Batched append; rotation and scope drain                       |
+| 23 | Config / IdGen               | AppRegistry / AppServices    | App schemas, tokens and paths; generated ids                   |
+| 24 | Config / IdGen               | TenantRegistry               | DATABASE_URL and scope-owned cache                             |
+| 25 | Config / IdGen               | TenantStorageRouter          | TENANTS_DIR and router selection                               |
+| 26 | Config / IdGen               | Logger / EventSink           | Level, queue, flush and rotation settings                      |
 
 ## Runtime notes
 
-- Layer acquisition is Config -> logging -> shutdown marker -> IdGen -> ObjectStore/AppRegistry -> AppServices
-  -> ReaderClient (plus `ReaderProcess`); the program then pings the reader, starts the ingest-then-sweep
-  fiber and the backup fiber, and binds the HTTP listener. Shutdown reverses this: HTTP drain, backup fiber,
-  ingest-sweep fiber, reader, DB handles, final `lifecycle` event, log drain. `Layer.provideMerge` enforces
-  the dependency chain; normal layer-reference memoization shares services. There is no explicit
-  `Layer.memoize` call. A failure at any startup step releases everything acquired before it; an HTTP bind
-  failure is a typed `ListenError`.
-- Pure dependencies in `core/` provide schema validation, plan normalization, SQL compilation/decoding,
-  errors, events, IPC framing and rotation policy. Tags are declared in `platform/services.ts`, except
-  `AppServices` in `platform/registry.ts`. These are module dependencies, not another layer service.
-- Routes: `GET /health`, `POST /apps/:appId/:kind/:name`, `POST /admin/backup/:appId`,
-  `POST /admin/logs/ingest`, `POST /admin/logs/analysis/:name`. Default body cap: 64 KiB. Conflict is 409,
-  queue full is 503, body too large is 413, a reader failure is 502; `core/errors.ts:toHttpStatus` maps typed
-  failures.
-- `POST /admin/logs/ingest` is answered by the reader's ingest-then-sweep coordinator (ADR 0007); an
-  unopenable or incompatible event-log file is a typed `IngestError` (500) and does not stop queries.
-  `POST /admin/logs/analysis/:name` returns `UnknownAnalysisQuery` (404) after auth and input validation.
-- The server process never imports `@duckdb/node-api` or the reader's root; `platform/layers.ts` imports
-  `platform/eventlog/*` as types only. `tests/unit/server_scope_test.ts` inspects the server import graph.
-- Retention (`platform/logging/retention.ts`) is not a server component: no server fiber sweeps files. It runs
-  only inside the reader's `ingest` RPC, because only the reader can read the ingest watermarks.
-- Trace context: ingress validates `X-Trace-Id` (1-128 of `[A-Za-z0-9._:-]`, otherwise generated, always
-  echoed); each handler is a child span; `ReaderClient` captures the trace when a call is submitted and the
-  frame carries it to the reader. The ingest timer and startup ping run outside any trace and send legacy
-  frames. `tests/unit/trace_e2e_test.ts` covers the real SDK, server and reader child.
-- Item 31 (U+0000 rejection) and item 30 (json-layout REAL cast) live in `Storage` and the compiler, so they
-  change behavior inside components already drawn rather than adding a component.
-- `tests/unit/http_test.ts` exercises the router over in-memory services; components and TypeScript modules
-  are distinguished here because the router and lifecycle program are not `Context.Tag`s.
+Config is acquired before logging, then IdGen, ObjectStore/AppRegistry, TenantRegistry, AppServices and
+ReaderClient. Shutdown drains HTTP, stops timers, closes reader and DB handles, emits the final lifecycle
+event, then drains logging. Every partial startup releases acquired resources. Auth derives TenantContext
+before consuming app arguments; the trusted reader location is prepared behind a shared initialization
+barrier. Tenant key revocation invalidates the local cache; other instances converge within its TTL.
+Tenant-mode writers use a bounded scope-owned handle cache (default 64 handles, 60-second idle expiry);
+requests lease handles, and shutdown drains leases before closing them. Retention and named analysis execute
+in the reader, never as server-side DuckDB components. Item 26 removes compatibility wrappers and
+platform/compiler.ts; pure compilation now lives in core/compile/ and introduces no new runtime component.
+HTTP status mapping lives in core/errors.ts. Better Auth connections are bounded to each request/CLI
+operation, separate from the lazy registry pool.

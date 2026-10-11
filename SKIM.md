@@ -1,17 +1,13 @@
-# Skim the document-platform MVP
+# Skim the Effect document database
 
-The app author writes TypeScript document operations. The SDK records operations; the platform compiles them.
-No app handler supplies SQL.
+These excerpts are copied from the landed source at `643b706`. Omitted sections are described in prose, not
+rewritten as alternate implementations. See [README.md](README.md) for configuration and verification.
 
-Two long-lived processes share each app's local SQLite file: the API/SQLite writer and a DuckDB query worker.
-The writer also runs an optional backup timer.
+## Application schema and handler
 
-**Verification:** 20 core tests passed using Node's real SQLite adapter. Core TypeScript passed strict
-checking. The Deno server, native DuckDB execution, end-to-end integration test, and S3 upload were not run in
-this environment. See README.md for exact commands and limits.
+Source: [app/schema.ts](app/schema.ts).
 
-## 1. App schema — app/schema.ts
-
+<!-- deno-fmt-ignore -->
 ```ts
 import { defineSchema, defineTable, v } from "../sdk/schema.ts";
 export const mark = v.enum("X", "O");
@@ -36,346 +32,208 @@ export const schema = defineSchema({
 });
 ```
 
-## 2. App handlers — app/functions.ts
+The schema remains TypeScript data. Mutations compose document operations as effects; the following member
+belongs to the exported functions object, not a separate Promise-based handler.
 
-The application contains the game rules, but no database-specific code. Reads inside mutations use the
-mutation's SQLite transaction; public query handlers receive the DuckDB adapter.
+Source: [app/functions.ts](app/functions.ts).
 
+<!-- deno-fmt-ignore -->
 ```ts
-// Application code: no SQL, database drivers, file paths, or storage-mode branches.
-import { defineFunctions } from "../sdk/functions.ts";
-import { v } from "../sdk/schema.ts";
-import { schema } from "./schema.ts";
-const { query, mutation } = defineFunctions(schema);
-const lines = [
-  [0, 1, 2],
-  [3, 4, 5],
-  [6, 7, 8],
-  [0, 3, 6],
-  [1, 4, 7],
-  [2, 5, 8],
-  [0, 4, 8],
-  [2, 4, 6],
-];
-
-export const functions = {
   createGame: mutation({
     args: { xPlayer: v.string(), oPlayer: v.string() },
-    async handler({ db }, { xPlayer, oPlayer }) {
-      if (!xPlayer.trim() || !oPlayer.trim() || xPlayer === oPlayer) {
-        throw new Error("Provide two distinct players");
-      }
-      const gameId = await db.insert("games", {
-        xPlayer,
-        oPlayer,
-        board: Array(9).fill(null),
-        turn: "X",
-        status: "playing",
-        winner: null,
-      });
-      return { gameId };
-    },
+    handler: ({ db }, { xPlayer, oPlayer }) =>
+      Effect.gen(function* () {
+        yield* validatePlayers(xPlayer, oPlayer);
+        const gameId = yield* db.insert("games", {
+          xPlayer,
+          oPlayer,
+          board: Array(9).fill(null),
+          turn: "X",
+          status: "playing",
+          winner: null,
+        });
+        return { gameId };
+      }),
   }),
+```
 
-  makeMove: mutation({
-    args: { gameId: v.string(), playerId: v.string(), cell: v.integer(), expectedVersion: v.integer() },
-    async handler({ db }, { gameId, playerId, cell, expectedVersion }) {
-      // Although this is a read, it uses SQLite because we're inside a mutation.
-      const game = await db.get("games", gameId);
-      if (!game) throw new Error("Game not found");
-      if (game._version !== expectedVersion) throw new Error("Stale version; reload the game");
-      if (game.status !== "playing") throw new Error("Game is over");
-      const expectedPlayer = game.turn === "X" ? game.xPlayer : game.oPlayer;
-      if (playerId !== expectedPlayer) throw new Error("Not your turn");
-      if (cell < 0 || cell > 8 || game.board[cell] !== null) throw new Error("Invalid move");
+## Document operations describe effects
 
-      const board = [...game.board];
-      board[cell] = game.turn;
-      const won = lines.some(([a, b, c]) =>
-        board[a] === game.turn && board[b] === game.turn && board[c] === game.turn
+Source: [sdk/db.ts](sdk/db.ts).
+
+<!-- deno-fmt-ignore -->
+```ts
+export type Operation =
+  | SelectPlan
+  | { kind: "insert"; table: string; value: unknown }
+  | { kind: "patch"; table: string; id: string; value: unknown }
+  | { kind: "delete"; table: string; id: string };
+export type Execute = (operation: Operation) => Effect.Effect<unknown, DbError>;
+```
+
+## A terminal read returns a typed Effect
+
+Source: [sdk/db.ts](sdk/db.ts).
+
+<!-- deno-fmt-ignore -->
+```ts
+collect(): Effect.Effect<T[], DbError> {
+  return Effect.map(this.execute(this.plan), (rows) => rows as T[]);
+}
+first(): Effect.Effect<T | null, DbError> {
+  return Effect.map(this.limit(1).collect(), (rows) => rows[0] ?? null);
+}
+```
+
+## Pure compilation reports typed errors
+
+Source: [core/compile/select.ts](core/compile/select.ts).
+
+<!-- deno-fmt-ignore -->
+```ts
+export function tableFor(schema: Schema, name: string): Either.Either<Table, CompileError> {
+  if (!Object.hasOwn(schema, name)) {
+    return Either.left(new CompileError({ reason: "unknown-collection", table: name }));
+  }
+  return Either.right(schema[name]);
+}
+```
+
+`compileSelect` in the same file normalizes the plan and returns `Either<SQL, CompileError | SchemaError>`.
+The compiler returns SQL text with bound values; the platform lifts the Either into its Effect channel.
+`GENERATED_SQL.txt` shows actual output for both layouts and dialects.
+
+## Mutation transactions have scoped rollback
+
+Source: [platform/sqlite.ts](platform/sqlite.ts).
+
+<!-- deno-fmt-ignore -->
+```ts
+    const transaction = <A, E>(
+      queueWaitMs: number,
+      use: (tx: Tx) => Effect.Effect<A, E>,
+    ): Effect.Effect<A, E | StorageError> =>
+      Effect.acquireUseRelease(
+        Effect.suspend(() => {
+          const startedNanos = nanos();
+          try {
+            database.exec("BEGIN IMMEDIATE");
+          } catch (cause) {
+            return Effect.fail(new StorageError({ operation: "begin", detail: messageOf(cause), cause }));
+          }
+          const tx: Tx = { active: true, committed: false, operations: 0, startedNanos, queueWaitMs };
+          return Effect.succeed(tx);
+        }),
+        (tx) =>
+          Effect.flatMap(use(tx), (result) =>
+            Effect.suspend(() => {
+              // Expire in the same step as COMMIT: the release runs later, after a possible yield.
+              tx.active = false;
+              try {
+                database.exec("COMMIT");
+              } catch (cause) {
+                return Effect.fail(
+                  new StorageError({ operation: "commit", detail: messageOf(cause), cause }),
+                );
+              }
+              tx.committed = true;
+              return Effect.succeed(result);
+            })),
+        (tx, exit) =>
+          Effect.suspend(() => {
+            tx.active = false;
+            let rollbackFailure: unknown;
+            if (!tx.committed && database.isTransaction) {
+              try {
+                database.exec("ROLLBACK");
+              } catch (cause) {
+                rollbackFailure = cause;
+              }
+            }
+            const outcome: TxOutcome = tx.committed
+              ? "commit"
+              : Exit.isFailure(exit) && Cause.isInterruptedOnly(exit.cause)
+              ? "interrupted"
+              : "rollback";
+            const columns = Exit.isFailure(exit) ? errorColumns(exit.cause) : {};
+            const emitted = Effect.flatMap(envelope(outcome === "interrupted" ? "warn" : "info"), (env) =>
+              sink.emit(txEvent({
+                ...env,
+                engine: "sqlite",
+                outcome,
+                operations: tx.operations,
+                durationMs: msSince(tx.startedNanos),
+                queueWaitMs: tx.queueWaitMs,
+                ...columns,
+              })));
+            // A connection still inside a transaction would poison every later job: fail loudly.
+            return rollbackFailure !== undefined && database.isTransaction
+              ? Effect.zipRight(
+                emitted,
+                Effect.die(
+                  new StorageError({
+                    operation: "rollback",
+                    detail: messageOf(rollbackFailure),
+                    cause: rollbackFailure,
+                  }),
+                ),
+              )
+              : emitted;
+          }),
       );
-      const status = won ? "won" : board.every((x) => x !== null) ? "draw" : "playing";
-
-      await db.patch("games", gameId, {
-        board,
-        status,
-        winner: won ? game.turn : null,
-        turn: game.turn === "X" ? "O" : "X",
-      });
-      await db.insert("moves", {
-        gameId,
-        playerId,
-        mark: game.turn,
-        cell,
-        moveNumber: board.filter((x) => x !== null).length,
-      });
-      // Board update + move insertion + this read all share one SQLite transaction.
-      return await db.get("games", gameId);
-    },
-  }),
-
-  getGame: query({
-    args: { gameId: v.string() },
-    handler: ({ db }, { gameId }) => db.get("games", gameId),
-  }),
-
-  listGames: query({
-    args: { status: v.enum("playing", "won", "draw") },
-    handler: ({ db }, { status }) =>
-      db.find("games", { status })
-        .sort("_creationTime", "desc").limit(20).collect(),
-  }),
-
-  moveHistory: query({
-    args: { gameId: v.string() },
-    handler: ({ db }, { gameId }) =>
-      db.find("moves", { gameId })
-        .sort("moveNumber").limit(9).collect(),
-  }),
-
-  winsByMark: query({
-    args: {},
-    // Compiles to a filtered GROUP BY + COUNT in DuckDB, not JS aggregation.
-    handler: ({ db }) => db.find("games", { status: "won" }).countBy("winner"),
-  }),
-
-  deleteGame: mutation({
-    args: { gameId: v.string() },
-    async handler({ db }, { gameId }) {
-      if (!await db.get("games", gameId)) throw new Error("Game not found");
-      for (const move of await db.find("moves", { gameId }).limit(9).collect()) {
-        await db.delete("moves", move._id);
-      }
-      await db.delete("games", gameId);
-      return { deleted: true };
-    },
-  }),
-};
 ```
 
-## 3. Typed client — scripts/demo.ts
+The release callback expires the context, rolls back every uncommitted exit, emits the transaction event, and
+reports rollback failures. A semaphore serializes the writer queue.
 
+## Reader resources belong to a layer
+
+Source: [platform/duckdb.ts](platform/duckdb.ts).
+
+<!-- deno-fmt-ignore -->
 ```ts
-import { createClient } from "../sdk/client.ts";
-import type { functions } from "../app/functions.ts";
-const base = Deno.env.get("BASE_URL") ?? "http://127.0.0.1:8000";
-const app = Deno.args[0] ?? "tic-tac-toe";
-const client = createClient<typeof functions>(base, app, Deno.env.get("TOKEN") ?? "dev-only");
-const { gameId } = await client.mutation("createGame", { xPlayer: "alice", oPlayer: "bob" });
-console.log("Created:", gameId);
-let game = await client.query("getGame", { gameId });
-for (const [playerId, cell] of [["alice", 0], ["bob", 3], ["alice", 1], ["bob", 4], ["alice", 2]] as const) {
-  game = await client.mutation("makeMove", { gameId, playerId, cell, expectedVersion: game!._version });
-}
-console.log("Game:", await client.query("getGame", { gameId }));
-console.log("Moves:", await client.query("moveHistory", { gameId }));
-console.log("Wins:", await client.query("winsByMark", {}));
-console.log("Won games:", await client.query("listGames", { status: "won" }));
-```
-
-## 4. Query API to plan — sdk/db.ts, excerpts
-
-Each chained method creates a new plan. collect/first/count/countBy execute it. The full file includes typing,
-validation, additional methods, and writes.
-
-```ts
-export type Filter = { field: string; op: "eq" | "gt"; value: unknown };
-export type SelectPlan = {
-  kind: "select";
-  table: string;
-  filters: Filter[];
-  order?: { field: string; direction: "asc" | "desc" };
-  limit: number;
-  aggregate?: { kind: "count" } | { kind: "countBy"; field: string };
-};
-
-export class Find<T> {
-  constructor(private execute: Execute, readonly plan: SelectPlan) {}
-  where<K extends ScalarKey<T>>(field: K, value: T[K]): Find<T> {
-    return new Find(this.execute, {
-      ...this.plan,
-      filters: [...this.plan.filters, { field, op: "eq", value }],
-    });
-  }
-  // ... sort and limit create modified copies of this same plan ...
-  async collect(): Promise<T[]> {
-    return await this.execute(this.plan) as T[];
-  }
+export function ReaderLive(
+  app: ReaderApp,
+  driver: DuckDriver = duckDriver,
+): Layer.Layer<Reader, ReaderError, Config | EventSink> {
+  return Layer.scoped(Reader, makeReader(app, driver));
 }
 ```
 
-## 5. Plan to SQL — platform/compiler.ts, excerpt
+## Native handles register finalizers immediately
 
-This is platform code, not app code. The remaining compiler helpers handle schema metadata, JSON
-extraction/casts, bound values, DDL, writes, and row decoding.
+Source: [platform/duckdb.ts](platform/duckdb.ts).
 
+<!-- deno-fmt-ignore -->
 ```ts
-export function compileSelect(schema: Schema, plan: SelectPlan, dialect: Dialect): SQL {
-  const table = tableFor(schema, plan.table);
-  if (!Number.isInteger(plan.limit) || plan.limit < 1 || plan.limit > 1000) throw new Error("Invalid limit");
-  const values: Bind[] = [];
-  const bind = (value: Bind) => {
-    values.push(value);
-    return dialect === "sqlite" ? "?" : `$p${values.length}`;
-  };
-  const where = plan.filters.map((filter) => {
-    const node = scalar(table, filter.field);
-    validate(node, filter.value, filter.field);
-    const expr = expression(table, filter.field, dialect);
-    if (filter.op === "eq" && filter.value === null) return `${expr} IS NULL`;
-    if (filter.op !== "eq" && filter.op !== "gt") throw new Error("Unsupported operator");
-    if (filter.op === "gt" && (filter.value === null || !["integer", "number"].includes(node.kind))) {
-      throw new Error("gt requires a non-null numeric field and value");
-    }
-    return `${expr} ${filter.op === "eq" ? "=" : ">"} ${bind(encode(node, filter.value))}`;
-  });
-  const target = dialect === "duckdb" ? `"app".${quote(plan.table)}` : quote(plan.table);
-  let projection = "*";
-  if (plan.aggregate?.kind === "count") projection = 'COUNT(*) AS "count"';
-  if (plan.aggregate?.kind === "countBy") {
-    projection = `${expression(table, plan.aggregate.field, dialect)} AS "value", COUNT(*) AS "count"`;
-  }
-  let text = `SELECT ${projection} FROM ${target}`;
-  if (where.length) text += ` WHERE ${where.join(" AND ")}`;
-  if (plan.aggregate?.kind === "countBy") text += ' GROUP BY 1 ORDER BY "value" ASC NULLS FIRST';
-  else if (!plan.aggregate) {
-    if (plan.order) {
-      if (!["asc", "desc"].includes(plan.order.direction)) throw new Error("Invalid ordering");
-      const { field, direction } = plan.order;
-      text += ` ORDER BY ${expression(table, field, dialect)} ${direction.toUpperCase()} NULLS ${
-        direction === "asc" ? "FIRST" : "LAST"
-      }, "_id" ASC`;
-    } else text += ' ORDER BY "_id" ASC';
-  }
-  // count counts all matching documents; countBy limits returned groups, not input rows.
-  if (plan.aggregate?.kind !== "count") text += ` LIMIT ${bind(plan.limit)}`;
-  return { text, values };
-}
+    const instance = yield* Effect.acquireRelease(
+      native("open", () => driver.open()),
+      (handle) => close("instance", handle),
+    );
+    // Registered after the instance, so it is released before it (finalizers run LIFO).
+    const connection = yield* Effect.acquireRelease(
+      native("open", () => instance.connect()),
+      (handle) => close("connection", handle),
+    );
+    yield* native("open", () => connection.run("INSTALL sqlite"));
+    yield* native("open", () => connection.run("LOAD sqlite"));
+    yield* native(
+      "attach",
+      () => connection.run(`ATTACH ${literal(app.file)} AS "app" (TYPE SQLITE, READ_ONLY)`),
+    );
 ```
 
-## 6. SQLite mutation boundary — platform/sqlite.ts, excerpt
-
-The exclusive queue prevents asynchronous handlers from interleaving on the same SQLite connection. All
-document operations inside the handler use this transaction.
-
-```ts
-async mutation(definition: AnyDefinition, args: unknown): Promise<unknown> {
-  if (definition.kind !== "mutation") throw new Error("Expected a mutation");
-  return await this.exclusive(async () => {
-    this.database.exec("BEGIN IMMEDIATE");
-    let active = true;
-    const documents = new Documents<S>(async (op) => {
-      if (!active) throw new Error("Transaction context has expired");
-      return this.execute(op);
-    });
-    try {
-      const result = await definition.invoke(documents, args);
-      // Catch non-JSON results before committing; transport cannot serialize them later.
-      const safeResult = JSON.parse(JSON.stringify(result ?? null));
-      this.database.exec("COMMIT");
-      return safeResult;
-    } catch (e) {
-      this.database.exec("ROLLBACK");
-      throw e;
-    } finally { active = false; }
-  });
-}
-```
-
-## 7. DuckDB execution — platform/duckdb.ts
-
-This module is only loaded in the reader OS process. It attaches the live SQLite file read-only; it does not
-create a second persistent database.
-
-```ts
-// Reader process ONLY. It deliberately never imports node:sqlite.
-import { type DuckDBConnection, DuckDBInstance } from "npm:@duckdb/node-api@1.5.6";
-import { Documents } from "../sdk/db.ts";
-import type { Schema } from "../sdk/schema.ts";
-import type { AnyDefinition } from "../sdk/functions.ts";
-import { compileSelect, decode, literal, type SQL } from "./compiler.ts";
-// Keep this type local: do NOT import the SQLite module merely for its logger.
-type Trace = (engine: "sqlite" | "duckdb", sql: SQL) => void;
-
-export class DuckReader<S extends Schema> {
-  private constructor(
-    private instance: DuckDBInstance,
-    private connection: DuckDBConnection,
-    private schema: S,
-    private trace: Trace,
-  ) {}
-  static async open<S extends Schema>(
-    file: string,
-    schema: S,
-    trace: Trace = () => {},
-  ): Promise<DuckReader<S>> {
-    const instance = await DuckDBInstance.create(":memory:", { threads: "2", memory_limit: "256MB" });
-    const connection = await instance.connect();
-    try {
-      await connection.run("INSTALL sqlite");
-      await connection.run("LOAD sqlite");
-      await connection.run(`ATTACH ${literal(file)} AS "app" (TYPE SQLITE, READ_ONLY)`);
-      return new DuckReader(instance, connection, schema, trace);
-    } catch (e) {
-      connection.closeSync();
-      instance.closeSync();
-      throw e;
-    }
-  }
-  // The worker serializes whole query handlers: never share an active transaction.
-  async query(definition: AnyDefinition, args: unknown): Promise<unknown> {
-    if (definition.kind !== "query") throw new Error("Expected a query");
-    await this.connection.run("BEGIN TRANSACTION");
-    let active = true;
-    const db = new Documents<S>(async (operation) => {
-      if (!active) throw new Error("Query context has expired");
-      if (operation.kind !== "select") throw new Error("Queries cannot write");
-      const sql = compileSelect(this.schema, operation, "duckdb");
-      this.trace("duckdb", sql);
-      const parameters = Object.fromEntries(sql.values.map((value, i) => [`p${i + 1}`, value]));
-      const reader = await this.connection.runAndReadAll(sql.text, parameters);
-      return decode(this.schema, operation, reader.getRowObjects());
-    });
-    try {
-      const result = await definition.invoke(db, args);
-      const safeResult = JSON.parse(JSON.stringify(result ?? null));
-      await this.connection.run("COMMIT");
-      return safeResult;
-    } catch (e) {
-      await this.connection.run("ROLLBACK");
-      throw e;
-    } finally {
-      active = false;
-    }
-  }
-  close(): void {
-    this.connection.closeSync();
-    this.instance.closeSync();
-  }
-}
-```
-
-## 8. Object-storage backup
-
-`platform/backup.ts` obtains a consistent `VACUUM INTO` snapshot, checks integrity, computes a checksum,
-uploads an immutable object, and only then advances a latest manifest. `platform/object_store.ts` supplies a
-local stand-in or a signed S3-compatible adapter. `scripts/restore.ts` verifies a snapshot and restores to a
-fresh, absent file while the service is stopped.
-
-A mutation response acknowledges local commit, not off-host replication. A backup is not automatic failover.
+`makeReader` acquires the instance before the connection, so LIFO release closes the connection first. It
+attaches the live SQLite file read-only in the separate reader OS process. There is no static Promise
+constructor or throwing compiler wrapper in these paths; pure SQL compilation lives in `core/compile/`.
 
 ## Run
 
 ```sh
-TRACE_SQL=1 deno task serve
-# In another terminal:
-deno task demo
-deno task demo tic-tac-toe-json
-deno task explain
-deno task test
-deno task check
+deno task explain > GENERATED_SQL.txt
+deno task ci
 deno task integration
+deno task e2e
 ```
 
-See README.md for all configuration, security limits, object-storage settings, source references, and restore
-instructions.
+All four commands are executed in item 27; results and operational examples are in the README.

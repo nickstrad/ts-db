@@ -1,0 +1,11 @@
+# Architecture decisions
+
+| ADR                                            | Decision                                                         |
+| ---------------------------------------------- | ---------------------------------------------------------------- |
+| [0001](0001-effect-port.md)                    | Effect port and separate native writer/reader process boundaries |
+| [0002](0002-error-taxonomy.md)                 | Tagged error taxonomy and HTTP status mapping                    |
+| [0003](0003-k6-perf.md)                        | k6 performance scenarios and thresholds                          |
+| [0004](0004-eventlog-duckdb-in-reader-only.md) | Event-log DuckDB owned only by the reader process                |
+| [0005](0005-text-storage-contract.md)          | Text storage contract, including rejection of U+0000             |
+| [0006](0006-event-identity.md)                 | Event identity and event-log schema v2                           |
+| [0007](0007-ingest-before-retention.md)        | Committed ingest before retention                                |
