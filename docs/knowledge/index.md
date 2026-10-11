@@ -15,6 +15,12 @@ read and edit entries with zero tooling.
 | [gotchas.md](gotchas.md)     | Environment and tooling traps that have bitten agents before |
 | [glossary.md](glossary.md)   | Project terms: items, batches, side quests, review protocol  |
 
+## Where the project stands
+
+- `agent-work/COORDINATION.md` — the coordinator's live log: what landed, what is in review, what is building.
+- `docs/plans/effect-port-and-observability.md` and `docs/plans/multitenancy.md` — the build plans.
+- `/root/MUSE_HATCH_README.md` — vm-1 orientation (read once per host).
+
 ## Maintenance convention
 
 This folder only works if agents keep it current. Short, enforceable rules:

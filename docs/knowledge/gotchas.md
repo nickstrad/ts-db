@@ -50,7 +50,7 @@ Intermittent native crash (`duckdb.node`) after tests print `ok` — roughly 1 i
 `tests/property/offsets_test.ts`, also seen mid-suite in `deno task test`. Reproduced on clean main; treated
 as a pre-existing DuckDB/Deno teardown flake. Policy: **chase, don't quarantine** — ~25 identical-shape
 `tokio-runtime-w` segfaults in dmesg share one stack page offset (one bug site). Reusable stress loop:
-`work-scripts/bash/segfault-stress.sh`.
+`work-scripts/bash/segfault-stress.sh` (adopted from sq-07; until it lands, on `origin/haiku/sq-07`).
 
 ## The VM is shared and loaded
 
