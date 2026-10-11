@@ -89,7 +89,7 @@ export interface AppServicesService {
 }
 
 /**
- * Live: built per app by `AppServicesLive` in `platform/layers.ts` (one scoped `StorageLive` +
+ * Live: built per app by `makeAppServicesLive` in `platform/layers.ts` (one scoped `StorageLive` +
  * `BackupsLive` per app). Test: `makeAppServices` over `StorageTest`-backed stacks.
  */
 export class AppServices extends Context.Tag("ts-db/AppServices")<AppServices, AppServicesService>() {}
@@ -107,7 +107,7 @@ export function makeAppServices(stacks: readonly AppStack[]): AppServicesService
 }
 
 // ===========================================================================
-// COMPATIBILITY WRAPPER — for `platform/reader.ts` (item 16) until it reads `AppRegistry`
+// COMPATIBILITY WRAPPER — for `platform/reader.ts` until item 33 composes it over `AppRegistry`
 // ===========================================================================
 
 /**
@@ -115,8 +115,12 @@ export function makeAppServices(stacks: readonly AppStack[]): AppServicesService
  * `ConfigError` if the environment does not decode; the reader process has already built
  * `ConfigLive` successfully by the time it calls this.
  *
+ * The server never calls this: its registry is `AppRegistryLive` over the one `Config` its layer
+ * chain builds. Only the reader process does, which builds its own `ConfigLive` from the same
+ * inherited environment.
+ *
  * @deprecated Use the `AppRegistry` tag (`AppRegistryLive`). Kept only because `platform/reader.ts`
- * is outside item 22's file set.
+ * is outside items 22 and 32's file sets; item 33 owns the reader's composition.
  */
 export function loadApps(): Map<string, App> {
   const config = Effect.runSync(Effect.provide(Config, ConfigLive));
