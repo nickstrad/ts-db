@@ -80,11 +80,14 @@ survival and hot-read fan-out, which none of the three constraints asks for. The
 paragraph lists these costs and then picks E anyway on the grounds that "deferring them saves little". It
 saves the whole of them until a constraint requires them.
 
-**O4 (minor). C's replication story is hand-waved.** "Litestream-style WAL shipping" is named as the mechanism
-for live read replicas. Litestream is a backup and restore tool: it ships WAL to object storage and restores
-from it; it does not serve live, continuously applied read replicas. The revision replaces this with libSQL
-frame-log replication, which is the right correction but inherits O3. Failover and promotion are acknowledged
-as unsolved in both versions.
+**O4 (minor, qualified by the sources audit). C's replication story is under-specified.** "Litestream-style
+WAL shipping" is named as the mechanism for live read replicas. Until October 2025 Litestream was a backup and
+restore tool only. Litestream 0.5.x adds a VFS read replica: read-only by default, pages fetched on demand
+from object storage, polling every second, documented as "not high-concurrency OLTP", labelled experimental,
+with an open wedging bug. So C's replicas are feasible, about a second stale, and not a hot-path read tier.
+The revision replaces this with libSQL frame-log replication, which inherits O3 and is Turso's legacy path
+(see [scale-out-sources-fable.md](scale-out-sources-fable.md), claims 5 and 11). Failover and promotion are
+acknowledged as unsolved in both versions.
 
 **O5 (minor). The revision's research source is an untracked temp file.** The revision cites
 `/tmp/convex-surreal-research.md (vm-1)`. It exists today (8.5 KB, 2026-10-11 22:47) and will not survive a
@@ -104,6 +107,17 @@ the owner.
 **O8 (nit). Diagrams do not follow the repo's C4 contract.** `docs/architecture/AGENTS.md` requires every
 diagram in two formats, generated from `diagrams/*.py`, with type labels on every element. The Opus diagrams
 are hand-written Mermaid only. Acceptable in a proposal, but the document does not say so.
+
+**O9 (minor, from the sources audit). The "~5k mutations/sec" trigger is unsourced.** The revision demotes D
+with "Convex is explicit: partitioned/distributed writes only become necessary past ~5k mutations/sec
+sustained". Neither Convex article the brief draws on ("How Convex Works", "How We Horizontally Scaled
+Function Execution") contains that figure or any mutations-per-second threshold; the number appears only in
+the untracked research brief. The demotion of D stands on its qualitative grounds; the quantitative claim
+should be removed or attributed.
+
+**O10 (nit, from the sources audit). "TAPIR/Litestream lineage" misattributes a term.** TAPIR is the name
+SurrealDB's CEO uses for SurrealDB's object-storage-backed node design (trade press, July 2026). It has no
+connection to Turso's bottomless WAL, which the revision pairs it with.
 
 ### Verdict: FAIL as a build basis; A's skeleton is reusable
 

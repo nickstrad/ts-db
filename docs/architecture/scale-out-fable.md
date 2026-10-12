@@ -298,7 +298,9 @@ as a proposal it contributes nothing new.
 **9. Opus D.** A consistent-hash mesh with gossip membership. It fights data gravity (a ring change moves
 files, not slots), removes operator override, cannot express "give this tenant its own node", and still does
 nothing about in-node blocking. Opus's own revision demoted it with a quantified trigger of thousands of
-writes per second; the hot path here is one per minute.
+writes per second; that figure is not in Convex's published material (see
+[scale-out-sources-fable.md](scale-out-sources-fable.md), claim 8), but the demotion holds without it: the hot
+path here is one write per minute.
 
 **10. Astra 4.** Durable command intake with SQLite as an asynchronous projection. Internally coherent and
 honest about what it changes, but it changes the thing the brief holds fixed: mutations become `202 Accepted`
@@ -354,3 +356,11 @@ the worker variant for reads only, keeping writes in killable processes.
 
 Baseline figures quoted from `docs/architecture/sqlite-document-reads.md` (SP-06): in-process getGame p50
 4.103 ms, p99 12.525 ms, on a shared host with no isolation.
+
+### 2.7 Sources audit
+
+The external claims this ranking and the two reviewed sets rely on are checked against primary sources in
+[scale-out-sources-fable.md](scale-out-sources-fable.md). Fourteen claims bear on the ranking; none moves an
+approach across a constraint boundary, so the order above stands. The audit qualifies review finding O4, adds
+O9 and O10, strengthens O3, and confirms the two external facts the top pick depends on (VACUUM INTO from a
+read-only connection; no statement interrupt in `node:sqlite`).
