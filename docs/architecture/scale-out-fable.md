@@ -1,5 +1,9 @@
 # Scale-out ranking (Fable)
 
+> **Superseded for the ranking order:** the final list is [scale-out-final-fable.md](scale-out-final-fable.md)
+> (one pair swapped after the review and sources audit). This file remains the record of the independent pass
+> and the provisional ranking.
+
 Status: proposed · Author: Fable 5.1 (with nickstrad) · Date: 2026-10-12 · Branch: `arch/fable-ranking` ·
 Baseline read: `main` at `e808983`.
 
