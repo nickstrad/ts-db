@@ -1,0 +1,1 @@
+{"runtime":"deno 2.9.5","libsqlite3":"3.45.1","step_ran_ms_before_interrupt":1002,"event_loop_ticks_during_step":95,"interrupt_latency_ms":0.408,"rc":9,"notes":["rc 9 = SQLITE_INTERRUPT","nonblocking FFI symbol runs on Deno's blocking pool; the event loop kept ticking"]}

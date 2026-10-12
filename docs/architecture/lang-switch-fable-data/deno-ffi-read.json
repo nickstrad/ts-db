@@ -1,0 +1,1 @@
+{"runtime":"deno 2.9.5","node_sqlite_sync_us":{"p50_us":8.66,"p99_us":34.18,"n":20000},"ffi_blocking_us":{"p50_us":6.35,"p99_us":27.77,"n":20000},"ffi_nonblocking_us":{"p50_us":44.31,"p99_us":241.36,"n":20000},"notes":["in-process point read on a 1000-row WAL file, prepared statement reused; microseconds per call including JS overhead"]}

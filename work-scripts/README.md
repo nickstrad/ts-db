@@ -6,10 +6,11 @@ and reusable as building blocks.
 
 ## Deterministic placement
 
-| Kind of work                                                                              | Language          | Location             | Run with                                  |
-| ----------------------------------------------------------------------------------------- | ----------------- | -------------------- | ----------------------------------------- |
-| Larger / multi-step work (benchmarks, data munging, API probes, anything with real logic) | Deno (TypeScript) | `work-scripts/deno/` | `deno run -A work-scripts/deno/<name>.ts` |
-| Basic bash-oriented things (one-liners grown up, file ops, greps, quick checks)           | Bash              | `work-scripts/bash/` | `bash work-scripts/bash/<name>.sh`        |
+| Kind of work                                                                              | Language          | Location                              | Run with                                                   |
+| ----------------------------------------------------------------------------------------- | ----------------- | ------------------------------------- | ---------------------------------------------------------- |
+| Larger / multi-step work (benchmarks, data munging, API probes, anything with real logic) | Deno (TypeScript) | `work-scripts/deno/`                  | `deno run -A work-scripts/deno/<name>.ts`                  |
+| Basic bash-oriented things (one-liners grown up, file ops, greps, quick checks)           | Bash              | `work-scripts/bash/`                  | `bash work-scripts/bash/<name>.sh`                         |
+| Native proofs of concept that only make sense in that language (driver or runtime probes) | Go / C            | `work-scripts/go/`, `work-scripts/c/` | a bash runner in `work-scripts/bash/` builds and runs them |
 
 Rules:
 
