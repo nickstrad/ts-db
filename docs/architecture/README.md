@@ -17,6 +17,10 @@ Conventions, naming and the maintenance contract: [`AGENTS.md`](AGENTS.md).
 
 Level 2 is split in two so neither picture is cluttered; together they cover one container set.
 
+## Reports
+
+- [sqlite-document-reads.md](sqlite-document-reads.md) — verification report for the in-process SQLite document-read path (scope, verification matrix, benchmarks).
+
 ## Reading them in a terminal
 
 ```sh
