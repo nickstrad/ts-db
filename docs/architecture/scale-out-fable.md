@@ -172,4 +172,185 @@ last F5 phase two and F6, which are operational features.
 
 ## Part 2 — Review of the other sets and the final ranking
 
-_Written after Part 1 was committed._
+Written after Part 1 was committed as `c423e4e`. Sources reviewed: `arch/opus-scale-out`
+(`docs/architecture/scale-out-opus.md`, approaches A–D, pick A), `arch/opus-scale-out-2` (same file plus the
+"Research-informed revision", adds E, new pick E), `arch/astra-scale-out`
+(`docs/architecture/scale-out-astra.md`, approaches 1–4, pick 3), and the brief's research notes on Turso,
+Convex and SurrealDB.
+
+### 2.1 What the review changed in my own proposal
+
+Two corrections, both from measurements made after reading Astra's argument that "an isolated process is
+needed because `DatabaseSync` calls execute synchronously":
+
+1. **Worker lanes cannot enforce deadlines.** On this VM, `worker.terminate()` against a worker blocked in a
+   40-million-row recursive SQLite query returned in 0 ms, but the process could not exit for 24.9 s: the
+   native call ran to completion. A worker lane keeps the main loop live (Part 1's 1.9 s test still holds) but
+   a stuck statement in a lane holds that lane, and every tenant on it, until SQLite returns. Strict isolation
+   therefore needs lanes that can be killed, which means child processes. The repo already has the
+   supervised-child pattern (`platform/ipc.ts`, the reader restart in `platform/layers.ts`), so this is less
+   new code than workers would have been, at the cost of JSON-lines IPC instead of structured clone. F3 below
+   is revised to "child-process lanes, with the worker variant as a measured fallback only if IPC cost on the
+   4 ms p50 path is unacceptable".
+2. **Epochs alone do not fence an old owner.** Astra is right that a Postgres epoch cannot stop a partitioned
+   node from writing to its local file. F6 gains a node lease: a node serves writes for a tenant only while
+   its heartbeat lease is unexpired by its own clock, and a move flips ownership only after the old lease has
+   expired or the old owner has acknowledged the freeze. The restore-from-object-store move stays the same.
+
+Astra's request-ID idempotency for forwarded mutations is adopted too: a forward that times out has an unknown
+outcome, and the retry must look up the result rather than re-run the handler.
+
+### 2.2 Observations on the other sets
+
+**Opus A–D (original).** The document says it is "not audited against landed code", and that shows in two
+places that matter for this brief. Approach B, the LRU handle cache with pinning, is largely already on
+`main`: MT-04 landed a 64-entry leased LRU with idle expiry in `platform/sqlite.ts`. Proposing it as a stopgap
+is proposing the status quo. More seriously, Approach A claims "shard boundaries are isolation boundaries" and
+that cold tenants "contend only within their shard". With a synchronous driver on one event loop, every tenant
+on a node contends with every other tenant on that node, regardless of shard map or semaphores. A, C and D all
+describe pools and queues as if they could preempt a running statement; none of them can. A's shape is right
+and matches the repo's seams; its isolation claim within a node is not.
+
+**Opus E (revision).** E keeps A's shape and adds C's replication from day one, citing Turso's frame-log and
+bottomless WAL. Everything true of A's in-node blind spot is true of E. The additions solve node loss and hot
+read fan-out, which the brief's three constraints do not ask for, and they are the most expensive items in any
+set: frame-log replication means either a libSQL migration (a third native library next to `node:sqlite` and
+DuckDB, in a repo whose central architectural rule is about keeping native libraries apart) or a hand-built
+WAL frame shipper, plus a rewrite of the verified backup pipeline. The one piece worth taking now is "make
+durability continuous, not periodic": WAL-to-object-store is the right phase-two upgrade for backups. As a
+first pick, E front-loads the least-constrained, highest-risk work.
+
+**Astra 1–4.** The baseline section is the best diagnosis in the three sets: it reads the landed cache, names
+the single event loop and the shared cache lock as the real shared paths, and insists the descriptor cost per
+connection be measured (Part 1 measured it: 3 for a writer, 2 for a reader). Approach 1 is the right in-node
+design and is close to F3/F4. Approach 2 is the right cross-node design and is close to F1/F2 with stronger
+fencing. Approach 3, the pick, adds three-voter consensus per shard and a separate read deployment. Astra
+justifies it by reading constraint 2 as "the write must survive one data-node failure within 30 seconds", a
+target Astra adds itself and labels as such. The brief does not ask for node-loss survival, the reference
+research says quorum consensus is overkill for this system, and Astra's own text names the replication
+integration as "an unresolved dependency, not an existing repository feature". Approach 4 changes the API
+contract to asynchronous acceptance; Astra correctly calls it "a deliberate product fork".
+
+### 2.3 Final ranking
+
+| Rank | Approach                                                 | Set   | Constraint 1: files > one node | Constraint 2: hot write never starved       | Constraint 3: no single statement blocks everyone | Status                             |
+| ---: | -------------------------------------------------------- | ----- | ------------------------------ | ------------------------------------------- | ------------------------------------------------- | ---------------------------------- |
+|    1 | **F — placement-routed tenant cells with process lanes** | Fable | Placement in Postgres          | Write-first lane scheduler; backup off lock | Child-process lanes, per-tenant admission         | New, assembled from existing seams |
+|    2 | 2 — capacity-aware tenant shards                         | Astra | Placement with CAS epochs      | Reserved owner capacity                     | Defers to approach 1's processes                  | Proposal                           |
+|    3 | 1 — one host, bounded descriptors, isolated lanes        | Astra | LRU only; one node             | Protected writer process                    | Processes plus supervisor                         | Proposal                           |
+|    4 | A — control/data plane split, explicit placement         | Opus  | Shard map                      | Dedicated node for the hot tenant           | Not addressed within a node                       | Proposal, unaudited                |
+|    5 | E — WAL-native control/data plane (A + C)                | Opus  | Shard map                      | Dedicated primary                           | Not addressed within a node                       | Proposal, needs libSQL or shipper  |
+|    6 | 3 — replicated shards with consensus and read replicas   | Astra | Placement on every voter       | Quorum path with reserved capacity          | Processes; separate read deployment               | Proposal, unresolved dependency    |
+|    7 | C — hot-file primary/replica plus sharded cold files     | Opus  | Shard map                      | Dedicated primary                           | Not addressed within a node                       | Proposal, unaudited                |
+|    8 | B — single-node LRU handle cache                         | Opus  | LRU only; one node             | Pinned handle, shared loop                  | Not addressed                                     | Largely landed (MT-04)             |
+|    9 | D — consistent-hash mesh                                 | Opus  | Ring spreads files             | Pool separation (semaphores)                | Not addressed within a node                       | Proposal, unaudited                |
+|   10 | 4 — durable command log, SQLite as projection            | Astra | Intake opens no files          | Durable acceptance, not completion          | Per-tenant cursors                                | Proposal, changes the API          |
+
+**1. F (Fable).** It is the only design in the three sets that closes all four contention paths named in §1.1
+and satisfies all three constraints as written, without a new consensus system, a new storage engine or an API
+change. Cross-node it is Astra 2's placement with its fencing (lease plus epoch) and Opus A's operator-visible
+map; in-node it is Astra 1's killable process lanes with two things neither set has: the snapshot moved off
+the writer lock, which is today's largest single write stall, and admission caps made per tenant instead of
+global. Its weakest point is the IPC tax of process lanes on a 4 ms p50 path, which is a measurement, not a
+design unknown. Rank 1 because it does the least that is sufficient.
+
+**2. Astra 2.** The best cross-node design of the nine others: compare-and-swap ownership epochs, fencing
+before flip, request IDs, a remote-execution API that never serializes a path, and a refusal to let a hash
+ring transfer write authority. It ranks below F only because it leaves in-node isolation to approach 1 by
+reference and does not touch the backup-on-writer-lock path or the global read cap. F is, in effect, Astra 2
+plus Astra 1 plus those two fixes; if F did not exist, this is what I would build.
+
+**3. Astra 1.** The correct single-node step and the best write-up of why fibers and semaphores cannot isolate
+a synchronous driver. It satisfies constraints 2 and 3 on one host with killable workers, a protected writer
+process and per-tenant admission. It ranks third because, alone, it answers constraint 1 only in the literal
+LRU sense and gives up the moment a second node is needed, and because its "protected writer" pins one known
+hot tenant rather than making every tenant's write first in its lane.
+
+**4. Opus A.** The right shape, the right seams (Postgres registry, `TenantStorageRouter`), and the right
+instinct that explicit placement beats hashing for data with gravity. It ranks fourth because it is unaudited
+and it shows: it treats a node as an isolation boundary when the landed code has one synchronous event loop
+per node, so its constraint-3 claim is false until something like Astra 1 or F3 is added inside the node. With
+that addition it converges on F.
+
+**5. Opus E.** A, plus Turso-style frame-log replication and bottomless WAL from day one. The durability idea
+is good and appears in F as phase two. As a first pick it ranks below A because it inherits A's in-node gap
+unchanged and adds the heaviest, least-asked-for work in any set: a libSQL migration or custom frame shipper,
+failover design, and a rewrite of a verified backup pipeline, to protect a once-a-minute write that no
+constraint says must survive node loss.
+
+**6. Astra 3.** The most rigorous document of the nine and the strongest guarantee: a write acknowledged only
+after quorum, fenced authority, barrier reads. It ranks sixth because it is built for a constraint the brief
+does not state (node-loss survival within a deadline), it names its own replication layer as an unresolved
+prerequisite, and the reference research explicitly judges quorum consensus overkill here. If the product ever
+adopts a node-loss SLO, this is the design to return to; it ranks above C because its replication story is
+sound where C's is hand-waved.
+
+**7. Opus C.** Hot-file primary with one or two async read replicas, plus sharded cold files. It solves a hot
+_read_ problem the system does not have (reads are in-process at 4 ms p50 on the owner), triples storage for
+the hot file, introduces stale reads and failover design, and does not address in-node blocking. The revision
+folded it into E, which is where its one good idea now lives.
+
+**8. Opus B.** An LRU of at most K handles with the hot file pinned. The repo already has this (64 entries,
+leased, idle-expired) and it did not stop the contention the brief describes, which is the best evidence that
+descriptors were never the binding constraint. It ranks above D and 4 only because it is harmless and cheap;
+as a proposal it contributes nothing new.
+
+**9. Opus D.** A consistent-hash mesh with gossip membership. It fights data gravity (a ring change moves
+files, not slots), removes operator override, cannot express "give this tenant its own node", and still does
+nothing about in-node blocking. Opus's own revision demoted it with a quantified trigger of thousands of
+writes per second; the hot path here is one per minute.
+
+**10. Astra 4.** Durable command intake with SQLite as an asynchronous projection. Internally coherent and
+honest about what it changes, but it changes the thing the brief holds fixed: mutations become `202 Accepted`
+with a receipt, and conditional state transitions (the tic-tac-toe rules) can no longer return their result
+synchronously. Astra says it should not be "quietly imposed" on this API. Agreed; it is a different product.
+
+### 2.4 What I would build first, and why
+
+**The in-node half of F, on one node, before any placement work**: child-process lanes with sticky tenant
+assignment, a write-first scheduler per lane, per-tenant admission caps, and `Storage.snapshot` moved to a
+read-only connection. This is also the overlap between F, Astra 1 and Astra 2, so it is the step every
+credible design agrees on.
+
+Why first: it fixes the contention that violates constraints 2 and 3 _today_, on the hardware the platform
+already runs on, and it is testable with the existing single-process harness. Two acceptance tests define
+done: (a) one tenant runs a 2 s statement while another tenant's once-a-minute mutation commits within 50 ms;
+(b) a backup of a 1 GB file runs while that same file's mutations keep committing. Both fail on `main` today.
+Placement (F1, F2) is pure routing on top of a node that is already safe; building it first would route
+requests to nodes that still block on one loop.
+
+The measurement that gates the step: getGame p50 through a child-process lane versus the in-process 4.1 ms
+baseline, on a quiet host with load average recorded. If the lane adds more than about 2 ms at p50, revisit
+the worker variant for reads only, keeping writes in killable processes.
+
+### 2.5 Tweaks to the top pick
+
+1. **Lanes are child processes, not workers** (§2.1). Reuse the supervised-child pattern and JSON-lines
+   framing from the reader; a lane that misses a deadline is killed and respawned, and its in-flight mutations
+   are resolved by request-ID lookup, never replayed blind.
+2. **Lease-fenced ownership** (§2.1). A node serves a tenant only under an unexpired heartbeat lease; moves
+   wait for lease expiry or an acknowledged freeze before the epoch flips.
+3. **Request IDs on every forwarded mutation**, stored in the tenant file with the result, so a timed-out
+   forward is a lookup on retry. Astra's point; it is cheap because the writer transaction already exists.
+4. **Hot-tenant lane pinning.** Placement may pin a tenant to a dedicated lane on its node, so its write bound
+   is its own duration rather than "longest statement on the lane plus own duration". This is Opus A's
+   dedicated node and Astra 1's protected writer, at lane granularity, with no new node.
+5. **A measured descriptor formula in config.** Node capacity derives from `nofile`, a reserve, and the
+   measured per-connection costs (3 per writer, 2 per pooled reader), not from "one file, one descriptor".
+6. **WAL frames to the object store as phase two**, after each checkpoint window, taken from Opus E and the
+   Turso research. It cuts recovery point from the backup interval to seconds and makes a tenant move "ship
+   the tail, flip the epoch". It does not replace the snapshot path; it supplements it.
+7. **No read replicas until a single tenant outgrows one node's read capacity.** Astra 3 and Opus C/E are the
+   designs to reopen at that point, for that tenant only.
+
+### 2.6 Evidence recorded for this document
+
+| Measurement (2026-10-12, this VM, Deno 2.9.5, `deno run -A`, scratch scripts)                  | Result                                       |
+| ---------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| Descriptors per WAL writer connection / per read-only connection (20 of each, `/proc/self/fd`) | 3 / 2                                        |
+| `ulimit -n` on this VM                                                                         | 1,048,576                                    |
+| 1.9 s SQLite query inside a Web Worker; main loop 10 ms ticker                                 | 188 ticks (loop stayed live)                 |
+| `worker.terminate()` on a worker blocked in a ~25 s SQLite statement                           | returned in 0 ms; process exit waited 24.9 s |
+
+Baseline figures quoted from `docs/architecture/sqlite-document-reads.md` (SP-06): in-process getGame p50
+4.103 ms, p99 12.525 ms, on a shared host with no isolation.
