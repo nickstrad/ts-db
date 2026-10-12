@@ -1,9 +1,9 @@
 # Agent orchestration protocol for ts-db
 
 This file is the coordination contract for agents working on this repo. It covers the plan in
-[`docs/plans/effect-port-and-observability.md`](docs/plans/effect-port-and-observability.md) and the Haiku
-experiment track in [`docs/haiku-experiments.md`](docs/haiku-experiments.md). For repo conventions (how to run
-things, style), see `CLAUDE.md`.
+[`docs/plans/effect-port-and-observability.md`](docs/plans/effect-port-and-observability.md) and the
+side-quest track in [`docs/side-quests.md`](docs/side-quests.md). For repo conventions (how to run things,
+style), see `CLAUDE.md`.
 
 ## Build protocol (plan items)
 
@@ -37,10 +37,10 @@ things, style), see `CLAUDE.md`.
   public type-level API, the error taxonomy.
 - **Sonnet** (`implementer-sonnet-high`) — bounded, mechanical items: the interface is already fixed by an
   earlier item, the file list is short, acceptance criteria are checkable by running a command.
-- **Haiku** (never ≤4.5) — experiments and side quests **only**, tracked in `docs/haiku-experiments.md`. Haiku
-  never lands work to `main` without both an Opus review (PASS) and explicit human approval — a PASS alone is
-  not sufficient authorization to merge. Haiku work happens on `haiku/NN-slug` branches, never on an
-  `item/NN-slug` branch or worktree.
+- **Haiku** (never ≤4.5) — side quests **only**, tracked in `docs/side-quests.md`. Haiku never lands work to
+  `main` without both an Opus review (PASS) and explicit human approval — a PASS alone is not sufficient
+  authorization to merge. Haiku side-quest work happens on `haiku/sq-NN` branches, never on an `item/NN-slug`
+  branch or worktree.
 
 Every item, regardless of model, gets the same Opus review pass described above.
 
@@ -63,11 +63,9 @@ where the build protocol or a plan calls for Opus 5.5, including an independent 
 reviewer from the builder), and sol where it calls for Sonnet. Luna is the Haiku-tier OpenAI label and always
 runs on high effort; the `haiku` alias resolves to `claude-haiku-5-5` (verified 2026-10-11 via
 `--output-format json`); if the alias ever drifts to Haiku ≤4.5, pin with a ≥5.5 model ID (e.g.
-`claude --model claude-haiku-5-5`). Haiku ≤4.5 must never be used; the Haiku experiment restrictions,
-including explicit human approval before landing, also apply to luna when dispatched in the experiment tier.
-The mapping above is the standing one. Independent reviews stay top-tier (Opus 5.5 or astra). Model names
-alone never authorize work outside an item's ownership. This orchestration policy lives only here; `CLAUDE.md`
-needs no change.
+`claude --model claude-haiku-5-5`). Haiku ≤4.5 must never be used. The mapping above is the standing one.
+Independent reviews stay top-tier (Opus 5.5 or astra). Model names alone never authorize work outside an
+item's ownership. This orchestration policy lives only here; `CLAUDE.md` needs no change.
 
 ## Side-quest protocol
 
@@ -75,8 +73,8 @@ Side quests are small, bounded investigations (survey a library's patterns, meas
 formats) that are read-only or scratch-only against the product tree — they must never modify plan item files
 (`core/`, `platform/`, `sdk/`, `app/`, `tests/`, `scripts/`, `perf/`, `deno.json`).
 
-1. The main agent appends new quests to the "Side quests" table in `docs/haiku-experiments.md` (id, question,
-   why it matters, done-criteria).
+1. The main agent appends new quests to the board table in `docs/side-quests.md` (id, question, why it
+   matters, done-criteria).
 2. A Haiku subagent claims one quest, investigates, and writes its findings to exactly
    `docs/haiku-experiments/findings/<quest-id>.md` — a unique path per quest, so concurrent Haiku runs never
    collide on a shared-file edit. A Haiku agent does not edit the board itself, any other quest's findings

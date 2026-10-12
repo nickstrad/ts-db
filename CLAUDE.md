@@ -23,17 +23,17 @@ Use `deno task <name>` for everything (see the plan's §2.3 for the full task li
 ## Branch and worktree etiquette
 
 - Plan items build on `item/NN-slug` branches in worktrees under `/root/Software/tsdb-work/`.
-- Haiku experiments build on `haiku/NN-slug` branches — see `docs/haiku-experiments.md`.
+- Side quests build on `haiku/sq-NN` branches — see `docs/side-quests.md`.
 - If you are not the agent assigned to a given branch/worktree, do not edit files in it or push to it. Check
   `AGENTS.md` and the current coordination state (`agent-work/COORDINATION.md`, if present) before assuming a
   branch is free to touch.
 
 ## Docs-only vs. implementation work
 
-Some sessions in this repo are explicitly docs-only (updating `docs/haiku-experiments.md`, `AGENTS.md`,
-`CLAUDE.md`, or writing findings files) and must not implement plan items. If a task description says
-docs-only, stay out of `core/`, `platform/`, `sdk/`, `app/`, `tests/`, `scripts/`, `perf/`, and `deno.json`
-entirely, even if a fix looks trivial.
+Some sessions in this repo are explicitly docs-only (updating `docs/side-quests.md`, `AGENTS.md`, `CLAUDE.md`,
+or writing findings files) and must not implement plan items. If a task description says docs-only, stay out
+of `core/`, `platform/`, `sdk/`, `app/`, `tests/`, `scripts/`, `perf/`, and `deno.json` entirely, even if a
+fix looks trivial.
 
 ## Commit style
 

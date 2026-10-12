@@ -9,11 +9,12 @@ read and edit entries with zero tooling.
 
 ## Pages
 
-| Page                         | Contents                                                     |
-| ---------------------------- | ------------------------------------------------------------ |
-| [decisions.md](decisions.md) | Architectural decisions with dates and rationale             |
-| [gotchas.md](gotchas.md)     | Environment and tooling traps that have bitten agents before |
-| [glossary.md](glossary.md)   | Project terms: items, batches, side quests, review protocol  |
+| Page                                                     | Contents                                                              |
+| -------------------------------------------------------- | --------------------------------------------------------------------- |
+| [decisions.md](decisions.md)                             | Architectural decisions with dates and rationale                      |
+| [gotchas.md](gotchas.md)                                 | Environment and tooling traps that have bitten agents before          |
+| [glossary.md](glossary.md)                               | Project terms: items, batches, side quests, review protocol           |
+| [haiku-experiment-record.md](haiku-experiment-record.md) | Preserved 2026-10-10 verdicts from the retired Haiku experiment track |
 
 ## Where the project stands
 

@@ -9,11 +9,11 @@ flight.
 The evaluation question is twofold:
 
 1. **Can Luna-on-high do what Haiku 4.5 could not?** The Haiku experiments (see
-   [`docs/haiku-experiments.md`](haiku-experiments.md)) returned a formal verdict: 0 of 3 items
-   indistinguishable from Sonnet — Haiku 4.5 nails shape fast but drops safety-critical details, violates
-   scope, and rates itself 5/5 regardless. Luna runs a tier up (Sonnet-class model, high effort) at the
-   fast/cheap price point. Each experiment item below is judged against the same bar Haiku faced: is the
-   output indistinguishable from what Sonnet would have produced?
+   [`docs/knowledge/haiku-experiment-record.md`](knowledge/haiku-experiment-record.md)) returned a formal
+   verdict: 0 of 3 items indistinguishable from Sonnet — Haiku 4.5 nails shape fast but drops safety-critical
+   details, violates scope, and rates itself 5/5 regardless. Luna runs a tier up (Sonnet-class model, high
+   effort) at the fast/cheap price point. Each experiment item below is judged against the same bar Haiku
+   faced: is the output indistinguishable from what Sonnet would have produced?
 2. **Do fast/cheap iterations buy insights?** Side quests (lx-01…) are insight-generating investigations, not
    production code — seed sweeps, query benchmarks, consistency audits, load-shape exploration.
 
