@@ -647,7 +647,7 @@ test(
 );
 
 test(
-  "the reader child dies while serving: the server stops in order and fails with ReaderExitedError",
+  "the reader child dies while serving: the supervisor restarts it and the server stops normally",
   { timeout: 60_000 },
   () =>
     inProcess("child-exit", async (s) => {
@@ -665,15 +665,36 @@ test(
       assert.ok(pid !== undefined, "reader-spawned never logged");
       Deno.kill(pid, "SIGKILL");
 
+      let settled = false;
+      void run.then(() => {
+        settled = true;
+      });
+      let replacementPid: number | undefined;
+      try {
+        const restarted = await waitForPhase(s.logDir, Deno.pid, "reader-restarted");
+        assertOrder(restarted, ["reader-restarting", "reader-restarted"]);
+        assert.ok(at(restarted, "reader-restarting") >= 0);
+        replacementPid = readerPid(restarted.filter((record) => record.detail?.pid !== pid));
+        assert.ok(replacementPid !== undefined && replacementPid !== pid, "a new reader was spawned");
+        assert.equal(restarted[at(restarted, "reader-restarted")].detail?.pid, replacementPid);
+        assert.ok(await isAlive(replacementPid));
+        assert.equal(settled, false, "runServer resolved after a single reader death");
+        assert.equal(at(restarted, "stopping"), -1);
+      } finally {
+        c.requestStop();
+      }
       const exit = await run;
-      const failure = failureOf(exit);
-      assert.equal(failure._tag, "ReaderExitedError");
-      assert.equal(failure.signal, "SIGKILL");
-      const records = await assertReleased(s, "failure");
-      const stopping = records[at(records, "stopping")];
-      assert.equal(stopping.detail?.reason, "reader-exited");
-      assert.equal(stopping.level, "error");
-      assertChildExitOrder(records);
+      assert.ok(Exit.isFailure(exit) && Cause.isInterruptedOnly(exit.cause), String(exit));
+      const records = await assertReleased(s, "interrupted");
+      assert.equal(records[at(records, "stopping")].detail?.reason, "test-stop");
+      // The killed child's exit precedes stopping; check the replacement's shutdown instead.
+      const shutdown = records.slice(at(records, "stopping"));
+      for (const entry of SHUTDOWN_ORDER) {
+        const [phase, appId] = typeof entry === "string" ? [entry, undefined] : entry;
+        assert.ok(at(shutdown, phase, appId) >= 0, `${phase} finalizer is present`);
+      }
+      assertOrder(shutdown, SHUTDOWN_ORDER);
+      if (replacementPid !== undefined) await assertGone(replacementPid);
     }),
 );
 
@@ -866,7 +887,7 @@ test(
 );
 
 test(
-  "process: a killed reader child stops the server with exit 1 within the bound",
+  "process: a killed reader child is replaced, then SIGTERM exits 0 with finalizers in order",
   { timeout: 120_000 },
   () =>
     spawnedRun("child-exit-process", async (s, spawned) => {
@@ -878,11 +899,36 @@ test(
       }
       assert.ok(pid !== undefined);
       Deno.kill(pid, "SIGKILL");
+      let exited = false;
+      void spawned.exited.then(() => {
+        exited = true;
+      });
+      const restarted = await waitForPhase(s.logDir, spawned.child.pid, "reader-restarted");
+      assert.ok(at(restarted, "reader-restarting") >= 0);
+      assertOrder(restarted, ["reader-restarting", "reader-restarted"]);
+      const replacementPid = readerPid(restarted.filter((record) => record.detail?.pid !== pid));
+      assert.ok(replacementPid !== undefined && replacementPid !== pid, "a new reader was spawned");
+      assert.equal(restarted[at(restarted, "reader-restarted")].detail?.pid, replacementPid);
+      assert.ok(await isAlive(replacementPid));
+      // Observe the entire former failure bound, including time after the successful restart.
+      await new Promise((resolve) => setTimeout(resolve, 15_000));
+      assert.equal(exited, false, "server exited after a single reader death");
+      assert.ok(await isAlive(spawned.child.pid));
+      spawned.child.kill("SIGTERM");
       const status = await exitWithin(spawned, 15_000);
-      assert.equal(status.code, 1);
-      assert.match(await spawned.stderr, /ts-db server failed: ReaderExitedError/);
-      const records = await assertProcessReleased(s, spawned, "failure", { childExit: true });
-      assert.equal(records[at(records, "stopping")].detail?.reason, "reader-exited");
+      assert.equal(status.code, 0, await spawned.stderr);
+      assert.doesNotMatch(await spawned.stderr, /ts-db server failed: ReaderExitedError/);
+      // Exclude the killed child's exit when checking the replacement's finalizer order.
+      const records = await serverLog(s.logDir, spawned.child.pid);
+      await assertProcessReleased(s, spawned, "interrupted", { childExit: true });
+      assert.equal(records[at(records, "stopping")].detail?.reason, "SIGTERM");
+      const shutdown = records.slice(at(records, "stopping"));
+      for (const entry of SHUTDOWN_ORDER) {
+        const [phase, appId] = typeof entry === "string" ? [entry, undefined] : entry;
+        assert.ok(at(shutdown, phase, appId) >= 0, `${phase} finalizer is present`);
+      }
+      assertOrder(shutdown, SHUTDOWN_ORDER);
+      await assertGone(replacementPid);
     }),
 );
 

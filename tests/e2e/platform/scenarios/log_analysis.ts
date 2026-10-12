@@ -29,7 +29,8 @@ test("e2e/6-log-analysis: HTTP ingest, catalog, cross-process trace and CLI agre
       const c = client(server);
       const game = await play(c, moves.X.slice(0, 2));
       const traceId = `e2e-${names[9]}`;
-      await run(c.query("getGame", { gameId: game._id }, traceId));
+      const documentTraceId = `${traceId}-document`;
+      await run(c.query("getGame", { gameId: game._id }, documentTraceId));
       await run(c.query("listGames", { status: "playing" }));
       await run(c.query("winsByMark", {}));
       await remoteError(
@@ -53,14 +54,54 @@ test("e2e/6-log-analysis: HTTP ingest, catalog, cross-process trace and CLI agre
       await admin(server, `/admin/backup/${apps[0]}`);
       const analysis = async (name: string, params: Row = {}) =>
         await admin(server, `/admin/logs/analysis/${name}`, params) as Row[];
+      // Successful analysis/ingest RPCs emit no reader events under the caller's trace.
+      // Probe the supported direct query RPC, whose SQL/tx events do retain that trace;
+      // this is protocol coverage, not the production HTTP document-query path.
+      const reader = new Deno.Command(Deno.execPath(), {
+        args: ["run", "-A", "platform/reader.ts"],
+        env: server.env,
+        stdin: "piped",
+        stdout: "piped",
+        stderr: "piped",
+      }).spawn();
+      const output = reader.output();
+      const bound = setTimeout(() => {
+        try {
+          reader.kill("SIGKILL");
+        } catch { /* already exited */ }
+      }, 10_000);
+      try {
+        const input = reader.stdin.getWriter();
+        await input.write(new TextEncoder().encode(
+          JSON.stringify({
+            id: 1,
+            kind: "query",
+            appId: apps[0],
+            name: "getGame",
+            args: { gameId: game._id },
+            traceId,
+          }) + "\n",
+        ));
+        await input.close();
+        const result = await output;
+        assert.equal(result.code, 0, new TextDecoder().decode(result.stderr));
+        assert.equal(JSON.parse(new TextDecoder().decode(result.stdout)).result._id, game._id);
+      } finally {
+        clearTimeout(bound);
+        try {
+          reader.kill("SIGTERM");
+        } catch { /* already exited */ }
+        await output;
+      }
       const deadline = Date.now() + 10_000;
       const handlers = ["createGame", "getGame", "makeMove", "listGames", "winsByMark", "noSuchHandler"];
       const errorPairs = [["makeMove", "ConflictError"], ["noSuchHandler", "UnknownHandlerError"]];
-      let trace: Row[] = [], throughput: Row[] = [], errors: Row[] = [];
+      let trace: Row[] = [], documentTrace: Row[] = [], throughput: Row[] = [], errors: Row[] = [];
       let slow: Row[] = [], tx: Row[] = [], backups: Row[] = [];
       const complete = () => {
         const roles = new Set(trace.map((r) => r.role));
         return roles.has("server") && roles.has("reader") &&
+          documentTrace.some((r) => r.source === "http" && r.name === "getGame") &&
           handlers.every((name) => throughput.some((r) => r.name === name)) &&
           errorPairs.every(([name, tag]) =>
             errors.some((r) =>
@@ -75,7 +116,16 @@ test("e2e/6-log-analysis: HTTP ingest, catalog, cross-process trace and CLI agre
         await admin(server, "/admin/logs/ingest");
         // Endpoint errors are fatal; only asynchronously flushed evidence is retried.
         trace = await analysis("trace", { traceId });
-        throughput = await analysis("handler-throughput", { appId: apps[0] });
+        documentTrace = await analysis("trace", { traceId: documentTraceId });
+        const crossed = await request(
+          server,
+          "/admin/logs/analysis/handler-throughput",
+          { appId: apps[0] },
+          server.env.ADMIN_TOKEN,
+          { "x-trace-id": traceId },
+        );
+        assert.equal(crossed.status, 200, JSON.stringify(crossed.body));
+        throughput = crossed.body.result as Row[];
         errors = await analysis("error-rate-by-handler");
         slow = await analysis("slowest-sql");
         tx = await analysis("tx-outcomes");
@@ -84,11 +134,24 @@ test("e2e/6-log-analysis: HTTP ingest, catalog, cross-process trace and CLI agre
         assert.ok(
           Date.now() < deadline,
           `Incomplete ingested workload within 10 s: ${
-            JSON.stringify({ trace, throughput, errors, slow, tx, backups })
+            JSON.stringify({ trace, documentTrace, throughput, errors, slow, tx, backups })
           }`,
         );
         await delay(100);
       }
+      assert.deepEqual(
+        [...new Set(documentTrace.map((r) => r.role))],
+        ["server"],
+        "HTTP document queries never reach the child",
+      );
+      assert.ok(
+        documentTrace.some((r) => r.source === "sql" && r.role === "server"),
+        "the HTTP document query emitted server-side SQLite SQL",
+      );
+      assert.ok(
+        trace.some((r) => r.source === "sql" && r.role === "reader"),
+        "the direct query RPC emitted reader-side SQL under the shared trace",
+      );
       const times = trace.map((r) => String(r.ts));
       assert.deepEqual(times, [...times].sort(), "trace timeline must be ordered");
       const rejected = await request(server, "/admin/logs/analysis/noSuchQuery");
