@@ -2,14 +2,22 @@
 
 Dated decisions with rationale. Plans carry the _what_; this page carries the _why_. Newest first.
 
+## 2026-10-12 — Language-switch research preserves database-per-app
+
+Human scope decision: keep the separate SQLite database per app; the briefly proposed Postgres-only comparison
+was withdrawn. The [Astra language assessment](../architecture/language-switch-astra.md) recommends a Go
+SQLite execution service behind the Deno API, with process containment and bounded connection residency. This
+is a research recommendation, not an approved migration. Native cancellation and thread scheduling improve
+execution control; no language removes the open-file budget.
+
 ## 2026-10-11 — Narrowed SQLite pivot: in-process document reads
 
 DuckDB stays responsible for the event log and named analysis in the supervised reader child; only document
 reads move to in-process SQLite. The query compiler already emits `dialect="sqlite"`, so SP-02 can execute
 that SQL directly with `node:sqlite` without a full backend migration. The reader child, IPC, supervision and
 teardown discipline remain load-bearing for ingest and analysis. Read-only document connections and SP-05's
-32-permit execution semaphore reduce interference with SQLite writers while bounding concurrent reads. This
-is the narrowed outcome of the sqlite-pivot plan's SP-02/SP-05.
+32-permit execution semaphore reduce interference with SQLite writers while bounding concurrent reads. This is
+the narrowed outcome of the sqlite-pivot plan's SP-02/SP-05.
 
 ## 2026-10-11 — No ORM for Postgres access
 
