@@ -1,9 +1,10 @@
 /**
  * The text storage contract (plan item 31, `docs/adr/0005-text-storage-contract.md`), against the
- * real `StorageLive` over a `node:sqlite` file and against `StorageTest`, in both physical layouts.
+ * real `StorageLive` over a SQLite file and against `StorageTest`, in both physical layouts.
  *
- * `node:sqlite` binds U+0000 intact but truncates TEXT at it on read, so the contract is typed
- * rejection before commit:
+ * The contract was made when the writer's driver bound U+0000 intact but truncated TEXT at it on
+ * read; the FFI binding reads it intact, and the contract is unchanged (ADR 0005, FFI plan §6). It is
+ * typed rejection before commit:
  *
  * - a body, id or filter value holding U+0000 — leading, interior or trailing, in a scalar, a
  *   nullable scalar, an array item or a nested array item — fails `SchemaError` before its statement
@@ -22,12 +23,12 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import fc from "fast-check";
 import { Cause, Effect, Exit, HashMap, Option, Ref, TestClock } from "effect";
 import { compileInsert } from "../../core/compile/write.ts";
 import type { IdGenService, StorageService } from "../../platform/services.ts";
 import { IdGen } from "../../platform/services.ts";
+import { inspect, type Inspection } from "../helpers/sqlite_inspect.ts";
 import { makeStorage } from "../../platform/sqlite.ts";
 import type { WriteDB } from "../../sdk/db.ts";
 import { defineFunctions } from "../../sdk/functions.ts";
@@ -133,9 +134,9 @@ function open(target: Target, layout: Layout, ids?: IdGenService, tables: Schema
       const storage = yield* makeStorage({ file, schema: laidOut }).pipe(
         Effect.provideServiceEffect(IdGen, idGen),
       );
-      const raw = <A>(use: (db: DatabaseSync) => A) =>
+      const raw = <A>(use: (db: Inspection) => A) =>
         Effect.sync(() => {
-          const db = new DatabaseSync(file);
+          const db = inspect(file, { write: true });
           try {
             return use(db);
           } finally {
@@ -150,11 +151,11 @@ function open(target: Target, layout: Layout, ids?: IdGenService, tables: Schema
               const sql = rightOf(
                 compileInsert(laidOut, "docs", doc.body, { _id: doc._id, _creationTime: doc._creationTime }),
               );
-              db.prepare(sql.text).run(...sql.values);
+              db.run(sql.text, sql.values);
             }
           }),
         version: (id) =>
-          raw((db) => db.prepare('SELECT "_version" AS v FROM "docs" WHERE "_id" = ?').get(id)?.v as number),
+          raw((db) => db.get('SELECT "_version" AS v FROM "docs" WHERE "_id" = ?', [id])?.v as number),
       };
       return opened;
     }
@@ -196,7 +197,7 @@ const storedNul = (column: string) => ({
     _tag: "StorageError",
     operation: "select",
     table: "docs",
-    detail: `Stored text in "${column}" contains U+0000, which node:sqlite truncates on read`,
+    detail: `Stored text in "${column}" contains U+0000, which the text storage contract rejects`,
   },
 });
 

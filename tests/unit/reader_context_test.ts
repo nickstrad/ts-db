@@ -234,8 +234,8 @@ test("withRequestContext: a caller trace is not replaced by an outer annotation;
 async function withFixture(run: (dir: string) => Promise<void>): Promise<void> {
   const dir = await Deno.makeTempDir({ prefix: "ts-db-reader-context-" });
   try {
-    const { DatabaseSync } = await import("node:sqlite");
-    const db = new DatabaseSync(join(dir, "tic-tac-toe.sqlite"));
+    const { inspect } = await import("../helpers/sqlite_inspect.ts");
+    const db = inspect(join(dir, "tic-tac-toe.sqlite"), { write: true });
     try {
       for (const statement of expectRight(compileDDL(schema))) db.exec(statement);
       const game = {
@@ -249,7 +249,7 @@ async function withFixture(run: (dir: string) => Promise<void>): Promise<void> {
       const insert = expectRight(
         compileInsert(schema, "games", game, { _id: "game-1", _creationTime: 1 }),
       );
-      db.prepare(insert.text).run(...insert.values);
+      db.run(insert.text, insert.values);
     } finally {
       db.close();
     }

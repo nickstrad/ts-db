@@ -10,16 +10,17 @@
  * in the `columns` and the `json` layout, on SQLite (the writer) and DuckDB (the reader).
  *
  * **Three processes.** DuckDB's `sqlite` extension is a second copy of the SQLite library, and it
- * must never share an address space with `node:sqlite` (plan §0, ADR 0001; `reader_test.ts` does the
- * same). `deno task test` already loads `node:sqlite` in this process, so the parent half loads
- * neither engine. It runs this same module twice more with `deno run`, selected by `ROLE_ENV`:
+ * must never share an address space with the writer's SQLite (plan §0, ADR 0001; `reader_test.ts`
+ * does the same). `deno task test` already loads the writer's SQLite (the FFI binding) in this
+ * process, so the parent half loads neither engine. It runs this same module twice more with
+ * `deno run`, selected by `ROLE_ENV`:
  *
- * - `sqlite` writes the fixture database for each layout with the pure compiler and `node:sqlite`,
- *   then answers every plan with `compileSelect(…, "sqlite")` and `decode`, as `platform/sqlite.ts`
- *   does.
+ * - `sqlite` writes the fixture database for each layout with the pure compiler and the FFI binding
+ *   (`tests/helpers/sqlite_inspect.ts`), then answers every plan with `compileSelect(…, "sqlite")`
+ *   and `decode` over the binding's blocking `all`, as `platform/sqlite.ts` does.
  * - `duckdb` attaches those files read-only through the real `ReaderLive` and answers every plan
- *   from a query handler, so the plans travel the production bind path. It never loads
- *   `node:sqlite`.
+ *   from a query handler, so the plans travel the production bind path. It never loads the
+ *   writer's SQLite.
  *
  * Each child prints one JSON line with its engine name and one answer per plan. The parent checks
  * the child exited 0, named the engine it was asked for, and answered every plan, so neither leg can
@@ -287,7 +288,7 @@ if (role === undefined) {
 }
 
 // ---------------------------------------------------------------------------
-// SQLite leg: node:sqlite, never DuckDB
+// SQLite leg: the FFI binding, never DuckDB
 // ---------------------------------------------------------------------------
 
 /** Error or value, as one JSON-safe answer. */
@@ -296,7 +297,7 @@ function answer(result: Either.Either<unknown, unknown>): Answer {
 }
 
 if (role === "sqlite") {
-  const { DatabaseSync } = await import("node:sqlite");
+  const { inspect } = await import("../helpers/sqlite_inspect.ts");
   const { compileDDL } = await import("../../core/compile/ddl.ts");
   const { compileInsert } = await import("../../core/compile/write.ts");
   const { compileSelect } = await import("../../core/compile/select.ts");
@@ -305,17 +306,17 @@ if (role === "sqlite") {
   const report: Report = { engine: "sqlite", layouts: {} };
   for (const layout of LAYOUTS) {
     const schema = schemaFor(layout);
-    const db = new DatabaseSync(join(dir, `${layout}.sqlite`));
+    const db = inspect(join(dir, `${layout}.sqlite`), { write: true });
     try {
       for (const statement of expectRight(compileDDL(schema))) db.exec(statement);
       for (const { _id, _creationTime, n, i } of documents()) {
         const sql = expectRight(compileInsert(schema, "nums", { n, i }, { _id, _creationTime }));
-        db.prepare(sql.text).run(...sql.values);
+        db.run(sql.text, sql.values);
       }
       report.layouts[layout] = plans().map((plan) => {
         try {
           const sql = expectRight(compileSelect(schema, plan, "sqlite"));
-          return answer(decode(schema, plan, db.prepare(sql.text).all(...sql.values)));
+          return answer(decode(schema, plan, db.all(sql.text, sql.values)));
         } catch (error) {
           return { error: String(error) };
         }
@@ -328,7 +329,7 @@ if (role === "sqlite") {
 }
 
 // ---------------------------------------------------------------------------
-// DuckDB leg: the real ReaderLive, never node:sqlite
+// DuckDB leg: the real ReaderLive, never the writer's SQLite
 // ---------------------------------------------------------------------------
 
 if (role === "duckdb") {

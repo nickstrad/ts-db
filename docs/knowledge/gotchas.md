@@ -62,6 +62,22 @@ in one process, each database file is opened by exactly one of them. The perf pa
 (`tests/unit/sqlite_ffi_perf_test.ts`) uses two identical files for that reason. The same rule is why the
 DuckDB reader is a separate process (plan §0).
 
+Update 2026-10-13 (FFI-04, `item/ffi-04-cutover`): the server process no longer loads `node:sqlite` at all.
+Writer, document reader, tenant router and backup verifier open through the binding, all on
+`Config.sqlite.library`. Different `libsqlite3` files are separate copies too: vm-1's 3.45.1 and 3.53.4 must
+never both open one file in a process, which is why every open passes the same configured path. Tests open
+files through `tests/helpers/sqlite_inspect.ts` (`inspect(path)` read-only, `{ write: true }` for fixtures and
+side connections). `tests/unit/boundaries_test.ts` forbids `node:sqlite` anywhere under `platform/` and
+`tests/` except exact-path allow-lists, and walks both processes' runtime import graphs.
+
+Update 2026-10-13 (FFI-04 repair 1): an allow-list entry proves only that a file _may_ import `node:sqlite`,
+not that it keeps the drivers on separate files. The FFI-04 build allow-listed
+`tests/property/sqlite_oracle_test.ts` as "in-memory only", but its NUL regression held `Storage` (now the
+binding) on a temp file and opened the same file through `new DatabaseSync(file)` to write beneath it. Green
+tests did not show it; Astra found it by tracing each open's scope. When a cutover changes which driver a
+shared helper (`makeStorage`, a layer) uses, re-audit every `DatabaseSync(` in the allow-listed files: each
+must open `:memory:` or a path nothing else in the process opens, for the whole time it is open.
+
 ## `Deno.dlopen` and FFI `i64`: bigint in, bigint out
 
 Added 2026-10-13. On Deno 2.9.5 an `i64` FFI parameter's type is `bigint` only (a `number` fails `deno check`)
@@ -184,3 +200,24 @@ Found by the FFI-01 review (`agent-work/items/ffi-binding/review-astra.md` on `r
   compare by identity (`===` runs no trap). Treat any other thrown value as opaque, and wrap the annotation in
   a `try`/`catch` so that it cannot change what is thrown. Pinned by the "never touches an exception the
   caller threw" `cleanup:` tests in `tests/unit/sqlite_ffi_cancel_test.ts`.
+
+## 2026-10-13 — FFI-04: the binding is not a drop-in for `node:sqlite`'s defaults
+
+Found while moving the statement path onto `platform/sqlite_ffi/` (FFI-04). Each one is invisible for valid
+SQL, which is why the test suite stays green, but they differ:
+
+- **Error text.** The binding's errors are `Data.TaggedError`s with structured fields and an empty `message`.
+  Code that builds a `detail` from `e.message` gets `""`. Use `sqliteFailureMessage` in `platform/sqlite.ts`:
+  `SqliteError.sqliteMessage` is the `sqlite3_errmsg` text `node:sqlite` put in `message`, and open failures
+  append the file as that driver did.
+- **Connection defaults.** `node:sqlite` (Deno 2.9.5) opens with `foreign_keys=ON` and double-quoted string
+  literals off: `SELECT "nope"` fails "no such column". The system `libsqlite3` 3.45.1 keeps its compile-time
+  defaults: `foreign_keys=0` and DQS on, so `SELECT "nope"` returns the text `nope` and `WHERE "nope" = ?`
+  compares two literals. The schema has no foreign keys and the compiler only quotes identifiers it validated,
+  but a compiler bug that names an unknown column now returns wrong rows instead of failing. The binding has
+  no `sqlite3_db_config`, so turning DQS off is a binding change (raised as `decision_needed` by
+  `claude-opus-ffi-04`).
+- **Number binds.** `node:sqlite` binds every JS `number` as REAL (`typeof(?)` of `1` is `real`) and refuses
+  booleans. The binding binds integral safe numbers as INTEGER and booleans as 0/1. STRICT INTEGER/REAL
+  columns and numeric comparisons do not see the difference. A TEXT-affinity comparison would (`'1'` against
+  `'1.0'`), which the schema validator rules out by typing filter values.

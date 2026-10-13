@@ -2,8 +2,15 @@
  * Server-side document reads. One read-only SQLite connection and read transaction per
  * handler; no Storage semaphore, native DuckDB import, or IPC for document queries.
  * A per-call connection bounds lifetime and isolates concurrent/yielding handlers.
+ *
+ * Connections are the FFI binding's (`platform/sqlite_ffi/`) on `Config.sqlite.library`, opened with
+ * `readBigInts` so every INTEGER reads as `bigint` (`decode` narrows them). Statements come from the
+ * connection's cache (`prepareCached`) and run on the blocking path in the same step; the call's
+ * deadline is still `Effect.timeoutFail` at `reader.callTimeoutMs`, which cannot stop a running
+ * statement (FFI-05 replaces it with an interruptible deadline).
  */
-import { DatabaseSync } from "node:sqlite";
+import { Database, isSqliteFfiError, prepareCached } from "./sqlite_ffi/mod.ts";
+import { sqliteFailureMessage } from "./sqlite.ts";
 import { isAbsolute } from "node:path";
 import { Cause, Clock, Effect, Exit, FiberId, FiberRef, HashMap, Layer, Option } from "effect";
 import {
@@ -50,10 +57,10 @@ import { parseTenantId } from "./tenants/registry.ts";
  */
 export const DOCUMENT_READ_CONCURRENCY_CAP = 32;
 
-function native<A>(operation: ReaderError["operation"], run: () => A, table?: string) {
+function native<A>(operation: ReaderError["operation"], run: () => A, table?: string, file?: string) {
   return Effect.try({
     try: run,
-    catch: (cause) => new ReaderError({ operation, table, detail: messageOf(cause), cause }),
+    catch: (cause) => new ReaderError({ operation, table, detail: messageOf(cause, file), cause }),
   });
 }
 
@@ -83,7 +90,8 @@ function isQueryError(error: unknown): error is QueryError {
   return typeof tag === "string" && Object.hasOwn(QUERY_ERROR_TAGS, tag);
 }
 
-function messageOf(cause: unknown): string {
+function messageOf(cause: unknown, file?: string): string {
+  if (isSqliteFfiError(cause)) return sqliteFailureMessage(cause, file);
   return cause instanceof Error ? cause.message : String(cause);
 }
 
@@ -98,11 +106,16 @@ export function querySqlite(
   args: unknown,
 ) {
   return Effect.gen(function* () {
-    const { logging } = yield* Config;
+    const { logging, sqlite } = yield* Config;
     const sink = yield* EventSink;
     const pid = Deno.pid;
     return yield* Effect.acquireUseRelease(
-      native("open", () => new DatabaseSync(app.file, { readOnly: true })),
+      native(
+        "open",
+        () => Database.open(app.file, { readOnly: true, readBigInts: true, libraryPath: sqlite.library }),
+        undefined,
+        app.file,
+      ),
       (connection) =>
         Effect.gen(function* () {
           /** The shared envelope. `traceId` comes from the request's log annotation, as `logger.ts` does. */
@@ -137,11 +150,7 @@ export function querySqlite(
               const exit = yield* Effect.exit(
                 native(
                   "select",
-                  () => {
-                    const statement = connection.prepare(sql.text);
-                    statement.setReadBigInts(true);
-                    return statement.all(...sql.values);
-                  },
+                  () => prepareCached(connection, sql.text).all(sql.values),
                   plan.table,
                 ),
               );

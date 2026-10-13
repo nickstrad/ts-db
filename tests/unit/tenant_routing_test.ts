@@ -3,11 +3,11 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { DatabaseSync } from "node:sqlite";
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Scope } from "effect";
 import { ConfigTest } from "../../platform/config.ts";
 import { EventSink, IdGen, type StorageService } from "../../platform/services.ts";
 import { makeStorage, type TenantCacheOptions } from "../../platform/sqlite.ts";
+import type { Database } from "../../platform/sqlite_ffi/mod.ts";
 import {
   LocalFolderRouter,
   makeLocalFolderRouter,
@@ -55,7 +55,7 @@ async function harness(
 ) {
   const dir = mkdtempSync(join(tmpdir(), "tenant-routing-"));
   const opens = new Map<string, number>();
-  const handles: DatabaseSync[] = [];
+  const handles: Database[] = [];
   const local = makeLocalFolderRouter(dir, schema);
   // A stub router is the only source of storage locations. Config's tenantsDir and options.file
   // deliberately point elsewhere. Count persistent writer opens separately from prepare's DDL handle.

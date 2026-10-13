@@ -1,8 +1,9 @@
 /**
  * Unit tests for the `Storage` service (plan item 15).
  *
- * These run the real `StorageLive` over a real `node:sqlite` file in a temp directory: the point is
- * the transaction and queue semantics, which only the real driver can show. Every dependency the
+ * These run the real `StorageLive` over a real SQLite file in a temp directory: the point is
+ * the transaction and queue semantics, which only the real driver can show. Side connections on the
+ * live file go through `tests/helpers/sqlite_inspect.ts`, the server's own FFI binding. Every dependency the
  * layer takes is a local double — `EventSink` collects into an array, `IdGen` counts `id-1`,
  * `id-2`, …, `Config` is `ConfigTest` — so each test can assert on the events it caused.
  *
@@ -18,7 +19,6 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import {
   Cause,
   Deferred,
@@ -48,6 +48,7 @@ import { defineFunctions } from "../../sdk/functions.ts";
 import { defineSchema, defineTable, v } from "../../sdk/schema.ts";
 import { schema } from "../../app/schema.ts";
 import { functions } from "../../app/functions.ts";
+import { inspect as inspectFile } from "../helpers/sqlite_inspect.ts";
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -419,11 +420,11 @@ test("schema drift fails the layer with SchemaDriftError and closes the handle",
     assert.equal((drift as { _tag: string })._tag, "SchemaDriftError");
     assert.match((drift as { detail: string }).detail, /refuses automatic migration/);
     // The failed acquire rolled back and closed: another connection can take the write lock now.
-    const db = new DatabaseSync(h.file);
+    const db = inspectFile(h.file, { write: true });
     try {
       db.exec("PRAGMA busy_timeout=0; BEGIN IMMEDIATE; ROLLBACK");
       assert.equal(
-        db.prepare('SELECT definition FROM "_platform_schema"').get()!.definition,
+        db.get('SELECT definition FROM "_platform_schema"')!.definition,
         JSON.stringify(schema),
       );
     } finally {
@@ -478,10 +479,10 @@ test("closing the scope waits for in-flight work, then refuses new work", async 
         yield* Fiber.join(closing);
       }).pipe(Effect.ensuring(Deferred.succeed(gate, undefined))),
     );
-    const db = new DatabaseSync(h.file, { readOnly: true });
+    const db = inspectFile(h.file);
     try {
       assert.equal(
-        db.prepare("SELECT COUNT(*) AS n FROM games").get()!.n,
+        db.get("SELECT COUNT(*) AS n FROM games")!.n,
         1,
         "the drained mutation committed",
       );
@@ -584,7 +585,7 @@ test("a failing statement emits an error sql event and a StorageError", async ()
   await withStorageLayer((storage, h) =>
     Effect.gen(function* () {
       // Corrupt the stored schema under the layer's feet so the next insert hits a driver error.
-      const side = new DatabaseSync(h.file);
+      const side = inspectFile(h.file, { write: true });
       side.exec('DROP TABLE "moves"');
       side.close();
       h.events.length = 0;
@@ -661,8 +662,8 @@ test("a read of pre-existing U+0000 text fails StorageError via a second, guarde
         gameId: string;
       };
       // What a pre-contract build could have committed: SQLite holds all three bytes.
-      const side = new DatabaseSync(h.file);
-      side.prepare('UPDATE "games" SET "xPlayer" = ? WHERE "_id" = ?').run("a\u0000b", gameId);
+      const side = inspectFile(h.file, { write: true });
+      side.run('UPDATE "games" SET "xPlayer" = ? WHERE "_id" = ?', ["a\u0000b", gameId]);
       side.close();
       const read = (definition: Parameters<StorageService["mutation"]>[0]) =>
         Effect.gen(function* () {
@@ -677,7 +678,7 @@ test("a read of pre-existing U+0000 text fails StorageError via a second, guarde
         _tag: "StorageError",
         operation: "select",
         table: "games",
-        detail: 'Stored text in "xPlayer" contains U+0000, which node:sqlite truncates on read',
+        detail: 'Stored text in "xPlayer" contains U+0000, which the text storage contract rejects',
       });
       assert.deepEqual(sql.map((e) => [e.statementKind, e.outcome]), [["select", "ok"], ["select", "ok"]]);
       assert.match(sql[1].sqlText, /instr\(q\."xPlayer", char\(0\)\) > 0/);

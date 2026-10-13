@@ -6,7 +6,7 @@
  *   decision, never a path supplied by an HTTP caller; `Config.apps` lists the apps and their
  *   tokens, and each app's SQLite file sits under `Config.server.dataDir`.
  * - `AppServices` is the per-app half: one `Storage` (and the `Backups` bound to it) per app, because
- *   the writer owns one `DatabaseSync` handle per file (`platform/services.ts`, `Storage`). The live
+ *   the writer owns one SQLite connection per file (`platform/services.ts`, `Storage`). The live
  *   layer is built in `platform/layers.ts`; the HTTP router only sees this tag, so a test supplies
  *   in-memory stacks and a later tenancy layer (multitenancy plan MT-03/MT-07) can resolve stacks by
  *   tenant behind the same `get`.

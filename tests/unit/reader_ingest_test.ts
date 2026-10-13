@@ -14,7 +14,8 @@
  * The last test builds the reader's event-log service in this process over a probe driver, to see
  * the order native handles open and close in. That loads DuckDB here, which is safe for the same
  * reason as in `tests/unit/eventlog_test.ts`: event-log ingest never loads DuckDB's `sqlite`
- * extension. The query fixture's SQLite files are written with `node:sqlite`, imported dynamically.
+ * extension. The query fixture's SQLite files are written with the FFI binding
+ * (`tests/helpers/sqlite_inspect.ts`), imported dynamically.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -86,7 +87,7 @@ async function withWorld(body: (world: World) => Promise<void>): Promise<void> {
 
 /** Both apps' SQLite files, each holding one game, so the reader can answer queries. */
 async function writeAppFixture(dir: string): Promise<void> {
-  const { DatabaseSync } = await import("node:sqlite");
+  const { inspect } = await import("../helpers/sqlite_inspect.ts");
   const layouts = [
     ["tic-tac-toe.sqlite", schema],
     ["tic-tac-toe-json.sqlite", withStorage(schema, "json")],
@@ -100,13 +101,13 @@ async function writeAppFixture(dir: string): Promise<void> {
     winner: null,
   };
   for (const [file, layout] of layouts) {
-    const db = new DatabaseSync(join(dir, file));
+    const db = inspect(join(dir, file), { write: true });
     try {
       for (const statement of expectRight(compileDDL(layout))) db.exec(statement);
       const insert = expectRight(
         compileInsert(layout, "games", game, { _id: "game-1", _creationTime: 1 }),
       );
-      db.prepare(insert.text).run(...insert.values);
+      db.run(insert.text, insert.values);
     } finally {
       db.close();
     }
@@ -430,7 +431,8 @@ async function runtimeGraph(entry: string): Promise<Set<string>> {
 
 const local = (path: string) => new URL(path, `file://${repoRoot}`).href;
 
-test("import graph: the reader entry reaches the event log and retention, never node:sqlite", async () => {
+// The same walks in `tests/unit/boundaries_test.ts` also pin the other SQLite driver out of both graphs.
+test("import graph: the reader entry reaches the event log and retention, never the writer's SQLite", async () => {
   const reached = await runtimeGraph("platform/reader.ts");
   for (
     const module of [
@@ -448,13 +450,16 @@ test("import graph: the reader entry reaches the event log and retention, never 
     [...reached].some((s) => /@duckdb\/node-api/.test(s)),
     "the walk never reached DuckDB: it is broken",
   );
-  const sqlite = [...reached].filter((s) => s === "node:sqlite" || /platform\/sqlite\.ts$/.test(s));
+  const sqlite = [...reached].filter((s) => /platform\/(sqlite\.ts|sqlite_ffi\/)/.test(s));
   assert.deepEqual(sqlite, [], `the reader reaches the writer's SQLite: ${sqlite.join(", ")}`);
 });
 
 test("import graph: the server never reaches the reader root or its context module", async () => {
   const reached = await runtimeGraph("platform/server.ts");
-  assert.ok(reached.has("node:sqlite"), "the walk never reached node:sqlite: it is broken");
+  assert.ok(
+    reached.has(local("platform/sqlite_ffi/database.ts")),
+    "the walk never reached the SQLite binding: it is broken",
+  );
   const offenders = [...reached].filter((s) => /platform\/reader_(layers|context)\.ts$|duckdb/i.test(s));
   assert.deepEqual(offenders, [], `the server reaches reader-only modules: ${offenders.join(", ")}`);
 });

@@ -2,7 +2,8 @@
  * The reader process's composition root (plan item 33). It does for `platform/reader.ts` what
  * `platform/layers.ts` does for the server, and lives apart from it on purpose: the two processes
  * must not share a module graph (ADR 0001). This module reaches `@duckdb/node-api` through
- * `platform/eventlog/ingest.ts`; it must never reach `node:sqlite`, and nothing the server loads may
+ * `platform/eventlog/ingest.ts`; it must never reach the server's SQLite binding (`platform/sqlite.ts`,
+ * `platform/sqlite_ffi/`), and nothing the server loads may
  * import it (`tests/unit/server_scope_test.ts` and `tests/unit/reader_ingest_test.ts` walk both graphs).
  *
  * ## The chain
@@ -63,8 +64,8 @@ import { LoggingReaderLive } from "./logging/logger.ts";
 import { Config, EventLogIngest, EventSink, IdGen } from "./services.ts";
 
 /**
- * The reader's own `IdGen`. `IdGenLive` lives in `platform/sqlite.ts`, which loads `node:sqlite`
- * and so may never be imported here.
+ * The reader's own `IdGen`. `IdGenLive` lives in `platform/sqlite.ts`, which loads the FFI SQLite
+ * binding and so may never be imported here.
  */
 export const ReaderIdGenLive: Layer.Layer<IdGen> = Layer.succeed(IdGen, {
   next: Effect.sync(() => crypto.randomUUID()),

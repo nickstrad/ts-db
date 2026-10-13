@@ -7,8 +7,8 @@
  * IdGenLive, StorageLive, ReaderClientLive, ObjectStoreLive, BackupsLive)`. Two things change in the
  * real wiring, both on purpose:
  *
- * 1. **`Storage` and `Backups` are per app.** The writer owns one `DatabaseSync` handle per SQLite
- *    file, so there is one `StorageLive` (and one `BackupsLive` bound to it) per registered app.
+ * 1. **`Storage` and `Backups` are per app.** The writer owns one SQLite connection per file, so
+ *    there is one `StorageLive` (and one `BackupsLive` bound to it) per registered app.
  *    `AppServicesLive` builds those stacks into its own scope and exposes them behind the
  *    `AppServices` tag (`platform/registry.ts`); the router never sees a bare `Storage`.
  * 2. **The layers are a chain, not a flat merge.** `Layer.mergeAll` may build (and therefore
@@ -35,7 +35,9 @@
  * is taken — closes everything acquired before it, in reverse, and still flushes the log. Nothing is
  * opened outside a scope, so there is no window in which a handle exists that no finalizer owns.
  *
- * The resource steps leave evidence in the log: `storage-opened`/`storage-closed` per app (emitted
+ * The resource steps leave evidence in the log: `sqlite-library` once, before the first open (the
+ * `libsqlite3` every connection in this process uses: requested and resolved path, version),
+ * `storage-opened`/`storage-closed` per app (emitted
  * here; `storage-closed` only after that app's handle and writer queue have closed, and only if it
  * opened), `reader-spawned`/`reader-exited` (`platform/ipc.ts`). `makePlatformLive`'s `afterStep`
  * hook runs after each step acquires; tests use it to inject a failure or an interruption at exactly
@@ -51,11 +53,13 @@
  *
  * ## The reader process root
  *
- * The two processes must not share a module graph: this one loads `node:sqlite` (`StorageLive`), the
- * reader loads `@duckdb/node-api`, and one process must never hold both SQLite copies (ADR 0001,
- * `platform/duckdb.ts`). So the reader's root cannot live here as a value — importing
- * `EventLogIngestLive` would load DuckDB into the writer, and `platform/reader.ts` importing this
- * module would load `node:sqlite` into the reader. What is fixed here is its *shape*:
+ * The two processes must not share a module graph: this one loads the system `libsqlite3` through
+ * the FFI binding (`platform/sqlite_ffi/`, for `StorageLive`, the document reader and backups), the
+ * reader loads `@duckdb/node-api` with its own SQLite inside, and one process must never open a file
+ * through two SQLite copies (ADR 0001, `platform/duckdb.ts`). So the reader's root cannot live here
+ * as a value — importing `EventLogIngestLive` would load DuckDB into the writer, and
+ * `platform/reader.ts` importing this module would load the binding into the reader. What is fixed
+ * here is its *shape*:
  * `ReaderProcessServices` = `Config` + the reader's `EventSink` (`LoggingReaderLive`) +
  * `EventLogIngest`, with per-app `ReaderLive` instances opened lazily by `makeReaderPool`
  * (`platform/duckdb.ts`) inside the reader's program scope. `platform/reader.ts` composes it
@@ -80,7 +84,7 @@ import { fileURLToPath } from "node:url";
 import { Cause, Context, Deferred, Duration, Effect, Exit, Layer, Ref, Scope } from "effect";
 import { StorageError } from "../core/errors.ts";
 import { lifecycleEvent } from "../core/events.ts";
-import { BackupsLive } from "./backup.ts";
+import { makeBackupsLive } from "./backup.ts";
 import { DocumentReaderClientLive } from "./document_reader.ts";
 import { ConfigLive } from "./config.ts";
 // Type-only, on purpose: see "The reader process root" above.
@@ -90,7 +94,8 @@ import { makeReaderConnection, type ReaderConnection } from "./ipc.ts";
 import { LoggingLive } from "./logging/logger.ts";
 import { ObjectStoreLive } from "./object_store.ts";
 import { AppRegistryLive, AppServices, type AppStack, makeAppServices } from "./registry.ts";
-import { IdGenLive, StorageLive } from "./sqlite.ts";
+import { IdGenLive, sqliteFailureMessage, StorageLive } from "./sqlite.ts";
+import { isSqliteFfiError, loadLibrary } from "./sqlite_ffi/mod.ts";
 import {
   AppRegistry,
   Backups,
@@ -168,8 +173,15 @@ const stepDone = (afterStep: AfterStep, step: StartupStep): Layer.Layer<never> =
  * order (and so closed in reverse). Each app's data directory is created first, as before the port.
  *
  * Each app gets a `storage-opened` event once its handle is open and a `storage-closed` event once
- * it has closed again (the writer queue drained, then `DatabaseSync.close`). The closing event's
+ * it has closed again (the writer queue drained, then the connection closed). The closing event's
  * finalizer is registered *before* the stack is built, so it runs *after* the stack's own release.
+ *
+ * Before the first app, the `libsqlite3` named by `Config.sqlite.library` (or the binding's default
+ * list) is loaded once and reported as one `sqlite-library` event. Every open in this process —
+ * `Storage`, the tenant router, the document reader, the backup verifier — passes the same
+ * `Config.sqlite.library`, and the binding caches the loaded library per path, so they all use the
+ * copy this event names. A library that cannot load (or is too old, or single-threaded) fails
+ * startup here as `StorageError{operation:"open"}`, before any file is opened.
  */
 export function makeAppServicesLive(afterStep: AfterStep = noStep) {
   return Layer.scoped(
@@ -179,6 +191,21 @@ export function makeAppServicesLive(afterStep: AfterStep = noStep) {
       const apps = yield* (yield* AppRegistry).all;
       const stacks: AppStack[] = [];
       const config = yield* Config;
+      const library = yield* Effect.try({
+        try: () => loadLibrary(config.sqlite.library),
+        catch: (cause) =>
+          new StorageError({
+            operation: "open",
+            detail: isSqliteFfiError(cause) ? sqliteFailureMessage(cause) : String(cause),
+            cause,
+          }),
+      });
+      yield* emitServerLifecycle(sink, "sqlite-library", {
+        requested: config.sqlite.library ?? null,
+        path: library.path,
+        version: library.version,
+        versionNumber: library.versionNumber,
+      });
       for (const app of apps) {
         yield* Effect.tryPromise({
           try: () => Deno.mkdir(dirname(app.file), { recursive: true }),
@@ -213,7 +240,7 @@ export function makeAppServicesLive(afterStep: AfterStep = noStep) {
             ),
         };
         const storage = StorageLive({ file: app.file, schema: app.schema, appId: app.id });
-        const stack = BackupsLive.pipe(
+        const stack = makeBackupsLive({ sqliteLibrary: config.sqlite.library }).pipe(
           Layer.provideMerge(
             tenantRouter
               ? storage.pipe(

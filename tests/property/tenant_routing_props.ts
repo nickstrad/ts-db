@@ -4,7 +4,6 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { Effect, Either, Layer } from "effect";
 import fc from "fast-check";
 import { MalformedTenantId, TenantDeactivated, UnknownTenant } from "../../core/errors.ts";
@@ -16,6 +15,7 @@ import { makeLocalFolderRouter, TenantContext, TenantStorageRouter } from "../..
 import { defineFunctions } from "../../sdk/functions.ts";
 import { defineSchema, defineTable, v } from "../../sdk/schema.ts";
 import { check, NUM_RUNS, SEED, titled } from "./arbitraries.ts";
+import { inspect } from "../helpers/sqlite_inspect.ts";
 
 const schema = defineSchema({ documents: defineTable({ owner: v.string(), value: v.integer() }) });
 const app = defineFunctions(schema);
@@ -265,10 +265,10 @@ test(
         for (const [index, id] of ids.entries()) {
           const location = Effect.runSync(router.resolve(id));
           assert.equal(location.path, join(dir, `${id}.db`));
-          const db = new DatabaseSync(location.path, { readOnly: true });
+          const db = inspect(location.path);
           try {
             assert.deepEqual(
-              db.prepare('SELECT "_id", owner, value FROM documents').all().map((row) => ({ ...row })),
+              db.all('SELECT "_id", owner, value FROM documents').map((row) => ({ ...row })),
               [{
                 _id: docId,
                 owner: id,

@@ -28,7 +28,6 @@
  * also carries its `appId` and `traceId` through log annotations, which the store's records read too.
  */
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import {
   Cause,
   Clock,
@@ -59,6 +58,8 @@ import {
   type Role,
 } from "../core/events.ts";
 import { BACKUP_RUN_ANNOTATION, sha256 } from "./object_store.ts";
+import { sqliteFailureMessage } from "./sqlite.ts";
+import { Database, isSqliteFfiError } from "./sqlite_ffi/mod.ts";
 import {
   Backups as BackupsTag,
   type BackupsService,
@@ -79,22 +80,30 @@ export type { Manifest } from "./services.ts";
 /** Rows `quick_check` may return on a damaged file; the detail keeps the first few. */
 const MAX_INTEGRITY_ROWS = 5;
 
-function messageOf(cause: unknown): string {
+function messageOf(cause: unknown, file?: string): string {
+  if (isSqliteFfiError(cause)) return sqliteFailureMessage(cause, file);
   return cause instanceof Error ? cause.message || cause.name : String(cause);
 }
 
-/** `PRAGMA quick_check` on a standalone SQLite file. Anything but a single `ok` row fails. */
-export function verifySnapshot(file: string): Effect.Effect<void, SnapshotIntegrityError> {
+/**
+ * `PRAGMA quick_check` on a standalone SQLite file. Anything but a single `ok` row fails. The copy
+ * is opened read-only through the FFI binding, on `libraryPath` (`Config.sqlite.library`; absent:
+ * the binding's default list), the library every other open in the server process uses.
+ */
+export function verifySnapshot(
+  file: string,
+  libraryPath?: string,
+): Effect.Effect<void, SnapshotIntegrityError> {
   return Effect.try({
     try: () => {
-      const db = new DatabaseSync(file, { readOnly: true });
+      const db = Database.open(file, { readOnly: true, libraryPath });
       try {
         return db.prepare("PRAGMA quick_check").all();
       } finally {
         db.close();
       }
     },
-    catch: (cause) => new SnapshotIntegrityError({ file, detail: messageOf(cause) }),
+    catch: (cause) => new SnapshotIntegrityError({ file, detail: messageOf(cause, file) }),
   }).pipe(
     Effect.flatMap((rows) =>
       rows.length === 1 && rows[0].quick_check === "ok" ? Effect.void : Effect.fail(
@@ -112,8 +121,8 @@ export function verifySnapshot(file: string): Effect.Effect<void, SnapshotIntegr
  *
  * @deprecated Use {@link verifySnapshot}. Kept until `scripts/restore.ts` is ported.
  */
-export function integrityCheck(file: string): void {
-  const exit = Effect.runSyncExit(verifySnapshot(file));
+export function integrityCheck(file: string, libraryPath?: string): void {
+  const exit = Effect.runSyncExit(verifySnapshot(file, libraryPath));
   if (Exit.isFailure(exit)) {
     // The tagged error, not an untyped `Error`: the boundary test forbids `throw new Error` in
     // `platform/`, and the structured failure carries more than the old message did.
@@ -142,6 +151,8 @@ export interface BackupRunner {
 export interface BackupsOptions {
   /** Process role stamped on emitted events. Defaults to `server`. */
   readonly role?: Role;
+  /** `Config.sqlite.library`, for `verifySnapshot`'s open. Absent: the binding's default list. */
+  readonly sqliteLibrary?: string;
 }
 
 type PhaseFields = Pick<BackupPayload, "key" | "bytes" | "sha256">;
@@ -322,7 +333,7 @@ export function makeBackupRunner(
         // Serializes only snapshot creation with mutations; every later phase reads the standalone copy.
         yield* phase("snapshot", storage.snapshot(file)).pipe(Effect.mapError(failed(appId, "snapshot")));
         const capturedAt = new Date(yield* Clock.currentTimeMillis).toISOString();
-        yield* phase("verify", verifySnapshot(file));
+        yield* phase("verify", verifySnapshot(file, options.sqliteLibrary));
         const { bytes, digest } = yield* phase(
           "hash",
           readAndHash(file),

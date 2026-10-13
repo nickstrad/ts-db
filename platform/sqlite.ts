@@ -14,7 +14,8 @@
  *
  * Four decisions carry the item:
  *
- * 1. **Lifetime is a scope.** `makeStorage` opens the `DatabaseSync` handle with `acquireRelease`
+ * 1. **Lifetime is a scope.** `makeStorage` opens the connection (`platform/sqlite_ffi/`, the system
+ *    `libsqlite3` named by `Config.sqlite.library`) with `acquireRelease`
  *    *before* it runs the pragmas and the schema transaction, so a failed startup (driver error,
  *    `SchemaDriftError`) is a scoped failure that still closes the handle. The finalizer first
  *    refuses new work, then waits for the in-flight queue to drain, and only then closes.
@@ -41,11 +42,16 @@
  * `Clock` and `IdGen` are captured when the layer is built: `_creationTime` comes from Effect's
  * `Clock` (so `TestClock` drives it) and document ids from `IdGen`.
  *
+ * Every statement runs on the binding's blocking path (`Statement.run/get/all` on the main thread),
+ * through the per-connection statement cache (`prepareCached`), and is used in the same synchronous
+ * step that fetched it: a cached statement is only guaranteed valid until the next `prepareCached`
+ * call. FFI-05 moves unbounded reads onto the deadline-bounded path; this module does not yet.
+ *
  * Text containing U+0000 never crosses this boundary (plan item 31,
- * `docs/adr/0005-text-storage-contract.md`): `node:sqlite` binds it intact but truncates TEXT at the
- * NUL on read. Bodies, ids and filter values holding one fail `SchemaError` before their statement
- * runs, and a read of NUL text stored before the contract fails `StorageError` (see `nulProbe`)
- * rather than returning the truncated value.
+ * `docs/adr/0005-text-storage-contract.md`). The contract was made because the previous driver
+ * truncated TEXT at the NUL on read; the FFI binding reads it intact, but the contract is unchanged
+ * (FFI plan §6): bodies, ids and filter values holding one fail `SchemaError` before their statement
+ * runs, and a read of NUL text stored before the contract fails `StorageError` (see `nulProbe`).
  *
  * At the bottom, `SQLiteWriter` is a COMPATIBILITY WRAPPER with the pre-port constructor and async
  * methods, for the callers this item does not own (`platform/server.ts`, `platform/backup.ts`,
@@ -53,7 +59,6 @@
  * callers onto `StorageLive`. Item 26 left it in place (dead code, zero callers) — removal is a
  * follow-up.
  */
-import { DatabaseSync, type StatementSync } from "node:sqlite";
 import {
   Cause,
   Clock as EffectClock,
@@ -102,6 +107,13 @@ import { Documents, type Operation, type SelectPlan } from "../sdk/db.ts";
 import type { AnyDefinition } from "../sdk/functions.ts";
 import { formatSchemaError } from "../sdk/schema.ts";
 import { ConfigTest } from "./config.ts";
+import {
+  Database,
+  isSqliteFfiError,
+  prepareCached,
+  type SqliteFfiError,
+  type Statement,
+} from "./sqlite_ffi/mod.ts";
 import { Config, EventSink, type EventSinkService, IdGen, Storage, type StorageService } from "./services.ts";
 
 import { TenantContext, type TenantId, TenantStorageRouter } from "./tenants/routing.ts";
@@ -160,8 +172,31 @@ function isMutationError(e: unknown): e is MutationError {
   return e instanceof Error && MUTATION_ERROR_TAGS.has((e as { _tag?: unknown })._tag as string);
 }
 
-function messageOf(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
+function messageOf(e: unknown, file?: string): string {
+  return isSqliteFfiError(e) ? sqliteFailureMessage(e, file) : e instanceof Error ? e.message : String(e);
+}
+
+/**
+ * The text a binding failure carries, for a `StorageError`/`ReaderError`/`SnapshotIntegrityError`
+ * `detail`. The binding's errors are structured (`platform/sqlite_ffi/errors.ts`) and have no
+ * `message`; a `SqliteError`'s `sqliteMessage` is `sqlite3_errmsg`, the wording the previous driver
+ * put in its `message` (`UNIQUE constraint failed: games._id`), and an open failure names `file`, as
+ * that driver's did. The error itself stays the failure's `cause`.
+ */
+export function sqliteFailureMessage(e: SqliteFfiError, file?: string): string {
+  switch (e._tag) {
+    case "SqliteError": {
+      const text = e.sqliteMessage || e.codeName;
+      return e.op === "open" && file !== undefined ? `${text}: ${file}` : text;
+    }
+    case "SqliteUsageError":
+    case "SqliteValueError":
+      return e.detail;
+    case "SqliteCancelled":
+      return `statement cancelled (${e.reason})`;
+    case "SqliteLibraryError":
+      return `libsqlite3 ${e.reason}: ${e.detail}`;
+  }
 }
 
 /** `errorTag`/`errorDetail` for a failed exit: the repo's tag when there is one, `Defect` otherwise. */
@@ -231,7 +266,7 @@ function nulProbe(
  */
 function makeSingleStorage(
   options: StorageOptions,
-  open?: () => DatabaseSync,
+  open?: () => Database,
 ): Effect.Effect<
   StorageService,
   StorageError | SchemaDriftError | CompileError | SchemaError,
@@ -241,7 +276,7 @@ function makeSingleStorage(
   return Effect.gen(function* () {
     const sink = yield* EventSink;
     const idGen = yield* IdGen;
-    const { logging } = yield* Config;
+    const { logging, sqlite } = yield* Config;
     const clock = yield* Effect.clock;
     const semaphore = yield* Effect.makeSemaphore(1);
     const drained = yield* Deferred.make<void>();
@@ -269,11 +304,14 @@ function makeSingleStorage(
         };
       });
 
-    // The handle exists before anything can fail, so every later startup failure closes it.
+    // The handle exists before anything can fail, so every later startup failure closes it. The
+    // release closes synchronously: every statement here runs on the blocking path, so once the
+    // queue has drained no execution can hold the connection, and `close` finalizes the cached
+    // statements before `sqlite3_close_v2`.
     const database = yield* Effect.acquireRelease(
       Effect.try({
-        try: () => open ? open() : new DatabaseSync(file),
-        catch: (cause) => new StorageError({ operation: "open", detail: messageOf(cause), cause }),
+        try: () => open ? open() : Database.open(file, { libraryPath: sqlite.library }),
+        catch: (cause) => new StorageError({ operation: "open", detail: messageOf(cause, file), cause }),
       }),
       (db) =>
         Effect.gen(function* () {
@@ -293,7 +331,7 @@ function makeSingleStorage(
       kind: SqlStatementKind,
       table: string | undefined,
       sql: SQL,
-      run: (prepared: StatementSync) => A,
+      run: (prepared: Statement) => A,
       rows: (result: A) => number,
       operation: StorageError["operation"] = kind,
       guard?: () => E | undefined,
@@ -304,7 +342,8 @@ function makeSingleStorage(
         const started = nanos();
         let result: A;
         try {
-          result = run(database.prepare(sql.text));
+          // Fetched and used in one step: a cached statement is valid until the next prepareCached.
+          result = run(prepareCached(database, sql.text));
         } catch (cause) {
           const failure = new StorageError({ operation, table, detail: messageOf(cause), cause });
           return Effect.zipRight(
@@ -384,7 +423,7 @@ function makeSingleStorage(
           Effect.suspend(() => {
             tx.active = false;
             let rollbackFailure: unknown;
-            if (!tx.committed && database.isTransaction) {
+            if (!tx.committed && database.inTransaction) {
               try {
                 database.exec("ROLLBACK");
               } catch (cause) {
@@ -408,7 +447,7 @@ function makeSingleStorage(
                 ...columns,
               })));
             // A connection still inside a transaction would poison every later job: fail loudly.
-            return rollbackFailure !== undefined && database.isTransaction
+            return rollbackFailure !== undefined && database.inTransaction
               ? Effect.zipRight(
                 emitted,
                 Effect.die(
@@ -471,7 +510,7 @@ function makeSingleStorage(
           "select",
           plan.table,
           sql,
-          (s) => s.all(...sql.values),
+          (s) => s.all(sql.values),
           (r) => r.length,
           "select",
           live(tx),
@@ -482,7 +521,7 @@ function makeSingleStorage(
             "select",
             plan.table,
             probe,
-            (s) => s.get(...probe.values),
+            (s) => s.get(probe.values),
             (row) => (row ? 1 : 0),
             "select",
             live(tx),
@@ -491,7 +530,8 @@ function makeSingleStorage(
             return yield* new StorageError({
               operation: "select",
               table: plan.table,
-              detail: `Stored text in "${hit.field}" contains U+0000, which node:sqlite truncates on read`,
+              detail:
+                `Stored text in "${hit.field}" contains U+0000, which the text storage contract rejects`,
             });
           }
         }
@@ -503,7 +543,7 @@ function makeSingleStorage(
       table: string,
       sql: SQL,
       guard?: () => E | undefined,
-    ) => statement(kind, table, sql, (s) => s.run(...sql.values), changes, kind, guard);
+    ) => statement(kind, table, sql, (s) => s.run(sql.values), changes, kind, guard);
 
     const execute = (op: Operation, tx: Tx): Effect.Effect<unknown, ExecuteError> => {
       switch (op.kind) {
@@ -621,7 +661,7 @@ function makeSingleStorage(
             "pragma",
             undefined,
             { text: "VACUUM INTO ?", values: [destination] },
-            (s) => s.run(destination),
+            (s) => s.run([destination]),
             changes,
             "snapshot",
           )

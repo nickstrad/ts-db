@@ -36,6 +36,10 @@
  *    and fails a read of older stored NUL text instead of truncating it. Regression 2 asserts that
  *    through the real `StorageLive`. The generated documents still exclude U+0000: this oracle runs
  *    compiled SQL directly, beneath the Storage boundary where the contract is enforced.
+ *
+ * `node:sqlite` opens only `:memory:` databases here (the property and `runOne`). Regression 2 works
+ * on a file `Storage` holds through the FFI binding, so it touches that file only through the same
+ * binding (`tests/helpers/sqlite_inspect.ts`); see FFI plan §1.2 and `tests/unit/boundaries_test.ts`.
  */
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -67,6 +71,7 @@ import { titled } from "./arbitraries.ts";
 import { makeStorage } from "../../platform/sqlite.ts";
 import { defineFunctions } from "../../sdk/functions.ts";
 import { runTest } from "../helpers/run.ts";
+import { inspect } from "../helpers/sqlite_inspect.ts";
 
 // ---------------------------------------------------------------------------
 // Reference implementation
@@ -339,11 +344,15 @@ for (const layout of ["columns", "json"] as const) {
       assert.deepStrictEqual(yield* storage.mutation(all, {}), [], "the earlier insert rolled back too");
 
       // The old bypass: `_id: "\0"` and `s: "a\0b"` committed beneath Storage, as before item 31.
-      const db = new DatabaseSync(file);
+      // Storage holds this file open through the FFI binding, so the bypass goes through the same
+      // binding (`inspect`), never `node:sqlite`: two SQLite copies on one file in one process drop
+      // each other's POSIX locks (FFI plan §1.2). The binding reads TEXT by its byte length, so the
+      // raw row comes back whole; only Storage's read contract rejects it.
+      const db = inspect(file, { write: true });
       try {
         const sql = rightOf(compileInsert(schema, "t", { s: "a\u0000b" }, { _id: NUL, _creationTime: 0 }));
-        db.prepare(sql.text).run(...sql.values);
-        assert.equal(db.prepare('SELECT "_id" FROM "t"').get()?._id, "", "the driver truncates");
+        db.run(sql.text, sql.values);
+        assert.equal(db.get('SELECT "_id" FROM "t"')?._id, NUL, "the binding reads the stored text whole");
       } finally {
         db.close();
       }
