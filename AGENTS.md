@@ -33,6 +33,15 @@ carry a previous unit's conversational context into the new agent.
 The coordinator assigns, inspects, and lands work under the existing approval rules; fresh agents do the
 units. Separate knowledge/script preservation commits do not replace the one-item implementation commit.
 
+## Execution modes (hybrid)
+
+Work runs in one of two modes. The mode never changes the fresh-agent lifecycle above: fresh context per unit, commit, knowledge/script preservation, worktree cleanup.
+
+1. **Headless runs (default for item work).** Builds, reviews, fixups, and side quests run as non-interactive agent processes launched by the coordinator: the brief is a file passed to the run (`claude -p`, `codex exec`, or `muse exec --prompt-file`), the run gets its own branch/worktree, the brief names its permission profile and acceptance checks up front, and the coordinator records the run's exit status and saves its machine-readable output (JSON event stream or transcript) with the item checkpoint. No interactive session is created or kept for item work, and no work waits on anyone watching a terminal.
+2. **Long-lived interactive sessions (coordinators and planners only).** A small number of persistent sessions (e.g. in tmux) are reserved for roles whose value is accumulated context across items: plan authoring, research synthesis, cross-item coordination. They dispatch headless runs and judge results; they do not do item work themselves.
+3. **Coordination is files, in both modes.** Briefs/claims, `agent-work/COORDINATION.md`, `STATE.md`, and the shared event log are the coordination channel. Messages between agents travel as committed files or new headless runs, never as text typed into another agent's terminal session.
+4. **Exceptions are explicit.** Interactive item work (live debugging, joint exploration with the user) is allowed when the brief names it and says why; it is never the default.
+
 ## Build protocol (plan items)
 
 1. **Brief**: the coordinator takes one item from the plan (its Owns/Reads sets, model assignment, work steps,
