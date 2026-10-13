@@ -29,6 +29,7 @@ import {
   type ObjectStoreConfig,
   type ReaderConfig,
   type ServerConfig,
+  type SqliteConfig,
   type TenancyConfig,
 } from "./services.ts";
 
@@ -305,6 +306,35 @@ export const OPTIONS = [
       "Per-call deadline in milliseconds for a request to the reader process; a call with no reply by then fails with HTTP 502. Must be finite and > 0.",
   },
 
+  // --- sqlite ---
+  {
+    name: "sqliteLibrary",
+    envVar: "SQLITE_LIBRARY",
+    type: "optional-string",
+    default: undefined,
+    defaultLabel: "(unset)",
+    description:
+      "Path or soname of the system libsqlite3 loaded by the FFI binding; must be libsqlite3 >= 3.37.0. vm-1 has two copies: 3.45.1 under /usr/lib/x86_64-linux-gnu/libsqlite3.so.0 and 3.53.4 under /usr/local/lib. Unset, the binding's default list applies, which tries the distro path first.",
+  },
+  {
+    name: "statementDeadlineMs",
+    envVar: "STATEMENT_DEADLINE_MS",
+    type: "number",
+    default: 5000,
+    defaultLabel: "5000",
+    description:
+      "Deadline in milliseconds after which an unbounded statement (list, aggregate or user-predicate query) is interrupted via sqlite3_interrupt and fails with a typed deadline error (HTTP 504 once FFI-05 lands). Must be finite, > 0 and < READER_CALL_TIMEOUT_MS.",
+  },
+  {
+    name: "statementInterruptGraceMs",
+    envVar: "STATEMENT_INTERRUPT_GRACE_MS",
+    type: "number",
+    default: 1000,
+    defaultLabel: "1000",
+    description:
+      "Milliseconds to wait after the interrupt for the statement to return; if it has not, an error-level lifecycle event is emitted and the connection is poisoned. Must be finite and > 0.",
+  },
+
   // --- tenancy ---
   {
     name: "tenancyMode",
@@ -494,6 +524,37 @@ function assemble(values: Decoded): Effect.Effect<ConfigService, ConfigError> {
     );
   }
 
+  const statementDeadlineMs = num(values, "statementDeadlineMs");
+  if (!Number.isFinite(statementDeadlineMs) || statementDeadlineMs <= 0) {
+    return Effect.fail(
+      configError(
+        "STATEMENT_DEADLINE_MS",
+        "out-of-range",
+        `STATEMENT_DEADLINE_MS must be finite and > 0, got ${statementDeadlineMs}`,
+      ),
+    );
+  }
+  if (statementDeadlineMs >= readerCallTimeoutMs) {
+    return Effect.fail(
+      configError(
+        "STATEMENT_DEADLINE_MS",
+        "inconsistent",
+        `STATEMENT_DEADLINE_MS (${statementDeadlineMs}) must be < READER_CALL_TIMEOUT_MS (${readerCallTimeoutMs}) so the in-statement interrupt fires first`,
+      ),
+    );
+  }
+
+  const statementInterruptGraceMs = num(values, "statementInterruptGraceMs");
+  if (!Number.isFinite(statementInterruptGraceMs) || statementInterruptGraceMs <= 0) {
+    return Effect.fail(
+      configError(
+        "STATEMENT_INTERRUPT_GRACE_MS",
+        "out-of-range",
+        `STATEMENT_INTERRUPT_GRACE_MS must be finite and > 0, got ${statementInterruptGraceMs}`,
+      ),
+    );
+  }
+
   const tenancyMode = str(values, "tenancyMode") as TenancyConfig["mode"];
   const betterAuthSecret = optStr(values, "betterAuthSecret");
   if (tenancyMode === "better-auth" && betterAuthSecret === undefined) {
@@ -552,6 +613,11 @@ function assemble(values: Decoded): Effect.Effect<ConfigService, ConfigError> {
   };
   const eventLog: EventLogConfig = { duckdbPath: eventlogDuckdbPath };
   const reader: ReaderConfig = { callTimeoutMs: readerCallTimeoutMs };
+  const sqlite: SqliteConfig = {
+    library: optStr(values, "sqliteLibrary"),
+    statementDeadlineMs,
+    statementInterruptGraceMs,
+  };
 
   const tenancy: TenancyConfig = {
     mode: tenancyMode,
@@ -562,7 +628,7 @@ function assemble(values: Decoded): Effect.Effect<ConfigService, ConfigError> {
     betterAuthUrl: str(values, "betterAuthUrl"),
   };
 
-  return Effect.succeed({ server, apps, backup, logging, objectStore, eventLog, reader, tenancy });
+  return Effect.succeed({ server, apps, backup, logging, objectStore, eventLog, reader, sqlite, tenancy });
 }
 
 function buildConfig(env: EnvRecord): Effect.Effect<ConfigService, ConfigError> {
@@ -589,6 +655,7 @@ export interface ConfigOverrides {
   readonly objectStore?: Partial<ObjectStoreConfig>;
   readonly eventLog?: Partial<EventLogConfig>;
   readonly reader?: Partial<ReaderConfig>;
+  readonly sqlite?: Partial<SqliteConfig>;
   readonly tenancy?: Partial<TenancyConfig>;
 }
 
@@ -602,6 +669,7 @@ export function ConfigTest(overrides: ConfigOverrides = {}): Layer.Layer<Config>
     objectStore: { ...DEFAULT_CONFIG.objectStore, ...overrides.objectStore },
     eventLog: { ...DEFAULT_CONFIG.eventLog, ...overrides.eventLog },
     reader: { ...DEFAULT_CONFIG.reader, ...overrides.reader },
+    sqlite: { ...DEFAULT_CONFIG.sqlite, ...overrides.sqlite },
     tenancy: { ...DEFAULT_CONFIG.tenancy, ...overrides.tenancy },
   };
   return Layer.succeed(Config, value);
