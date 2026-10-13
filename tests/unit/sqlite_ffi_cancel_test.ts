@@ -15,7 +15,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Database, SqliteCancelled, SqliteError, SqliteUsageError } from "../../platform/sqlite_ffi/mod.ts";
+import {
+  Database,
+  SqliteCancelled,
+  SqliteError,
+  SqliteUsageError,
+  SqliteValueError,
+} from "../../platform/sqlite_ffi/mod.ts";
 
 /** Never terminates: an unbounded recursive CTE. */
 const FOREVER = "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c) SELECT count(*) AS n FROM c";
@@ -387,6 +393,14 @@ async function rejection(p: Promise<unknown>): Promise<unknown> {
 
 const causeMessage = (e: unknown) => ((e as { cause?: unknown }).cause as Error | undefined)?.message;
 
+/** `e` is the binding's own error, carrying the cleanup exception as a non-enumerable `cause`. */
+function assertCleanupCause(e: unknown): void {
+  const d = Object.getOwnPropertyDescriptor(e, "cause");
+  assert.ok(d !== undefined, `no own cause on ${String(e)}`);
+  assert.equal(d.enumerable, false);
+  assert.equal((d.value as Error).message, "cleanup threw");
+}
+
 for (const [how, install] of Object.entries(throwingCleanup)) {
   Deno.test(`cleanup: a throwing signal detachment (${how}) never replaces the execution's outcome`, async () => {
     // The re-review's defect 2. Each execution below runs with a signal whose `removeEventListener`
@@ -414,7 +428,7 @@ for (const [how, install] of Object.entries(throwingCleanup)) {
       assert.ok(e instanceof SqliteCancelled, String(e));
       assert.equal(e.reason, "deadline");
       assert.equal(e.timeoutMs, 5);
-      assert.equal(causeMessage(e), "cleanup threw");
+      assertCleanupCause(e);
       await reusable();
       const ac = signal();
       const aborted = rejection(forever.allAsync(undefined, { signal: ac.signal }));
@@ -423,7 +437,7 @@ for (const [how, install] of Object.entries(throwingCleanup)) {
       e = await aborted;
       assert.ok(e instanceof SqliteCancelled, String(e));
       assert.equal(e.reason, "aborted");
-      assert.equal(causeMessage(e), "cleanup threw");
+      assertCleanupCause(e);
       await reusable();
 
       // (b) A reset error: INSERT ... RETURNING under a reader's lock fails its commit at reset.
@@ -437,7 +451,7 @@ for (const [how, install] of Object.entries(throwingCleanup)) {
         assert.equal(e.code, 5);
         assert.equal(e.extendedCode, 5);
         assert.equal(e.sqliteMessage, "database is locked");
-        assert.equal(causeMessage(e), "cleanup threw");
+        assertCleanupCause(e);
         reader.exec("ROLLBACK");
       }
       await reusable();
@@ -454,7 +468,7 @@ for (const [how, install] of Object.entries(throwingCleanup)) {
       assert.equal(e.extendedCode, 2067);
       assert.equal(e.codeName, "SQLITE_CONSTRAINT_UNIQUE");
       assert.equal(e.sqliteMessage, "UNIQUE constraint failed: t.x");
-      assert.equal(causeMessage(e), "cleanup threw");
+      assertCleanupCause(e);
       await reusable();
 
       // A caller's own exception (a parameter getter) is the outcome too, and is left untouched.
@@ -493,10 +507,136 @@ for (const [how, install] of Object.entries(throwingCleanup)) {
       e = await pending;
       assert.ok(e instanceof SqliteCancelled, String(e));
       assert.equal(e.reason, "aborted");
-      assert.equal(causeMessage(e), "cleanup threw");
+      assertCleanupCause(e);
     } finally {
       await db.closeAsync();
       cleanup();
+    }
+  });
+}
+
+for (const [how, install] of Object.entries(throwingCleanup)) {
+  Deno.test(`cleanup: a throwing signal detachment (${how}) never touches an exception the caller threw`, async () => {
+    // The second re-review's defect 1. Ownership of the pending error is by identity, not class:
+    // an exception that came out of caller code (here a parameter getter) is rethrown as the same
+    // object with unchanged own properties, even when it is a binding error class, frozen, or a
+    // proxy whose every trap throws, while the binding's own errors still get the cleanup
+    // exception as `cause`. Every case runs with a 10 s deadline (the test's timer sanitizer fails
+    // on a leaked timer) and twice: once checking reuse, once with `closeAsync` requested from
+    // inside the getter, whose waiter must settle and close the connection.
+    const signal = () => {
+      const ac = new AbortController();
+      install(ac.signal);
+      return ac.signal;
+    };
+    /** Run `SELECT :x` with a getter that throws `thrown()`; return the rejection, boxed. */
+    const run = async (db: Database, thrown: () => unknown, close: boolean) => {
+      let waiter: Promise<void> | undefined;
+      const params = {
+        get x(): number {
+          if (close) waiter = db.closeAsync();
+          throw thrown();
+        },
+      };
+      try {
+        await db.prepare("SELECT :x AS x").getAsync(params, { signal: signal(), timeoutMs: 10_000 });
+      } catch (e) {
+        // Boxed: returning a proxy from an async function would read its `then`.
+        return { e, waiter };
+      }
+      return assert.fail("the execution resolved; it should have rejected");
+    };
+    const settle = async (db: Database, waiter: Promise<void> | undefined, close: boolean) => {
+      if (close) {
+        assert.ok(waiter !== undefined);
+        await waiter;
+        assert.equal(db.isOpen, false);
+      } else {
+        assert.equal(db.inFlight, false);
+        assert.equal(db.prepare("SELECT 42 AS x").get()?.x, 42);
+        assert.equal((await db.prepare("SELECT 43 AS x").getAsync())?.x, 43);
+      }
+      await db.closeAsync();
+    };
+
+    for (const close of [false, true]) {
+      // A tagged binding error the caller made, frozen: the report's reproduction.
+      {
+        const db = Database.open(":memory:");
+        const own = Object.freeze(new SqliteUsageError({ reason: "invalid-option", detail: "caller error" }));
+        const before = Object.getOwnPropertyDescriptors(own);
+        const { e, waiter } = await run(db, () => own, close);
+        assert.equal(e, own);
+        assert.equal(own.detail, "caller error");
+        assert.deepEqual(Object.getOwnPropertyDescriptors(own), before);
+        await settle(db, waiter, close);
+      }
+
+      // A binding error the caller caught from an earlier, nested call (extensible): still the
+      // caller's, so no `cause` is added.
+      {
+        const db = Database.open(":memory:");
+        let caught: unknown;
+        let before: PropertyDescriptorMap | undefined;
+        const { e, waiter } = await run(db, () => {
+          try {
+            db.exec("SELECT 1");
+          } catch (nested) {
+            caught = nested;
+          }
+          before = Object.getOwnPropertyDescriptors(caught);
+          return caught;
+        }, close);
+        assert.ok(caught instanceof SqliteUsageError && Object.isExtensible(caught), String(caught));
+        assert.equal(caught.reason, "busy");
+        assert.equal(e, caught);
+        assert.equal(Object.hasOwn(caught, "cause"), false);
+        assert.deepEqual(Object.getOwnPropertyDescriptors(caught), before);
+        await settle(db, waiter, close);
+      }
+
+      // A proxy whose every trap throws (`getPrototypeOf` first among them, which `instanceof`
+      // would run): rethrown as itself, no trap ever invoked.
+      {
+        const db = Database.open(":memory:");
+        const traps: string[] = [];
+        const handler = new Proxy({}, {
+          get(_, trap) {
+            return () => {
+              traps.push(String(trap));
+              throw new Error(`trap ${String(trap)} replaced the caller's exception`);
+            };
+          },
+        });
+        const proxy = new Proxy(new Error("caller proxy"), handler);
+        const { e, waiter } = await run(db, () => proxy, close);
+        assert.ok(e === proxy, "the proxy was not rethrown by identity");
+        assert.deepEqual(traps, []);
+        await settle(db, waiter, close);
+      }
+    }
+
+    // The binding's own errors from binding and option validation still carry the cause.
+    {
+      const db = Database.open(":memory:");
+      const own = async (p: Promise<unknown>) => {
+        const e = await rejection(p);
+        assertCleanupCause(e);
+        return e;
+      };
+      const select = db.prepare("SELECT ? AS x");
+      let e = await own(select.getAsync([2n ** 70n], { signal: signal(), timeoutMs: 10_000 }));
+      assert.ok(e instanceof SqliteValueError && e.reason === "integer-out-of-range", String(e));
+      e = await own(select.getAsync([undefined as unknown as number], { signal: signal() }));
+      assert.ok(e instanceof SqliteValueError && e.reason === "unsupported-bind-type", String(e));
+      e = await own(select.getAsync([], { signal: signal() }));
+      assert.ok(e instanceof SqliteUsageError && e.reason === "bind-count", String(e));
+      e = await own(select.getAsync([1], { signal: signal(), timeoutMs: -1 }));
+      assert.ok(e instanceof SqliteUsageError && e.reason === "invalid-option", String(e));
+      e = await own(db.prepare("SELECT 9007199254740993 AS x").getAsync(undefined, { signal: signal() }));
+      assert.ok(e instanceof SqliteValueError && e.reason === "unsafe-integer", String(e));
+      assert.equal((await select.getAsync([1]))?.x, 1);
+      await db.closeAsync();
     }
   });
 }

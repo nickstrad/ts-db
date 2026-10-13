@@ -221,10 +221,14 @@ export interface ExecOptions {
  * 3. release the connection (`Connection.active = null`) and settle `settled` (`closeAsync`);
  * 4. only then detach from the caller's `AbortSignal`. That is caller code (a getter, an
  *    override), so it may close, execute, or throw; it can no longer touch this execution's native
- *    state, and an exception from it never replaces the pending error. The pending error is thrown
- *    (a typed one with the exception as its `cause`; a caller's own exception untouched); after a
- *    success the exception becomes `SqliteUsageError({ reason: "signal-cleanup" })` (the statement
- *    ran; its changes stand).
+ *    state, and an exception from it never replaces the pending error. The pending error is thrown.
+ *    If it is the error object this execution created (recorded by identity through `Own`: a step,
+ *    bind, value, reset or usage error, or the cancellation), the exception becomes its `cause`.
+ *    Anything else came out of caller code (a getter, a proxy, `toString`) and is opaque: it is
+ *    rethrown by identity, and nothing inspects it (no `instanceof`, property read or
+ *    `defineProperty`), even when it is a binding error class, frozen, or a proxy. After a success
+ *    the exception becomes `SqliteUsageError({ reason: "signal-cleanup" })` (the statement ran; its
+ *    changes stand).
  */
 interface Execution {
   /** True from the submission of a `sqlite3_step_nb` until its promise settles. */
@@ -323,14 +327,27 @@ function usage(reason: UsageFailure, detail: string, sql?: string): SqliteUsageE
 }
 
 /**
- * Record `cleanupError` as the `cause` of the binding's own pending error, without changing the
- * error's fields. A caller's own exception (thrown by a parameter getter, say) is left untouched.
+ * Records an error the binding itself created and is about to throw, and returns it. An async
+ * execution passes one down to the code that creates its errors (see `Execution`, step 4): the
+ * error it records is the only one that execution may later annotate. Class is no proof of
+ * ownership, since a caller can throw a binding error it caught earlier, so ownership is by
+ * identity. The sync path needs no record and passes `unrecorded`.
  */
-function attachCause(error: unknown, cleanupError: unknown): void {
-  const ours = error instanceof SqliteError || error instanceof SqliteCancelled ||
-    error instanceof SqliteUsageError || error instanceof SqliteValueError;
-  if (ours && !Object.hasOwn(error, "cause")) {
-    Object.defineProperty(error, "cause", { value: cleanupError, writable: true, configurable: true });
+type Own = <E extends Error>(error: E) => E;
+const unrecorded: Own = (error) => error;
+
+/**
+ * Record `cleanupError` as the non-enumerable `cause` of `error`, an error this execution created
+ * itself (identity checked by the caller), without changing its fields. Best effort: a failure to
+ * attach is swallowed, so it can never change which error is thrown.
+ */
+function attachCause(error: Error, cleanupError: unknown): void {
+  try {
+    if (!Object.hasOwn(error, "cause")) {
+      Object.defineProperty(error, "cause", { value: cleanupError, writable: true, configurable: true });
+    }
+  } catch {
+    // The pending error is thrown without the diagnostic.
   }
 }
 
@@ -743,24 +760,29 @@ export class Statement {
     // over anything cleanup produces.
     let failed = false;
     let failure: unknown;
+    // The one error object this execution created and threw, compared by identity in step 4.
+    let ownError: Error | undefined;
+    const own: Own = (error) => (ownError = error);
     try {
       timeoutMs = options.timeoutMs;
       signal = options.signal;
       if (timeoutMs !== undefined && !(Number.isFinite(timeoutMs) && timeoutMs >= 0)) {
-        throw usage("invalid-option", `timeoutMs must be a finite number >= 0, got ${timeoutMs}`, this.sql);
+        // The template literal can run caller code (`toString`); only the built error is ours.
+        const detail = `timeoutMs must be a finite number >= 0, got ${timeoutMs}`;
+        throw own(usage("invalid-option", detail, this.sql));
       }
       if (signal?.aborted) {
         exec.cancelled = "aborted";
         exec.cancelledAt = started;
-        throw cancelledError();
+        throw own(cancelledError());
       }
       if (timeoutMs !== undefined) timer = setTimeout(() => exec.cancel("deadline"), timeoutMs);
       signal?.addEventListener("abort", onAbort, { once: true });
-      this.#bind(params);
+      this.#bind(params, own);
       const rows: Row[] = [];
       let names: string[] | null = null;
       for (;;) {
-        if (exec.cancelled !== null) throw cancelledError();
+        if (exec.cancelled !== null) throw own(cancelledError());
         exec.inStep = true;
         let rc: number;
         try {
@@ -776,13 +798,13 @@ export class Statement {
         if (rc === SQLITE_ROW) {
           if (mode === "run") continue;
           names ??= this.#columnNames();
-          rows.push(this.#readRow(names));
+          rows.push(this.#readRow(names, own));
           if (mode === "get") break;
           continue;
         }
         if (rc === SQLITE_DONE) break;
-        if (exec.cancelled !== null && (rc & 0xff) === SQLITE_INTERRUPT) throw cancelledError();
-        throw sqliteError(c, "step", rc, this.sql);
+        if (exec.cancelled !== null && (rc & 0xff) === SQLITE_INTERRUPT) throw own(cancelledError());
+        throw own(sqliteError(c, "step", rc, this.sql));
       }
       result = this.#result(mode, rows);
     } catch (e) {
@@ -798,9 +820,11 @@ export class Statement {
         // A cancel that landed after the last step returned can surface only at reset. Otherwise
         // the reset's error state is read now, before caller code can close or reuse `db`.
         failed = true;
-        failure = exec.cancelled !== null && (rc & 0xff) === SQLITE_INTERRUPT
-          ? cancelledError()
-          : sqliteError(c, "reset", rc, this.sql);
+        failure = own(
+          exec.cancelled !== null && (rc & 0xff) === SQLITE_INTERRUPT
+            ? cancelledError()
+            : sqliteError(c, "reset", rc, this.sql),
+        );
       }
     } finally {
       if (timer !== undefined) clearTimeout(timer);
@@ -813,7 +837,8 @@ export class Statement {
         signal.removeEventListener("abort", onAbort);
       } catch (cleanupError) {
         if (failed) {
-          attachCause(failure, cleanupError);
+          // `===` runs no proxy trap or getter; a caller's exception is never touched.
+          if (ownError !== undefined && failure === ownError) attachCause(ownError, cleanupError);
         } else {
           failed = true;
           failure = new SqliteUsageError({
@@ -861,29 +886,32 @@ export class Statement {
     };
   }
 
-  #bind(params: BindParams | undefined): void {
+  /** `own` records each error this creates (see `Own`); caller exceptions pass through unrecorded. */
+  #bind(params: BindParams | undefined, own: Own = unrecorded): void {
     const n = this.#paramCount;
     if (params === undefined) {
-      if (n !== 0) throw usage("bind-count", `expected ${n} parameter(s), got none`, this.sql);
+      if (n !== 0) throw own(usage("bind-count", `expected ${n} parameter(s), got none`, this.sql));
       return;
     }
     if (Array.isArray(params)) {
       if (params.length !== n) {
-        throw usage("bind-count", `expected ${n} parameter(s), got ${params.length}`, this.sql);
+        throw own(usage("bind-count", `expected ${n} parameter(s), got ${params.length}`, this.sql));
       }
-      for (let i = 0; i < n; i++) this.#bindValue(i + 1, params[i], i + 1);
+      for (let i = 0; i < n; i++) this.#bindValue(i + 1, params[i], i + 1, own);
       return;
     }
     const named = params as Readonly<Record<string, BindValue>>;
     const seen = new Set<number>();
     for (const key of Object.keys(named)) {
       const index = this.#parameterIndex(key);
-      if (index === 0) throw usage("bind-name", `no parameter named ${key}`, this.sql);
+      if (index === 0) throw own(usage("bind-name", `no parameter named ${key}`, this.sql));
       seen.add(index);
-      this.#bindValue(index, named[key], key);
+      this.#bindValue(index, named[key], key, own);
     }
     if (seen.size !== n) {
-      throw usage("bind-count", `expected ${n} parameter(s), got ${seen.size} distinct name(s)`, this.sql);
+      throw own(
+        usage("bind-count", `expected ${n} parameter(s), got ${seen.size} distinct name(s)`, this.sql),
+      );
     }
   }
 
@@ -905,7 +933,7 @@ export class Statement {
     return index;
   }
 
-  #bindValue(i: number, v: BindValue | undefined, at: string | number): void {
+  #bindValue(i: number, v: BindValue | undefined, at: string | number, own: Own): void {
     const s = this.#c.s;
     const stmt = this.#stmt;
     let rc: number;
@@ -928,12 +956,14 @@ export class Statement {
       }
     } else if (typeof v === "bigint") {
       if (v < INT64_MIN || v > INT64_MAX) {
-        throw new SqliteValueError({
-          reason: "integer-out-of-range",
-          at,
-          detail: `${v} is outside the signed 64-bit range`,
-          sql: this.sql,
-        });
+        throw own(
+          new SqliteValueError({
+            reason: "integer-out-of-range",
+            at,
+            detail: `${v} is outside the signed 64-bit range`,
+            sql: this.sql,
+          }),
+        );
       }
       rc = s.sqlite3_bind_int64(stmt, i, v);
     } else if (typeof v === "boolean") {
@@ -947,14 +977,16 @@ export class Statement {
         this.#holdsCopies = true;
       }
     } else {
-      throw new SqliteValueError({
-        reason: "unsupported-bind-type",
-        at,
-        detail: `cannot bind a value of type ${v === undefined ? "undefined" : typeof v}`,
-        sql: this.sql,
-      });
+      throw own(
+        new SqliteValueError({
+          reason: "unsupported-bind-type",
+          at,
+          detail: `cannot bind a value of type ${v === undefined ? "undefined" : typeof v}`,
+          sql: this.sql,
+        }),
+      );
     }
-    if (rc !== SQLITE_OK) throw sqliteError(this.#c, "bind", rc, this.sql);
+    if (rc !== SQLITE_OK) throw own(sqliteError(this.#c, "bind", rc, this.sql));
   }
 
   #columnNames(): string[] {
@@ -971,7 +1003,7 @@ export class Statement {
     return names;
   }
 
-  #readRow(names: string[]): Row {
+  #readRow(names: string[], own: Own = unrecorded): Row {
     const s = this.#c.s;
     const stmt = this.#stmt;
     const row: Row = Object.create(null);
@@ -988,12 +1020,14 @@ export class Statement {
           value = asDouble;
         } else {
           const raw = s.sqlite3_column_int64(stmt, i);
-          throw new SqliteValueError({
-            reason: "unsafe-integer",
-            at: names[i],
-            detail: `${raw} exceeds Number.MAX_SAFE_INTEGER; open with readBigInts`,
-            sql: this.sql,
-          });
+          throw own(
+            new SqliteValueError({
+              reason: "unsafe-integer",
+              at: names[i],
+              detail: `${raw} exceeds Number.MAX_SAFE_INTEGER; open with readBigInts`,
+              sql: this.sql,
+            }),
+          );
         }
       } else if (type === SQLITE_FLOAT) {
         value = s.sqlite3_column_double(stmt, i);

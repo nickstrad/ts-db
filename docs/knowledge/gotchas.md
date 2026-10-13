@@ -176,3 +176,11 @@ Found by the FFI-01 review (`agent-work/items/ffi-binding/review-astra.md` on `r
   first, then reset and clear bindings, clear the timer, release the connection and settle waiters. Run caller
   hooks only after that, inside a `try`/`catch` that cannot replace the pending result. Pinned by the
   `cleanup:` tests in both FFI unit test files.
+- **Error class is not ownership (added 2026-10-13, third repair).** To decide "this pending error is mine, so
+  I may attach a `cause`", cleanup checked `instanceof` the binding's error classes. A parameter getter can
+  throw a binding error the caller caught earlier: an extensible one was changed, a frozen one made
+  `defineProperty` throw a `TypeError` that replaced it, and `instanceof` on a thrown `Proxy` ran its
+  `getPrototypeOf` trap, which could also replace it. Rule: record the error object your own code creates and
+  compare by identity (`===` runs no trap). Treat any other thrown value as opaque, and wrap the annotation in
+  a `try`/`catch` so that it cannot change what is thrown. Pinned by the "never touches an exception the
+  caller threw" `cleanup:` tests in `tests/unit/sqlite_ffi_cancel_test.ts`.
