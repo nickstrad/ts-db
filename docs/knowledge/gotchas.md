@@ -52,6 +52,25 @@ as a pre-existing DuckDB/Deno teardown flake. Policy: **chase, don't quarantine*
 `tokio-runtime-w` segfaults in dmesg share one stack page offset (one bug site). Reusable stress loop:
 `work-scripts/bash/segfault-stress.sh` (adopted from sq-07; until it lands, on `origin/haiku/sq-07`).
 
+## Two SQLite copies in one process must not share a file
+
+Added 2026-10-13 (FFI binding, `item/ffi-binding`). `platform/sqlite_ffi/` loads the system `libsqlite3`
+(3.45.1 on vm-1) next to the SQLite bundled inside `node:sqlite`. POSIX advisory locks belong to the process,
+not the descriptor, so when one copy closes any descriptor on a database file the kernel drops the locks the
+other copy holds on it, and the two copies then corrupt each other silently. While both libraries are loaded
+in one process, each database file is opened by exactly one of them. The perf parity test
+(`tests/unit/sqlite_ffi_perf_test.ts`) uses two identical files for that reason. The same rule is why the
+DuckDB reader is a separate process (plan §0).
+
+## `Deno.dlopen` and FFI `i64`: bigint in, bigint out
+
+Added 2026-10-13. On Deno 2.9.5 an `i64` FFI parameter's type is `bigint` only (a `number` fails `deno check`)
+and `i64` results are `number | bigint`. `platform/sqlite_ffi/` binds int32 values through `sqlite3_bind_int`
+and reads INTEGER columns through `sqlite3_column_double` (exact for every safe integer), falling back to
+`sqlite3_column_int64` only for `readBigInts` or the unsafe-integer error, which keeps bigint allocation off
+the point-read path. A dlopen'd library is not a resource for Deno's test sanitizer, so loading it lazily
+inside a test is fine.
+
 ## The VM is shared and loaded
 
 Sibling agents run concurrently; load averages of 12+ on 4 vCPUs are normal. Perf numbers (k6 p95/p99)
@@ -124,3 +143,44 @@ analysis use separate connections from the same `DuckDBInstanceCache` in `platfo
 matching open options. Independent native instances can give analysis stale state after a later ingest;
 `tests/unit/reader_ingest_test.ts` covers ingest → analysis → another ingest → analysis. The standalone logs
 CLI still opens read-only. The writer process must not import the catalog or DuckDB.
+
+## 2026-10-13 — FFI-01 repair: three native-binding traps
+
+Found by the FFI-01 review (`agent-work/items/ffi-binding/review-astra.md` on `review/ffi-01-astra`), fixed in
+`platform/sqlite_ffi/database.ts`:
+
+- **A pending `nonblocking` promise does not mean the native call is running.** `sqlite3_step_nb` returns its
+  promise on _submission_ to Deno's blocking pool. A `sqlite3_interrupt` that lands before a pool thread
+  enters `sqlite3_step` finds no running statement, and SQLite discards it
+  ([docs](https://www.sqlite.org/c3ref/interrupt.html)). One interrupt can therefore be lost and an unbounded
+  query never returns (100 immediate aborts hung). The fix repeats the interrupt every 1 ms until the step
+  promise settles, then clears the timer synchronously in the continuation so nothing leaks into the next
+  statement. Pinned by `race:` in `tests/unit/sqlite_ffi_cancel_test.ts`.
+- **Every caller getter is reentrancy.** Named-parameter getters, array index accessors, proxies and option
+  getters run JavaScript between the lifetime check and the native calls. A getter that called `finalize()` or
+  `close()` made bind/step/reset use a freed pointer (SIGSEGV, exit 139). An execution now reserves its
+  connection before it evaluates any caller code, so nested calls fail `SqliteUsageError("busy")`. Crash
+  probes run in a subprocess under `timeout` with `ulimit -c 0`, so a regression fails the test and the runner
+  keeps going. Pinned by `reentrancy:` in `tests/unit/sqlite_ffi_crud_test.ts`.
+- **`sqlite3_reset` can be where a write fails.** `get` stops at the first row, so for `INSERT ... RETURNING`
+  in autocommit mode the commit happens inside the reset that follows. If that commit fails (`SQLITE_BUSY`
+  against a reader's lock), the insert is rolled back ([docs](https://www.sqlite.org/c3ref/reset.html)).
+  Ignoring reset's result code returned a row that does not exist. The binding now checks it and fails
+  `SqliteError({ op: "reset" })`, but keeps an earlier step or cancellation error when one exists. Pinned by
+  `reset errors:` in the CRUD test.
+- **Cleanup has caller code in it too (added 2026-10-13, second repair).** `signal.removeEventListener` is
+  caller code: an override or getter on a real `AbortSignal` can close the connection, run another statement,
+  or throw. Reading the reset's error (`sqlite3_errmsg`) after it hit a closed handle and reported "bad
+  parameter or other API misuse" instead of "database is locked"; a throwing hook replaced the original
+  `SqliteError` or `SqliteCancelled`. Rule for async cleanup: do the native work and build the pending error
+  first, then reset and clear bindings, clear the timer, release the connection and settle waiters. Run caller
+  hooks only after that, inside a `try`/`catch` that cannot replace the pending result. Pinned by the
+  `cleanup:` tests in both FFI unit test files.
+- **Error class is not ownership (added 2026-10-13, third repair).** To decide "this pending error is mine, so
+  I may attach a `cause`", cleanup checked `instanceof` the binding's error classes. A parameter getter can
+  throw a binding error the caller caught earlier: an extensible one was changed, a frozen one made
+  `defineProperty` throw a `TypeError` that replaced it, and `instanceof` on a thrown `Proxy` ran its
+  `getPrototypeOf` trap, which could also replace it. Rule: record the error object your own code creates and
+  compare by identity (`===` runs no trap). Treat any other thrown value as opaque, and wrap the annotation in
+  a `try`/`catch` so that it cannot change what is thrown. Pinned by the "never touches an exception the
+  caller threw" `cleanup:` tests in `tests/unit/sqlite_ffi_cancel_test.ts`.
