@@ -21,27 +21,29 @@ and Markdown in values are literal. Readers parse only lines 5–9; detail may c
 Required fields:
 
 - `timestamp`: UTC RFC 3339, seconds, emitted by the helper.
-- `actor`: stable agent/tmux/session identity; 1–80 ASCII letters, digits, `.`, `_`, `-`, starting with a
-  letter or digit. Prefer `--actor` or exported `AGENT_ACTOR`; fallback `session-<pid>` identifies only this
-  invocation.
+- `actor`: identity unique to a fresh agent/unit, stable only within that unit; 1–80 ASCII letters, digits,
+  `.`, `_`, `-`, starting with a letter or digit. Prefer `--actor` or exported `AGENT_ACTOR`; fallback
+  `session-<pid>` identifies only this invocation.
 - `branch`: nonempty branch label with no control characters. Explicit so reviewers can name the branch under
   review; detached work can use `detached-<sha>`.
 - `type`: exactly one of the six values below.
 - `summary`: one nonblank line, no control characters. Include the task/item ID for correlation.
 
-| Type              | Meaning and detail convention                                                                      |
-| ----------------- | -------------------------------------------------------------------------------------------------- |
-| `task_started`    | Actor begins or resumes named work.                                                                |
-| `task_completed`  | Work finished; include result, validation, and commit SHA when applicable. Does not imply landing. |
-| `landed`          | Coordinator verified merge/push; include destination branch and landed SHA.                        |
-| `review_verdict`  | Summary begins with PASS, NITS, or FAIL; detail names reviewed SHA and findings.                   |
-| `blocker`         | Work cannot proceed; name affected task, cause, and needed unblock action.                         |
-| `decision_needed` | Human/coordinator choice needed; name question, options, and decision owner.                       |
+| Type              | Meaning and detail convention                                                                                          |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `task_started`    | Fresh actor begins a unit or resumes that same still-active unit after interruption; never reuses a completed session. |
+| `task_completed`  | Work finished; include result, validation, and commit SHA when applicable. Does not imply landing.                     |
+| `landed`          | Coordinator verified merge/push; include destination branch and landed SHA.                                            |
+| `review_verdict`  | Summary begins with PASS, NITS, or FAIL; detail names reviewed SHA and findings.                                       |
+| `blocker`         | Work cannot proceed; name affected task, cause, and needed unblock action.                                             |
+| `decision_needed` | Human/coordinator choice needed; name question, options, and decision owner.                                           |
 
 This list is closed. Correct mistakes or report resolutions in a new event (for example `task_started` after
-an unblock, or `task_completed` for a decision task); reference the earlier event filename in detail. Never
-edit, delete, or rename a published event. Events are reports, not locks or proof of approval. Never record
-secrets or sensitive payloads.
+an unblock within the same still-active unit, or `task_completed` for a decision task); reference the earlier
+event filename in detail. A completed unit cannot resume: the next unit needs a newly spawned agent, its own
+worktree, and a distinct actor. The six event types and header fields remain unchanged. Never edit, delete, or
+rename a published event. Events are reports, not locks or proof of approval. Never record secrets or
+sensitive payloads.
 
 Filenames: `YYYY-MM-DDTHH-MM-SSZ-<actor>-<random>.md`. Filename is the event ID; random suffix breaks
 collisions, not ties in causal ordering. See [design and operating protocols](../event-log.md) for the shared

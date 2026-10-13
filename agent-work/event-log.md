@@ -33,7 +33,11 @@ automatically deduplicated. Treat files as immutable; corrections reference prio
 
 ## Write protocol (Claude and Codex)
 
-Use a stable actor per agent/tmux session and the task ID in every summary. Log before starting, after
+Use a distinct actor per newly spawned fresh-context unit, stable only for that unit, and the task ID in every
+summary. Do not reuse an actor or completed session for another unit. `task_started` may report a resume after
+an interruption or unblock only for the same still-active unit; after `task_completed`, the next unit requires
+a new agent, worktree, and actor under the
+[fresh-agent lifecycle](../AGENTS.md#fresh-agent-lifecycle-every-unit-of-work). Log before starting, after
 finishing, at review verdicts/verified landings, and immediately when blocked or needing a decision. A
 review's detail names the exact reviewed SHA; a completion names validation and build SHA. Approval and
 landing rules still come from `AGENTS.md`.

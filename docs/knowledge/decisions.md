@@ -2,14 +2,25 @@
 
 Dated decisions with rationale. Plans carry the _what_; this page carries the _why_. Newest first.
 
+## 2026-10-13 — Fresh agent and worktree for every unit
+
+Human decision: each build, review, repair/fixup, documentation follow-up, and side quest uses a newly spawned
+agent with fresh context in its own worktree. Completed sessions are never reused for another unit, with no
+convenience exceptions. Before closure, commit the work, assess and commit useful knowledge/scripts through
+ownership-safe handoffs, and clean the worktree after coordinator inspection. This keeps durable findings in
+Git rather than in a reused conversation. The canonical
+[fresh-agent lifecycle](../../AGENTS.md#fresh-agent-lifecycle-every-unit-of-work) defines the sequence;
+[event reporting](../../agent-work/event-log.md#write-protocol-claude-and-codex) uses a distinct actor per
+unit and permits resume only within the same still-active unit.
+
 ## 2026-10-11 — Narrowed SQLite pivot: in-process document reads
 
 DuckDB stays responsible for the event log and named analysis in the supervised reader child; only document
 reads move to in-process SQLite. The query compiler already emits `dialect="sqlite"`, so SP-02 can execute
 that SQL directly with `node:sqlite` without a full backend migration. The reader child, IPC, supervision and
 teardown discipline remain load-bearing for ingest and analysis. Read-only document connections and SP-05's
-32-permit execution semaphore reduce interference with SQLite writers while bounding concurrent reads. This
-is the narrowed outcome of the sqlite-pivot plan's SP-02/SP-05.
+32-permit execution semaphore reduce interference with SQLite writers while bounding concurrent reads. This is
+the narrowed outcome of the sqlite-pivot plan's SP-02/SP-05.
 
 ## 2026-10-11 — No ORM for Postgres access
 
