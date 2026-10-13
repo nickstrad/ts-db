@@ -5,42 +5,28 @@ This file is the coordination contract for agents working on this repo. It cover
 side-quest track in [`docs/side-quests.md`](docs/side-quests.md). For repo conventions (how to run things,
 style), see `CLAUDE.md`.
 
-## Fresh-agent lifecycle (every unit of work)
+Agent protocol (three-CLI seats, fresh-agent lifecycle, hybrid execution, review/arbitration): see the global
+agent files (~/.claude/CLAUDE.md, ~/.codex/AGENTS.md, Muse Code global rules). This file keeps only
+repo-specific rules.
+
+## Unit-of-work rules (repo additions to the global lifecycle)
 
 Every build, review, repair/fixup, documentation follow-up, side quest, and other bounded task is a separate
-unit of work. The coordinator must dispatch each unit to a **newly spawned subagent with fresh context** in
-its **own git worktree**. A completed subagent session must never receive another unit, even on the same item
-or branch. There are no convenience exceptions. Supply an explicit brief and committed references; do not
-carry a previous unit's conversational context into the new agent.
+unit and follows the global fresh-agent lifecycle. In this repo:
 
-1. **Start**: spawn a new agent, assign its branch/worktree and authorized files, and read the required
-   orientation and shared event log. Give this fresh unit its own stable event actor ID.
-2. **Complete and commit**: perform the assigned work, validate it, and commit every change. A read-only
-   review or investigation records its verdict/findings in an authorized committed report; publishing an event
-   alone does not preserve the work in Git.
-3. **Preserve learning**: assess the completed work for durable `docs/knowledge/` material and reusable
-   scripts or information useful to other agents. Commit useful findings and scripts, following the knowledge
-   and work-script conventions below; report the assessment even when nothing needs preserving. Ownership
-   constraints still apply: hand findings outside the unit's `Owns` set to the coordinator or a newly spawned
-   agent authorized for those files. Ensure that handoff is committed before closing the unit; never expand a
-   builder's or side-quest agent's ownership to satisfy this step.
-4. **Close**: report the commit SHA(s), validation, learning assessment, and any handoff; after coordinator
-   inspection, clean up the unit's own worktree. Preserve commits and required handoffs before removal; never
-   clean another active agent's worktree. The coordinator completes removal if the agent's session has ended.
-5. **Next unit**: spawn another new agent with fresh context and its own worktree. Continuing after an
-   interruption is permitted only within the same still-active unit; completion ends session eligibility.
-
-The coordinator assigns, inspects, and lands work under the existing approval rules; fresh agents do the
-units. Separate knowledge/script preservation commits do not replace the one-item implementation commit.
-
-## Execution modes (hybrid)
-
-Work runs in one of two modes. The mode never changes the fresh-agent lifecycle above: fresh context per unit, commit, knowledge/script preservation, worktree cleanup.
-
-1. **Headless runs (default for item work).** Builds, reviews, fixups, and side quests run as non-interactive agent processes launched by the coordinator: the brief is a file passed to the run (`claude -p`, `codex exec`, or `muse exec --prompt-file`), the run gets its own branch/worktree, the brief names its permission profile and acceptance checks up front, and the coordinator records the run's exit status and saves its machine-readable output (JSON event stream or transcript) with the item checkpoint. No interactive session is created or kept for item work, and no work waits on anyone watching a terminal.
-2. **Long-lived interactive sessions (coordinators and planners only).** A small number of persistent sessions (e.g. in tmux) are reserved for roles whose value is accumulated context across items: plan authoring, research synthesis, cross-item coordination. They dispatch headless runs and judge results; they do not do item work themselves.
-3. **Coordination is files, in both modes.** Briefs/claims, `agent-work/COORDINATION.md`, `STATE.md`, and the shared event log are the coordination channel. Messages between agents travel as committed files or new headless runs, never as text typed into another agent's terminal session.
-4. **Exceptions are explicit.** Interactive item work (live debugging, joint exploration with the user) is allowed when the brief names it and says why; it is never the default.
+- Give each fresh unit its own stable event actor ID, and have it read the required orientation and the shared
+  event log at start.
+- A read-only review or investigation records its verdict/findings in an authorized committed report;
+  publishing an event alone does not preserve the work in Git.
+- Learning preservation respects ownership: hand findings outside the unit's `Owns` set to the coordinator or
+  a newly spawned agent authorized for those files. Ensure that handoff is committed before closing the unit;
+  never expand a builder's or side-quest agent's ownership to satisfy this step.
+- Close by reporting the commit SHA(s), validation, learning assessment, and any handoff. Clean up the unit's
+  own worktree after coordinator inspection; never clean another active agent's worktree. The coordinator
+  completes removal if the agent's session has ended.
+- Continuing after an interruption is permitted only within the same still-active unit.
+- The coordinator assigns, inspects, and lands work under the existing approval rules. Separate
+  knowledge/script preservation commits do not replace the one-item implementation commit.
 
 ## Build protocol (plan items)
 
@@ -55,8 +41,7 @@ Work runs in one of two modes. The mode never changes the fresh-agent lifecycle 
    against `main` against the plan item's acceptance criteria and returns a verdict: **PASS**, **NITS**, or
    **FAIL**. Review is not a separate plan item — every item gets one regardless of which model built it.
 5. **Land**: on PASS, the coordinator merges the branch to `main` and pushes. NITS gets a fixup commit and a
-   re-review of the delta by a new reviewer; FAIL goes to a new repair agent with the defect list. Every
-   repair/fixup and every review follows the fresh-agent lifecycle in its own worktree.
+   re-review of the delta by a new reviewer; FAIL goes to a new repair agent with the defect list.
 
 ## Batch and concurrency rules
 
@@ -84,26 +69,19 @@ Every item, regardless of model, gets the same Opus review pass described above.
 
 ## Model duality
 
-Builders may use `claude --model opus|sonnet|haiku` or `codex exec --model <full-id>`. The short OpenAI names
-below are plan labels; pass the full verified ID to Codex. The top Anthropic tier is **Opus 5.5**.
+The seat mapping (Opus/astra, Sonnet/sol, Haiku/luna) is global. Repo specifics:
 
-| Repo tier                       | Claude CLI alias                   | OpenAI label | Codex model ID |
-| ------------------------------- | ---------------------------------- | ------------ | -------------- |
-| Top: hard correctness, reviews  | `opus` (Opus 5.5)                  | astra        | `gpt-6-astra`  |
-| Middle: bounded mechanical work | `sonnet`                           | sol          | `gpt-6.1-sol`  |
-| Fast/cheap, run on high effort  | `haiku` (= Haiku ≥5.5, never ≤4.5) | luna         | `gpt-6-luna`   |
-
-IDs verified in `/root/.codex/models_cache.json`, fetched 2026-10-11 02:23 UTC (CLI 0.161.0). No OpenAI ID
-deviations were found. This is the repo's standing dispatch correspondence.
-
-Match the task's intelligence tier; either family is acceptable within that tier. This section permits astra
-where the build protocol or a plan calls for Opus 5.5, including an independent top-tier review (a different
-reviewer from the builder), and sol where it calls for Sonnet. Luna is the Haiku-tier OpenAI label and always
-runs on high effort; the `haiku` alias resolves to `claude-haiku-5-5` (verified 2026-10-11 via
-`--output-format json`); if the alias ever drifts to Haiku ≤4.5, pin with a ≥5.5 model ID (e.g.
-`claude --model claude-haiku-5-5`). Haiku ≤4.5 must never be used. The mapping above is the standing one.
-Independent reviews stay top-tier (Opus 5.5 or astra). Model names alone never authorize work outside an
-item's ownership. This orchestration policy lives only here; `CLAUDE.md` needs no change.
+- Builders may use `claude --model opus|sonnet|haiku` or `codex exec --model <full-id>`. The short OpenAI
+  names are plan labels; pass the full verified ID to Codex. IDs were verified in
+  `/root/.codex/models_cache.json`, fetched 2026-10-11 02:23 UTC (CLI 0.161.0).
+- Match the task's intelligence tier; either family is acceptable within that tier. Astra may stand in where
+  the build protocol or a plan calls for Opus 5.5, including an independent top-tier review (a different
+  reviewer from the builder), and sol where it calls for Sonnet.
+- The `haiku` alias resolves to `claude-haiku-5-5` (verified 2026-10-11 via `--output-format json`); if the
+  alias ever drifts to Haiku ≤4.5, pin with a ≥5.5 model ID (e.g. `claude --model claude-haiku-5-5`). Haiku
+  ≤4.5 must never be used. Luna always runs on high effort.
+- Independent reviews stay top-tier (Opus 5.5 or astra). Model names alone never authorize work outside an
+  item's ownership. This orchestration policy lives only here; `CLAUDE.md` needs no change.
 
 ## Side-quest protocol
 
