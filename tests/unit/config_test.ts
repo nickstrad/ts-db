@@ -394,15 +394,20 @@ test("STATEMENT_DEADLINE_MS negative fails with ConfigError(out-of-range)", asyn
   await expectConfigError({ STATEMENT_DEADLINE_MS: "-1" }, "STATEMENT_DEADLINE_MS", "out-of-range");
 });
 
-test("STATEMENT_DEADLINE_MS=NaN fails with ConfigError", async () => {
-  await withEnv({ STATEMENT_DEADLINE_MS: "NaN" }, async () => {
-    const exit = await load();
-    assert.equal(exit._tag, "Failure");
-    if (exit._tag !== "Failure") return;
-    const error = exit.cause._tag === "Fail" ? exit.cause.error : undefined;
-    assert.equal(error?._tag, "ConfigError");
-    assert.equal(error?.key, "STATEMENT_DEADLINE_MS");
-  });
+test("STATEMENT_DEADLINE_MS=NaN fails with ConfigError(out-of-range)", async () => {
+  await expectConfigError({ STATEMENT_DEADLINE_MS: "NaN" }, "STATEMENT_DEADLINE_MS", "out-of-range");
+});
+
+test("STATEMENT_DEADLINE_MS=Infinity fails with ConfigError(out-of-range)", async () => {
+  await expectConfigError({ STATEMENT_DEADLINE_MS: "Infinity" }, "STATEMENT_DEADLINE_MS", "out-of-range");
+});
+
+test("STATEMENT_INTERRUPT_GRACE_MS=Infinity fails with ConfigError(out-of-range)", async () => {
+  await expectConfigError(
+    { STATEMENT_INTERRUPT_GRACE_MS: "Infinity" },
+    "STATEMENT_INTERRUPT_GRACE_MS",
+    "out-of-range",
+  );
 });
 
 test("STATEMENT_DEADLINE_MS non-numeric fails with ConfigError(malformed)", async () => {

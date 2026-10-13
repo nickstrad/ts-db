@@ -323,7 +323,7 @@ export const OPTIONS = [
     default: 5000,
     defaultLabel: "5000",
     description:
-      "Deadline in milliseconds after which an unbounded statement (list, aggregate or user-predicate query) is interrupted via sqlite3_interrupt and fails with a typed deadline error (HTTP 504 once FFI-05 lands). Must be finite, > 0 and < READER_CALL_TIMEOUT_MS.",
+      "Deadline in milliseconds after which an unbounded statement (any select that is not a primary-key lookup, `count`, `countBy`) is interrupted via sqlite3_interrupt and fails with a typed deadline error (HTTP 504 once FFI-05 lands). Must be finite, > 0 and < READER_CALL_TIMEOUT_MS.",
   },
   {
     name: "statementInterruptGraceMs",
