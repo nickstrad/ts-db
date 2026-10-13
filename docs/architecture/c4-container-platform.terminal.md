@@ -1,7 +1,7 @@
 # Container — request path
 
-Audited against landed main `643b706` on 2026-10-11 (item 27); re-checked for FFI-01 and FFI-02 at `398be14`
-on 2026-10-13. Both formats are generated from `diagrams/c4-container-platform.py`; numbered relationships are
+Audited against landed main `643b706` on 2026-10-11 (item 27); re-checked for FFI-01 to FFI-03 at `182e85d` on
+2026-10-13. Both formats are generated from `diagrams/c4-container-platform.py`; numbered relationships are
 identical. All boxes describe landed code.
 
 <!-- c4-render: diagrams/c4-container-platform.py -->

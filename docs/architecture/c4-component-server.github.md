@@ -1,6 +1,6 @@
 # Component — server process
 
-Audited against landed main `643b706` on 2026-10-11 (item 27); updated for FFI-01 and FFI-02 at `398be14` on
+Audited against landed main `643b706` on 2026-10-11 (item 27); updated for FFI-01 to FFI-03 at `182e85d` on
 2026-10-13. Both formats are generated from `diagrams/c4-component-server.py`; numbered relationships are
 identical. All boxes describe landed code.
 
@@ -17,7 +17,7 @@ flowchart TB
         backup["Backups / ObjectStore<br/>[Effect services]<br/>platform/backup.ts; platform/object_store.ts<br/>Snapshot/hash/manifest; local or signed S3"]
         rpc["ReaderClient / ReaderProcess<br/>[Effect services]<br/>platform/ipc.ts; platform/layers.ts<br/>Scoped child for ingest/analysis; capped queue, deadline, trace"]
         docread["DocumentReaderClient<br/>[Effect service]<br/>platform/document_reader.ts<br/>In-process SQLite queries; read-only connection; concurrency cap 32"]
-        ffi["FFI SQLite binding<br/>[Library; landed, unwired]<br/>platform/sqlite_ffi/<br/>System libsqlite3 via Deno.dlopen; sync + interruptible async. No caller yet"]
+        ffi["FFI SQLite binding<br/>[Library; landed, unwired]<br/>platform/sqlite_ffi/<br/>System libsqlite3 via Deno.dlopen; sync + interruptible async; Effect layer (scoped open, 64-statement cache, typed errors). No caller yet; FFI-04 wires it"]
         logging["Logger / EventSink<br/>[Effect logger/service]<br/>platform/logging/<br/>Dropping queue; batched JSONL; final drain"]
         config["Config / IdGen<br/>[Effect services]<br/>platform/config.ts; platform/sqlite.ts<br/>Validated options (incl. sqlite.*, parsed but unread); UUIDs; Clock"]
     end

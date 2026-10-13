@@ -107,7 +107,7 @@ def mermaid():
 
 
 def document(github):
-    text = '# ' + TITLE + '\n\nAudited against landed main `643b706` on 2026-10-11 (item 27); re-checked for FFI-01 and FFI-02 at `398be14`\non 2026-10-13. Both formats are generated from\n'
+    text = '# ' + TITLE + '\n\nAudited against landed main `643b706` on 2026-10-11 (item 27); re-checked for FFI-01 to FFI-03 at `182e85d`\non 2026-10-13. Both formats are generated from\n'
     text += '`diagrams/' + NAME + '.py`; numbered relationships are identical. All boxes describe landed code.\n\n'
     if github:
         text += '```mermaid\n' + mermaid() + '\n```\n'

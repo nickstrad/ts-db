@@ -1,6 +1,6 @@
 # Component — server process
 
-Audited against landed main `643b706` on 2026-10-11 (item 27); updated for FFI-01 and FFI-02 at `398be14` on
+Audited against landed main `643b706` on 2026-10-11 (item 27); updated for FFI-01 to FFI-03 at `182e85d` on
 2026-10-13. Both formats are generated from `diagrams/c4-component-server.py`; numbered relationships are
 identical. All boxes describe landed code.
 
@@ -63,8 +63,11 @@ identical. All boxes describe landed code.
 ╎  │ platform/sqlite_ffi/         │   │ platform/logging/            │ ╎
 ╎  │ System libsqlite3 via        │   │ Dropping queue; batched      │ ╎
 ╎  │ Deno.dlopen; sync +          │   │ JSONL; final drain           │ ╎
-╎  │ interruptible async. No      │   └──────────────────────────────┘ ╎
-╎  │ caller yet                   │                                    ╎
+╎  │ interruptible async; Effect  │   └──────────────────────────────┘ ╎
+╎  │ layer (scoped open,          │                                    ╎
+╎  │ 64-statement cache, typed    │                                    ╎
+╎  │ errors). No caller yet;      │                                    ╎
+╎  │ FFI-04 wires it              │                                    ╎
 ╎  └──────────────────────────────┘                                    ╎
 ╎                                                                      ╎
 ╎  ┌──────────────────────────────┐                                    ╎
