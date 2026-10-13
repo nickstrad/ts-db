@@ -1,0 +1,41 @@
+{
+  "base": "51a5283",
+  "tasks": [
+    {
+      "task": "lint",
+      "exit_code": 0
+    },
+    {
+      "task": "check",
+      "exit_code": 0
+    },
+    {
+      "task": "test",
+      "exit_code": 0
+    },
+    {
+      "task": "test:prop",
+      "exit_code": 0
+    },
+    {
+      "task": "integration",
+      "exit_code": 0
+    }
+  ],
+  "unit": {
+    "passed": 674,
+    "failed": 0,
+    "ignored": 1
+  },
+  "property": {
+    "passed": 79,
+    "failed": 0
+  },
+  "targeted": {
+    "passed": 8,
+    "failed": 0,
+    "new_regressions": 6
+  },
+  "integration": "PASS",
+  "raw_logs": "/tmp/ffi-04b-validation-5h6e6dru"
+}
