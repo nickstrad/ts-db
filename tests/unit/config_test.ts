@@ -361,3 +361,85 @@ test("TENANT_ROUTER=control-plane succeeds", async () => {
     assert.equal(exit.value.tenancy.router, "control-plane");
   });
 });
+
+// --- FFI-02: SQLite FFI options ---
+
+test("sqlite defaults: library unset, statementDeadlineMs 5000, statementInterruptGraceMs 1000", async () => {
+  await withEnv({}, async () => {
+    const exit = await load();
+    assert.equal(exit._tag, "Success");
+    if (exit._tag !== "Success") return;
+    assert.deepEqual(exit.value.sqlite, {
+      library: undefined,
+      statementDeadlineMs: 5000,
+      statementInterruptGraceMs: 1000,
+    });
+  });
+});
+
+test("SQLITE_LIBRARY decodes to the given path", async () => {
+  await withEnv({ SQLITE_LIBRARY: "/x/libsqlite3.so.0" }, async () => {
+    const exit = await load();
+    assert.equal(exit._tag, "Success");
+    if (exit._tag !== "Success") return;
+    assert.equal(exit.value.sqlite.library, "/x/libsqlite3.so.0");
+  });
+});
+
+test("STATEMENT_DEADLINE_MS=0 fails with ConfigError(out-of-range)", async () => {
+  await expectConfigError({ STATEMENT_DEADLINE_MS: "0" }, "STATEMENT_DEADLINE_MS", "out-of-range");
+});
+
+test("STATEMENT_DEADLINE_MS negative fails with ConfigError(out-of-range)", async () => {
+  await expectConfigError({ STATEMENT_DEADLINE_MS: "-1" }, "STATEMENT_DEADLINE_MS", "out-of-range");
+});
+
+test("STATEMENT_DEADLINE_MS=NaN fails with ConfigError(out-of-range)", async () => {
+  await expectConfigError({ STATEMENT_DEADLINE_MS: "NaN" }, "STATEMENT_DEADLINE_MS", "out-of-range");
+});
+
+test("STATEMENT_DEADLINE_MS=Infinity fails with ConfigError(out-of-range)", async () => {
+  await expectConfigError({ STATEMENT_DEADLINE_MS: "Infinity" }, "STATEMENT_DEADLINE_MS", "out-of-range");
+});
+
+test("STATEMENT_INTERRUPT_GRACE_MS=Infinity fails with ConfigError(out-of-range)", async () => {
+  await expectConfigError(
+    { STATEMENT_INTERRUPT_GRACE_MS: "Infinity" },
+    "STATEMENT_INTERRUPT_GRACE_MS",
+    "out-of-range",
+  );
+});
+
+test("STATEMENT_DEADLINE_MS non-numeric fails with ConfigError(malformed)", async () => {
+  await expectConfigError({ STATEMENT_DEADLINE_MS: "soon" }, "STATEMENT_DEADLINE_MS", "malformed");
+});
+
+test("STATEMENT_DEADLINE_MS >= READER_CALL_TIMEOUT_MS fails with ConfigError(inconsistent)", async () => {
+  await expectConfigError(
+    { STATEMENT_DEADLINE_MS: "30000", READER_CALL_TIMEOUT_MS: "30000" },
+    "STATEMENT_DEADLINE_MS",
+    "inconsistent",
+  );
+  await expectConfigError(
+    { STATEMENT_DEADLINE_MS: "40000" },
+    "STATEMENT_DEADLINE_MS",
+    "inconsistent",
+  );
+});
+
+test("STATEMENT_DEADLINE_MS just under READER_CALL_TIMEOUT_MS succeeds", async () => {
+  await withEnv({ STATEMENT_DEADLINE_MS: "29999", READER_CALL_TIMEOUT_MS: "30000" }, async () => {
+    const exit = await load();
+    assert.equal(exit._tag, "Success");
+    if (exit._tag !== "Success") return;
+    assert.equal(exit.value.sqlite.statementDeadlineMs, 29999);
+  });
+});
+
+test("STATEMENT_INTERRUPT_GRACE_MS=0 fails with ConfigError(out-of-range)", async () => {
+  await expectConfigError(
+    { STATEMENT_INTERRUPT_GRACE_MS: "0" },
+    "STATEMENT_INTERRUPT_GRACE_MS",
+    "out-of-range",
+  );
+});

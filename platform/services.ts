@@ -236,6 +236,16 @@ export interface ReaderConfig {
   readonly callTimeoutMs: number;
 }
 
+/** The SQLite FFI execution layer (FFI-02 options; consumed from FFI-03 on). */
+export interface SqliteConfig {
+  /** `SQLITE_LIBRARY`. Explicit path or soname of the system libsqlite3; absent = the binding's default list. */
+  readonly library?: string;
+  /** `STATEMENT_DEADLINE_MS`. Deadline after which an unbounded statement is interrupted. Must be < `reader.callTimeoutMs`. */
+  readonly statementDeadlineMs: number;
+  /** `STATEMENT_INTERRUPT_GRACE_MS`. Wait after the interrupt before the connection is poisoned. */
+  readonly statementInterruptGraceMs: number;
+}
+
 export interface TenancyConfig {
   /** Fixed key-cache TTL. Defaults to 30000 until MT-02's environment decoder supplies it. */
   readonly tenantKeyCacheTtlMs?: number;
@@ -265,6 +275,7 @@ export interface ConfigService {
   readonly objectStore: ObjectStoreConfig;
   readonly eventLog: EventLogConfig;
   readonly reader: ReaderConfig;
+  readonly sqlite: SqliteConfig;
   readonly tenancy: TenancyConfig;
 }
 
