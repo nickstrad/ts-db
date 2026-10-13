@@ -98,3 +98,23 @@ FAIL with three blocking defects. The repair agent was Claude Opus 5.5 (`opus-ff
 
 `Database.interrupt()` remains a single unconditional call. Its doc comment now states SQLite's semantics: the
 call can miss a step that is still being dispatched, and it cannot carry over to the next execution.
+
+### Second repair (2026-10-13)
+
+Astra's re-review of `9eec83b` (`agent-work/items/ffi-binding/rereview-astra.md` on
+`review/ffi-01-astra-rereview`) returned FAIL with two defects in async signal cleanup. The second repair was
+made by Claude Opus 5.5 (`opus-ffi-01-fix2`, worktree `/root/Software/tsdb-work/ffi01-fix2`), commit `e45b2ae`:
+
+1. 2026-10-13: **Native reads after caller cleanup.** Async cleanup now resets the statement and builds the
+   pending reset error (or `SqliteCancelled`) while it still owns the open connection. It then clears the
+   timer and bound copies, releases the connection and settles waiters in a `finally`. Only after that does it
+   call `signal.removeEventListener`. The sync path also reads its reset error before release. Test:
+   `cleanup: signal detachment that closes or reuses the connection ...` in `sqlite_ffi_crud_test.ts`
+   (subprocess under `timeout`, `ulimit -c 0`; the hook is a method or getter that closes, runs `closeAsync`,
+   runs a sync call, runs a failing sync call, or starts an async call).
+2. 2026-10-13: **A throwing cleanup replaced the original error.** Signal detachment runs in its own
+   `try`/`catch`. A pending typed error wins, with the cleanup exception as a non-enumerable `cause`. A
+   caller's own exception is rethrown untouched. After a success, the exception becomes
+   `SqliteUsageError({ reason: "signal-cleanup", cause })`, a new additive `UsageFailure`, and the statement's
+   changes stand. Tests: `cleanup: a throwing signal detachment (method|getter) ...` in
+   `sqlite_ffi_cancel_test.ts`.
