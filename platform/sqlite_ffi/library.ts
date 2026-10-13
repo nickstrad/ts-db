@@ -46,6 +46,7 @@ const SYMBOLS = {
   sqlite3_changes64: { parameters: ["pointer"], result: "i64" },
   sqlite3_last_insert_rowid: { parameters: ["pointer"], result: "i64" },
   sqlite3_interrupt: { parameters: ["pointer"], result: "void" },
+  sqlite3_get_autocommit: { parameters: ["pointer"], result: "i32" },
 
   sqlite3_prepare_v2: { parameters: ["pointer", "buffer", "i32", "buffer", "buffer"], result: "i32" },
   sqlite3_finalize: { parameters: ["pointer"], result: "i32" },

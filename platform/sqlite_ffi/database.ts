@@ -446,6 +446,20 @@ export class Database {
     return this.#c.active !== null;
   }
 
+  /**
+   * True while the connection is inside an explicit transaction (`sqlite3_get_autocommit` is 0):
+   * after `BEGIN`, until `COMMIT` or `ROLLBACK`, or until SQLite rolls the transaction back on its
+   * own (an interrupted or failed write can do that). The replacement for `node:sqlite`'s
+   * `DatabaseSync.isTransaction`. False on a closed connection. Fails `"busy"` while an execution
+   * holds the connection, like every other call: a pool thread may be changing the answer.
+   */
+  get inTransaction(): boolean {
+    const c = this.#c;
+    if (!c.open) return false;
+    assertIdle(c, "inTransaction");
+    return c.s.sqlite3_get_autocommit(c.db) === 0;
+  }
+
   /** Run zero or more `;`-separated statements without parameters or results (`sqlite3_exec`). */
   exec(sql: string): void {
     const c = this.#c;
