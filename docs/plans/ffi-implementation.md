@@ -11,30 +11,45 @@ The design it implements is drawn in [docs/plans/ffi/](ffi/README.md) (C4 set) a
 binding, the connection and statement API over it, the cutover of the statement path away from `node:sqlite`,
 and deadline-bounded execution for statements that can run long. It does not build lanes or placement (§6).
 
-The first item is the FFI binding module itself, because an Opus builder is already building that slice from
-the proof-of-concept code; FFI-01 is written to match that work, and the coordinator reconciles the branch
-name if the builder started on a different one.
+The first item is the FFI binding module itself. It is **built**: Claude Opus 5.5 (`claude-ffi-binding`)
+pushed `item/ffi-binding` at `acdef43` on 2026-10-13 (`agent-work/items/ffi-binding/brief.md`); FFI-01 below
+describes that slice as built so its review can be judged against this plan, and FFI-03 onward build on its
+surface.
+
+**Model pairs.** Every item names its pair under the repo's standing tier mapping (AGENTS.md "Model duality"):
+**Opus 5.5 / Astra** (`opus`, `gpt-6-astra`) for items that decide semantics expensive to get wrong; **Sonnet
+/ Sol** (`sonnet`, `gpt-6.1-sol`) for bounded work whose interfaces an earlier item fixed; **Haiku 5.5 / Luna
+(high)** (`claude-haiku-5-5`, `gpt-6-luna` at high effort) for fast, tightly scoped work with
+command-checkable acceptance. Either family within a tier is acceptable; the independent review is always
+top-tier and by a different reviewer than the builder (Astra reviews an Opus build and vice versa). A
+Haiku/Luna item lands only after an Opus/Astra PASS **and** explicit human approval (AGENTS.md; precedent
+SP-08, Luna build). Every unit of work is a freshly spawned agent in its own worktree with its own event actor
+(AGENTS.md "Fresh-agent lifecycle").
 
 ## 0. Where the code is today
 
 Verified by reading `main` at `dedef4f` on 2026-10-13. Every SQLite call in the platform goes through
 `node:sqlite`'s `DatabaseSync`, synchronously, on the event loop.
 
-| Surface                                                  | Today                                                                                                                                                                                                                                                                                                                              |
-| -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `platform/sqlite.ts` (`Storage`, item 15)                | Opens the writer `DatabaseSync` under `acquireRelease`; `PRAGMA journal_mode=WAL; synchronous=FULL; busy_timeout=5000`; `Semaphore(1)` writer queue capped at `WRITER_QUEUE_CAP = 1000`; `BEGIN IMMEDIATE` … `COMMIT`/`ROLLBACK` as `acquireUseRelease`; `database.prepare(sql.text)` per statement; `VACUUM INTO ?` for snapshots |
-| `platform/document_reader.ts` (SP-02)                    | One read-only `DatabaseSync` per handler call, `BEGIN TRANSACTION` … `COMMIT`; `statement.setReadBigInts(true)`; `DOCUMENT_READ_CONCURRENCY_CAP = 32` permits; the 1000-pending admission cap; `Effect.timeoutFail` at `reader.callTimeoutMs` — the timeout fires but **cannot stop the statement**                                |
-| `platform/tenants/routing.ts` (MT-04)                    | `StorageLocation.open: () => DatabaseSync`, re-checks containment and symlinks in the same synchronous step as the open; `prepare(location)` runs the DDL transaction on a short-lived `DatabaseSync`                                                                                                                              |
-| `platform/backup.ts` (item 19)                           | `verifySnapshot` opens the snapshot copy read-only with `DatabaseSync` and runs `PRAGMA quick_check`                                                                                                                                                                                                                               |
-| `platform/ipc.ts`, `platform/reader.ts`, `reader_layers` | The DuckDB reader child, JSON-lines IPC, supervised restart (fix/reader-supervision). The reader never imports `node:sqlite` (`tests/unit/boundaries_test.ts`)                                                                                                                                                                     |
-| `core/errors.ts`, `platform/http/router.ts`              | Closed error taxonomy (`Data.TaggedError`), `toHttpStatus`, `errors_exhaustiveness.ts`; a reader-call timeout is `IpcError{reason:"timeout"}` → 502                                                                                                                                                                                |
-| `core/events.ts`, `platform/eventlog/tables.ts`          | `SqlPayload{engine, statementKind, durationMs, outcome, …}` in JSONL; the DuckDB `sql_events` projection                                                                                                                                                                                                                           |
-| `tests/` (15 files)                                      | Open files directly with `new DatabaseSync(...)` as an oracle or to inspect state; `tests/layers/storage_test_layer.ts` is the in-memory `Storage` double                                                                                                                                                                          |
-| Deno 2.9.5; `libsqlite3.so.0`                            | `Deno.dlopen` and `nonblocking` symbols run with no unstable flag (PoC). vm-1 has **two** `libsqlite3.so.0`: `/usr/local/lib` (3.53.4, first in the loader path) and `/lib/x86_64-linux-gnu` (3.45.1, the one the PoC loaded)                                                                                                      |
-| `work-scripts/deno/ffi-sqlite-*.ts`, `lane-kill-latency` | The PoC harnesses, on `research/fable-lang-switch` (items reuse them: §4)                                                                                                                                                                                                                                                          |
+| Surface                                                                          | Today                                                                                                                                                                                                                                                                                                                                          |
+| -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `platform/sqlite.ts` (`Storage`, item 15)                                        | Opens the writer `DatabaseSync` under `acquireRelease`; `PRAGMA journal_mode=WAL; synchronous=FULL; busy_timeout=5000`; `Semaphore(1)` writer queue capped at `WRITER_QUEUE_CAP = 1000`; `BEGIN IMMEDIATE` … `COMMIT`/`ROLLBACK` as `acquireUseRelease`; `database.prepare(sql.text)` per statement; `VACUUM INTO ?` for snapshots             |
+| `platform/document_reader.ts` (SP-02)                                            | One read-only `DatabaseSync` per handler call, `BEGIN TRANSACTION` … `COMMIT`; `statement.setReadBigInts(true)`; `DOCUMENT_READ_CONCURRENCY_CAP = 32` permits; the 1000-pending admission cap; `Effect.timeoutFail` at `reader.callTimeoutMs` — the timeout fires but **cannot stop the statement**                                            |
+| `platform/tenants/routing.ts` (MT-04)                                            | `StorageLocation.open: () => DatabaseSync`, re-checks containment and symlinks in the same synchronous step as the open; `prepare(location)` runs the DDL transaction on a short-lived `DatabaseSync`                                                                                                                                          |
+| `platform/backup.ts` (item 19)                                                   | `verifySnapshot` opens the snapshot copy read-only with `DatabaseSync` and runs `PRAGMA quick_check`                                                                                                                                                                                                                                           |
+| `platform/ipc.ts`, `platform/reader.ts`, `reader_layers`                         | The DuckDB reader child, JSON-lines IPC, supervised restart (fix/reader-supervision). The reader never imports `node:sqlite` (`tests/unit/boundaries_test.ts`)                                                                                                                                                                                 |
+| `core/errors.ts`, `platform/http/router.ts`                                      | Closed error taxonomy (`Data.TaggedError`), `toHttpStatus`, `errors_exhaustiveness.ts`; a reader-call timeout is `IpcError{reason:"timeout"}` → 502                                                                                                                                                                                            |
+| `core/events.ts`, `platform/eventlog/tables.ts`                                  | `SqlPayload{engine, statementKind, durationMs, outcome, …}` in JSONL; the DuckDB `sql_events` projection                                                                                                                                                                                                                                       |
+| `tests/` (15 files)                                                              | Open files directly with `new DatabaseSync(...)` as an oracle or to inspect state; `tests/layers/storage_test_layer.ts` is the in-memory `Storage` double                                                                                                                                                                                      |
+| Deno 2.9.5; `libsqlite3.so.0`                                                    | `Deno.dlopen` and `nonblocking` symbols run with no unstable flag (PoC). vm-1 has **two** `libsqlite3.so.0`: `/usr/local/lib` (3.53.4, first in the loader path) and `/lib/x86_64-linux-gnu` (3.45.1, the one the PoC loaded)                                                                                                                  |
+| `platform/sqlite_ffi/` (FFI-01, `item/ffi-binding` @ `acdef43`, unlanded)        | `Database`/`Statement` over `Deno.dlopen(libsqlite3)`: sync `run/get/all`, async `runAsync/getAsync/allAsync` with `timeoutMs`/`AbortSignal` enforced by `sqlite3_interrupt`, `closeAsync`, tagged errors (`SqliteError`, `SqliteCancelled`, `SqliteUsageError`, `SqliteValueError`, `SqliteLibraryError`); ≥ 3.37.0 gate; nothing uses it yet |
+| `work-scripts/deno/ffi-sqlite-*.ts`, `lane-kill-latency`, `ffi-binding-bench.ts` | The PoC harnesses on `research/fable-lang-switch` and FFI-01's bench (items reuse them: §4)                                                                                                                                                                                                                                                    |
 
 There are no lanes on `main`. The only child process is the DuckDB reader. The process boundary this plan
-works inside is the API process.
+works inside is the API process. `deno task fmt:check` is red on `main` at `dedef4f` from three docs files
+outside this plan (`README.md`, `docs/knowledge/decisions.md`, `docs/architecture/README.md`); until a docs
+fixup lands, "`deno task ci` green" in the gates below means green with those three pre-existing fmt failures
+excepted, and FFI-02, which owns `README.md`, formats it.
 
 ## 1. Target
 
@@ -46,11 +61,11 @@ HTTP → handler → DatabaseSync.prepare().all()   HTTP → handler → classif
                  (sync, event loop,                 ├─ bounded plan ──► blocking sqlite3_step, lane/API main thread (6–7 µs)
                   cannot be interrupted)            └─ unbounded plan ► nonblocking sqlite3_step on a pool thread, deadline,
                                                                         sqlite3_interrupt from the main thread (≈0.4 ms)
-                 node:sqlite (rusqlite 0.40,        platform/ffi/sqlite.ts → Deno.dlopen(libsqlite3.so.0)
+                 node:sqlite (rusqlite 0.40,        platform/sqlite_ffi/ → Deno.dlopen(libsqlite3.so.0)
                  bundled in the Deno binary)
 ```
 
-1. **One binding, two step paths.** `platform/ffi/sqlite.ts` loads the system `libsqlite3` with `Deno.dlopen`
+1. **One binding, two step paths.** `platform/sqlite_ffi/` loads the system `libsqlite3` with `Deno.dlopen`
    and exposes the SQLite C API the platform needs, with `sqlite3_step` declared twice: once blocking, once
    `nonblocking: true` (runs on Deno's blocking thread pool, returns a `Promise`).
 2. **A classifier decides the path once per statement** (FFI-05). Bounded plan = primary-key equality select
@@ -91,17 +106,18 @@ Consequences:
 - Connections open with `SQLITE_OPEN_FULLMUTEX` (serialized mode) so a `sqlite3_interrupt` from the main
   thread while a pool thread is inside `sqlite3_step` is defined behaviour; SQLite documents `interrupt` as
   safe to call from another thread. The binding checks `sqlite3_threadsafe() != 0` at load.
-- **One statement in flight per connection.** The writer already guarantees this (`Semaphore(1)`); the
-  document reader opens one connection per call. The connection object enforces it anyway: a second step on a
-  connection with a nonblocking step pending is a defect, not a wait on SQLite's mutex from the event loop.
+- **One execution in flight per connection.** The writer already guarantees this (`Semaphore(1)`); the
+  document reader opens one connection per call. The binding enforces it anyway: while an async execution is
+  in flight every other call on that connection fails `SqliteUsageError("busy")`, never a wait on SQLite's
+  mutex from the event loop (FFI-01 design decision 1).
 - A nonblocking step holds only SQLite-owned pointers (`sqlite3_stmt*`). Nothing JS-owned is passed to a
   nonblocking call, so there is no buffer for the GC to move or collect under the C call.
 - No `UnsafeCallback` anywhere: busy handling is `sqlite3_busy_timeout`, cancellation is `interrupt`, and
   there is no progress handler or trace callback. Callbacks invoked from foreign threads are the one Deno FFI
   feature with documented footguns, and the design does not need them.
-- `finalize` and `close_v2` wait for a pending nonblocking step to return (after an interrupt if necessary)
-  before they run. The connection's scope finalizer does this; it is the resource rule of item 15 extended by
-  one case.
+- `finalize` and `close` refuse (`"busy"`) while an async execution is in flight; `closeAsync` cancels it,
+  waits for the pool thread to leave `sqlite3_step`, then closes. FFI-03's scope finalizer uses `closeAsync`;
+  it is the resource rule of item 15 extended by one case. The loaded library is never `dlclose`d.
 
 ## 2. Deno-FFI specifics the builders must respect
 
@@ -128,150 +144,159 @@ must verify rather than assume:
 
 ## 3. Batch table and build order
 
-| Batch | Items          | Scope                                                                  | Gate                                                                         |
-| ----- | -------------- | ---------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| FFI-A | FFI-01, FFI-02 | FFI binding module; config options and library resolution              | concurrent (disjoint files). FFI-01 is **in flight** (Opus) as of 2026-10-13 |
-| FFI-B | FFI-03         | Connection and statement API over the binding (scoped, two step paths) | after FFI-01; **SYNC** — its interface is what FFI-04 and FFI-05 consume     |
-| FFI-C | FFI-04         | Cutover: `Storage`, document reader, router, backup, tests             | after FFI-02 and FFI-03; **SYNC**, alone (the §1.2 rule)                     |
-| FFI-D | FFI-05         | Classifier and deadline-bounded execution; `StatementDeadlineError`    | after FFI-04; **SYNC** (changes the error taxonomy)                          |
-| FFI-E | FFI-06, FFI-07 | Perf harnesses and integration evidence; property tests                | concurrent, after FFI-05                                                     |
-| FFI-F | FFI-08         | Docs, C4 diagrams, ADR, knowledge                                      | after FFI-06 and FFI-07; docs-only                                           |
+| Batch | Items          | Scope                                                                  | Gate                                                                     |
+| ----- | -------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| FFI-A | FFI-01, FFI-02 | FFI binding module; config options and library resolution              | concurrent (disjoint files). FFI-01 **built** (`acdef43`), in review     |
+| FFI-B | FFI-03         | Connection and statement API over the binding (scoped, two step paths) | after FFI-01; **SYNC** — its interface is what FFI-04 and FFI-05 consume |
+| FFI-C | FFI-04         | Cutover: `Storage`, document reader, router, backup, tests             | after FFI-02 and FFI-03; **SYNC**, alone (the §1.2 rule)                 |
+| FFI-D | FFI-05         | Classifier and deadline-bounded execution; `StatementDeadlineError`    | after FFI-04; **SYNC** (changes the error taxonomy)                      |
+| FFI-E | FFI-06, FFI-07 | Perf harnesses and integration evidence; property tests                | concurrent, after FFI-05                                                 |
+| FFI-F | FFI-08         | Docs, C4 diagrams, ADR, knowledge                                      | after FFI-06 and FFI-07; docs-only                                       |
 
 Build order: `FFI-01 ∥ FFI-02 → FFI-03 → FFI-04 → FFI-05 → (FFI-06 ∥ FFI-07) → FFI-08`.
 
-**Model policy** (AGENTS.md "Model assignment policy" and "Model duality"): the binding core, the connection
-lifetimes, the cutover and the error-taxonomy change decide semantics that are expensive to get wrong, so they
-are **Opus 5.5 / Astra**. Config rows, harness ports, property suites and docs are bounded with checkable
-acceptance, so they are **Sonnet / Sol**. Every item gets an independent top-tier review by a different
-reviewer than the builder (Astra reviews an Opus build and vice versa). Builders log
-`task_started`/`task_completed` through `work-scripts/bash/log-event.sh` with the item id in the summary.
+**Model policy** (AGENTS.md "Model assignment policy" and "Model duality"), applied per item below:
 
-**Worktrees:** `/root/Software/tsdb-work/ffi01` … `ffi08`, branches `item/ffi-01-binding` …
-`item/ffi-08-docs`. Nobody edits another item's worktree.
+| Tier                | Pair                                                           | Items                          | Why                                                                                                                            |
+| ------------------- | -------------------------------------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| Top                 | **Opus 5.5 / Astra** (`opus`, `gpt-6-astra`)                   | FFI-01, FFI-03, FFI-04, FFI-05 | Resource lifetimes, the two-SQLite-copies cutover, the error taxonomy, which statements may be interrupted                     |
+| Middle              | **Sonnet / Sol** (`sonnet`, `gpt-6.1-sol`)                     | FFI-06, FFI-07                 | Interfaces fixed by earlier items; harness ports, property generators, thresholds checkable by a command                       |
+| Fast, scoped        | **Haiku 5.5 / Luna (high)** (`claude-haiku-5-5`, `gpt-6-luna`) | FFI-02, FFI-08                 | Additive config rows with an exact pattern to copy; docs-only follow-up. Opus/Astra PASS **and** human approval before landing |
+| Review (every item) | **Opus 5.5 / Astra**, a different reviewer than the builder    | all                            | Independent top-tier review is the standing rule; FFI-01 (built by Opus) is reviewed by Astra                                  |
+
+Builders log `task_started`/`task_completed` through `work-scripts/bash/log-event.sh` with the item id in the
+summary and a fresh actor per unit (`<model>-ffi-NN`); reviewers log `review_verdict` naming the reviewed SHA
+and commit their report under `agent-work/items/<item>/`.
+
+**Worktrees:** FFI-01 is `item/ffi-binding` in `/root/Software/tsdb-work/ffi-binding` (as built); FFI-02 …
+FFI-08 use `/root/Software/tsdb-work/ffi02` … `ffi08`, branches `item/ffi-02-config` … `item/ffi-08-docs`.
+Each review and each fixup gets its own worktree too. Nobody edits another unit's worktree.
 
 ## 4. Items
 
-#### FFI-01 — The FFI binding module
+#### FFI-01 — The FFI binding module (built: `item/ffi-binding` @ `acdef43`)
 
-- **Scoping:** CONCURRENT with FFI-02. **In flight**: an Opus builder started this slice from the PoC code on
-  2026-10-13; this item describes the slice so review can judge it. If the builder's branch has a different
-  name, the coordinator records the mapping in `agent-work/COORDINATION.md` rather than renaming.
-- **Model:** **Opus 5.5 / Astra.** Resource lifetimes and `UnsafePointer` hygiene; the whole plan sits on it.
-- **Branch / worktree:** `item/ffi-01-binding` · `/root/Software/tsdb-work/ffi01`.
-- **Owns:** `platform/ffi/sqlite.ts` (the symbol table, constants, result codes, library loading),
-  `platform/ffi/README.md` (which symbols, why `FULLMUTEX`, the two-copies rule),
-  `tests/unit/ffi_sqlite_test.ts`, `tests/unit/boundaries_test.ts` (one additive rule: `platform/ffi/` is the
-  only place `Deno.dlopen` appears).
-- **Reads:** `work-scripts/deno/ffi-sqlite-interrupt.ts` and `ffi-sqlite-read-cost.ts` on
-  `research/fable-lang-switch` (the PoC the slice grows from), `platform/sqlite.ts` (which calls the platform
-  makes today), `core/errors.ts` (do not add errors here).
-- **Work:**
-  1. Symbol table, typed `as const satisfies Deno.ForeignLibraryInterface`: `sqlite3_libversion`,
-     `sqlite3_libversion_number`, `sqlite3_threadsafe`, `sqlite3_open_v2`, `sqlite3_close_v2`,
-     `sqlite3_busy_timeout`, `sqlite3_extended_result_codes`, `sqlite3_errmsg`, `sqlite3_extended_errcode`,
-     `sqlite3_prepare_v2`, `sqlite3_bind_null|int64|double|text|blob`, `sqlite3_bind_parameter_count`,
-     `sqlite3_step` (blocking), `sqlite3_step_nb` (`name: "sqlite3_step", nonblocking: true`),
-     `sqlite3_column_count|type|int64|double|text|bytes|blob|name`, `sqlite3_reset`, `sqlite3_clear_bindings`,
-     `sqlite3_finalize`, `sqlite3_interrupt`, `sqlite3_changes64`, `sqlite3_last_insert_rowid`,
-     `sqlite3_get_autocommit` (replaces `DatabaseSync.isTransaction`), `sqlite3_exec` is **not** bound — every
-     statement goes through prepare/step so the two step paths stay the only execution paths.
-  2. `loadSqlite(path?: string)`: `Deno.dlopen` the configured path or `libsqlite3.so.0`; check
-     `sqlite3_threadsafe() !== 0` and `sqlite3_libversion_number() >= 3045000`; return the library plus a
-     `version` string for the lifecycle event. Loading is done once per process (module-level lazy singleton);
-     `dlopen` failure is a thrown `SqliteFfiError` the caller maps to `ConfigError`/`StorageError`.
-  3. Thin, safe wrappers over the raw symbols, each one mapping a non-OK result code to a thrown
-     `SqliteFfiError { code, extendedCode, message }` (a plain `Error` subclass, **not** a tagged platform
-     error — `platform/sqlite.ts`'s `native()` and the reader's map it, as they map `node:sqlite` throws
-     today): `openV2(path, flags)`, `prepare(db, sql)`, `bind*(stmt, index, value)`, `step(stmt)` returning
-     `"row" | "done"`, `stepNonblocking(stmt)` returning `Promise<"row" | "done">` and rejecting with
-     `SqliteFfiError{code: SQLITE_INTERRUPT}` on interrupt, `column*(stmt, i)`, `reset`, `finalize`,
-     `interrupt(db)`, `closeV2(db)`. Text out uses `column_bytes` + `copyInto` + `TextDecoder`, never
-     `getCString`. `column_int64` returns `bigint`.
-  4. `platform/ffi/README.md`: the symbol list, the `FULLMUTEX` decision, the two-copies rule (§1.2), the
-     library-version gate, and the one line "lanes are not the cancellation mechanism; `interrupt` is".
-- **Acceptance evidence** (all on a temp file the test creates; nothing else has it open):
-  - `deno task ci` green; `tests/unit/ffi_sqlite_test.ts` covers: open/prepare/bind/step/column round-trips
-    for null, int64 (including `2^53` and `-2^63`), double, text with an embedded U+0000 read back intact,
-    blob; `bind_text` of a lone surrogate reads back as U+FFFD (divergence 3 is unchanged); a
-    `SQLITE_CONSTRAINT` surfaces as `SqliteFfiError` with the extended code; `finalize` after
-    `stepNonblocking` resolves does not crash; `close_v2` with a pending step waits.
-  - **Interrupt**: the PoC's recursive-CTE statement started with `stepNonblocking`, `interrupt(db)` after 100
-    ms → rejection with code 9 **and** `interrupt_latency_ms` p99 ≤ 20 ms over 50 iterations (PoC: 0.34 to 8.8
-    ms). Event-loop liveness: ≥ 90 ticks of a 10 ms `setInterval` during a 1 s nonblocking step (PoC: 92 to
-    95).
-  - **Blocking read cost**: `ffi-sqlite-read-cost.ts` re-pointed at the binding (the PoC script copied into
-    the test as a helper, not left in `work-scripts/`): FFI blocking p50 ≤ `node:sqlite` p50 on the same run
-    (PoC: 6.3 to 6.8 vs 8.7 to 8.9 µs) and nonblocking p50 ≤ 100 µs. Record the load average with the numbers
-    (gotchas: the VM is shared; 2 to 3× worse under load is normal, so the gate is the _ratio_ to
-    `node:sqlite` measured in the same run, not an absolute).
-  - `grep -rn "Deno.dlopen" platform/ | grep -v platform/ffi/` is empty;
-    `grep -n "UnsafeCallback"
-    platform/ffi/` is empty.
-  - Reviewer (Astra) checks every pointer's lifetime against the list in §1.3 and that no JS buffer is passed
-    to the nonblocking symbol.
+- **Scoping:** CONCURRENT with FFI-02. **Built** on 2026-10-13 by Claude Opus 5.5 (`claude-ffi-binding`), from
+  the PoC code and the study's §8 step 1; two commits (`5f998a8` the binding, `acdef43` the brief and claims).
+  Awaiting its independent review.
+- **Model:** **Opus 5.5 / Astra** — built by Opus 5.5, so the review goes to **Astra** (`gpt-6-astra`).
+- **Branch / worktree:** `item/ffi-binding` · `/root/Software/tsdb-work/ffi-binding` (the builder's, as
+  recorded in `agent-work/items/ffi-binding/claims.md`).
+- **Owns (as claimed):** `platform/sqlite_ffi/mod.ts`, `library.ts`, `database.ts`, `errors.ts`;
+  `tests/unit/sqlite_ffi_crud_test.ts`, `sqlite_ffi_cancel_test.ts`, `sqlite_ffi_perf_test.ts`;
+  `work-scripts/deno/ffi-binding-bench.ts`; `work-scripts/INDEX.md` (one row); `docs/knowledge/gotchas.md`
+  (two entries); `agent-work/items/ffi-binding/brief.md`, `claims.md`.
+- **Reads:** `core/errors.ts`, `platform/sqlite.ts`, `tests/unit/boundaries_test.ts`; the PoC scripts and the
+  study on `research/fable-lang-switch`; `docs/plans/ffi/README.md`.
+- **What it delivers** (the surface FFI-03 … FFI-05 build on):
+  1. `library.ts`: one symbol table (`as const satisfies Deno.ForeignLibraryInterface`) with `sqlite3_step`
+     bound twice, blocking and `nonblocking`; `loadLibrary(path?)` tries `DEFAULT_LIBRARY_PATHS` in order,
+     checks `sqlite3_threadsafe()` and `libversion_number ≥ 3.37.0`, caches per path and never `dlclose`s.
+  2. `database.ts`: `Database.open(path, { readOnly, create, uri, busyTimeoutMs, readBigInts, libraryPath })`
+     with `SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_EXRESCODE`; `exec`; `prepare` (exactly one statement);
+     `Statement.run/get/all` (sync, main thread) and
+     `runAsync/getAsync/allAsync(params, { timeoutMs, signal })` (pool thread, `sqlite3_interrupt` from the
+     main thread, rejects `SqliteCancelled`); `close` / `closeAsync`; `interrupt()`. Positional and named
+     binds; `null | number | bigint | boolean | string | ArrayBufferView`; text with embedded U+0000
+     preserved; INTEGER as `number`, `bigint` under `readBigInts`, `SqliteValueError` past ±(2^53−1)
+     otherwise.
+  3. `errors.ts`: binding-local `Data.TaggedError`s with structured fields —
+     `SqliteError{code, extendedCode}`, `SqliteCancelled{reason}`,
+     `SqliteUsageError{reason: "busy" | "closed" | "finalized" | …}`, `SqliteValueError`,
+     `SqliteLibraryError`. Joining them to `PlatformError` is FFI-04/05's work.
+  4. Rules enforced: one execution per connection (`"busy"`), executions run to completion and reset, explicit
+     lifetimes (use after close/finalize is typed), no `UnsafeCallback`, no `FinalizationRegistry`.
+- **Acceptance evidence** (from the brief; the reviewer verifies each against `acdef43`):
+  - `deno task lint`, `check`, `test`, `test:prop` green; `deno fmt --check` clean on every owned file.
+  - Cancellation (`sqlite_ffi_cancel_test.ts`): an unbounded recursive CTE under `timeoutMs` rejects
+    `SqliteCancelled({reason:"deadline"})`; each cancel latency < 25 ms and the median of 5 < 5 ms; a 2 ms
+    timer chain keeps ticking and point reads on another connection keep running; the same for `AbortSignal`;
+    an interrupted write inside `BEGIN` rolls back; four concurrent connections all meet their deadlines; the
+    connection is reusable afterwards. Measured: 0.12 to 0.5 ms, p99 1.7 ms over 20 runs; loop max gap 3 to 12
+    ms (vm-1, load 0.8 to 2.0).
+  - Parity (`sqlite_ffi_perf_test.ts`): FFI sync point-read p50 ≤ 1.3 × `node:sqlite` p50 + 1 µs over 24 000
+    interleaved reads per path, same rows from both; two _separate_ files, one per library (§1.2). Measured
+    7.5 to 8.6 vs 7.8 to 8.6 µs; nonblocking 46 to 93 µs, p99 0.3 to 1.5 ms.
+  - CRUD (`sqlite_ffi_crud_test.ts`): sync and async insert/select/update/delete, transactions, every storage
+    class round-trips (U+0000 text, empty text, empty blob, int64 extremes under `readBigInts`), constraint
+    failures carry extended codes, each contract breach is a typed error.
+  - Resource safety: nothing can free a connection or statement a pool thread is using (`"busy"`); use after
+    close/finalize is typed; the library is never `dlclose`d.
+- **Review focus for Astra** (this plan's additions to the brief's list): every `UnsafePointer` lifetime
+  against §1.3; that no JS-owned buffer is passed to the nonblocking symbol; that `interrupt` is only called
+  while `inStep` and cannot leak into the next statement; that `closeAsync` cannot return while a pool thread
+  is inside SQLite; that the `getCString` fast path cannot return a truncated string (length check); that
+  `tests/unit/boundaries_test.ts` passes unchanged; that
+  `grep -rn "Deno.dlopen" platform/ | grep -v
+  platform/sqlite_ffi/` is empty. Gaps against the surface
+  FFI-03 needs (`sqlite3_get_autocommit` is not bound; no statement cache) are **not** defects of this item —
+  they are FFI-03's scope.
 
 #### FFI-02 — Config options and library resolution
 
-- **Scoping:** CONCURRENT with FFI-01 (disjoint files).
-- **Model:** **Sonnet / Sol.** Follows the item-08 options-table pattern exactly (MT-02 precedent).
+- **Scoping:** CONCURRENT with FFI-01 (disjoint files). Can start now.
+- **Model:** **Haiku 5.5 / Luna (high)** — additive rows copying the item-08 options-table pattern (MT-02
+  precedent), acceptance checkable by `deno task test`. Review: **Opus 5.5 / Astra**; lands only with a PASS
+  and explicit human approval (AGENTS.md Haiku rule).
 - **Branch / worktree:** `item/ffi-02-config` · `/root/Software/tsdb-work/ffi02`.
 - **Owns:** `platform/config.ts` (additive rows only), `platform/services.ts` (additive `SqliteConfig` type
-  and `Config.sqlite` field), `README.md` "Configuration" section (additive rows), `tests/unit/config_test.ts`
-  (additive rows).
+  and `Config.sqlite` field), `README.md` "Configuration" section (additive rows; this item also runs
+  `deno fmt README.md`, which clears one of the three pre-existing fmt failures on `main`),
+  `tests/unit/config_test.ts` (additive rows).
 - **Reads:** `platform/config.ts` (options table), `platform/document_reader.ts` (the existing
-  `readerCallTimeoutMs` semantics the new deadline must sit under).
-- **Work:** Add `sqliteLibrary` (env `SQLITE_LIBRARY`, string, default `libsqlite3.so.0`, description names
-  the ≥ 3.45.0 gate and vm-1's two copies), `statementDeadlineMs` (env `STATEMENT_DEADLINE_MS`, number,
-  default `5000`, finite and `> 0`, must be `< readerCallTimeoutMs` so the interrupt fires before the outer
-  call gives up; cross-field check fails `ConfigError`), `statementInterruptGraceMs` (env
-  `STATEMENT_INTERRUPT_GRACE_MS`, default `1000`, `> 0`). Semantics text for each row says what FFI-05 does at
-  the deadline and at the end of the grace period (§FFI-05 step 5).
+  `readerCallTimeoutMs` semantics the new deadline must sit under), `platform/sqlite_ffi/library.ts` on
+  `item/ffi-binding` (`DEFAULT_LIBRARY_PATHS`, `MIN_VERSION_NUMBER`) — read only, do not import it.
+- **Work:** Add `sqliteLibrary` (env `SQLITE_LIBRARY`, string, **optional**, no default: when unset the
+  binding's `DEFAULT_LIBRARY_PATHS` order applies; the description names the ≥ 3.37.0 gate and vm-1's two
+  copies, 3.45.1 under `/usr/lib/x86_64-linux-gnu` and 3.53.4 under `/usr/local/lib`), `statementDeadlineMs`
+  (env `STATEMENT_DEADLINE_MS`, number, default `5000`, finite and `> 0`, must be `< readerCallTimeoutMs` so
+  the interrupt fires before the outer call gives up; the cross-field check fails `ConfigError`),
+  `statementInterruptGraceMs` (env `STATEMENT_INTERRUPT_GRACE_MS`, default `1000`, `> 0`). Each row's
+  description says what FFI-05 does at the deadline and at the end of the grace period.
 - **Acceptance evidence:**
-  - `ConfigLive` decodes the three options with defaults; `0`, negative, non-finite and
-    `statementDeadlineMs >= readerCallTimeoutMs` fail `ConfigError`, covered by new rows in
+  - `ConfigLive` decodes the three options (`sqliteLibrary` absent → `undefined`); `0`, negative, non-finite
+    and `statementDeadlineMs >= readerCallTimeoutMs` fail `ConfigError`, covered by new rows in
     `tests/unit/config_test.ts`.
-  - Reviewer verifies README lists exactly the new options with the same defaults (item-08 parity rule).
-  - `deno task ci` green.
+  - Reviewer verifies README lists exactly the new options with the same defaults (item-08 parity rule) and
+    that no file outside Owns changed.
+  - `deno task ci` green (with the two remaining pre-existing fmt failures outside this item excepted).
 
-#### FFI-03 — Connection and statement API over the binding
+#### FFI-03 — Effect integration layer over the binding
 
-- **Scoping:** **SYNC.** After FFI-01. Its exported surface is the contract FFI-04 and FFI-05 build on.
-- **Model:** **Opus 5.5 / Astra.** Scoped resource lifetimes; the blocking/nonblocking split; the statement
-  cache.
-- **Branch / worktree:** `item/ffi-03-connection` · `/root/Software/tsdb-work/ffi03`.
-- **Owns:** `platform/ffi/connection.ts`, `platform/ffi/statement.ts`, `tests/unit/ffi_connection_test.ts`,
-  `platform/ffi/README.md` (additive section).
-- **Reads:** `platform/ffi/sqlite.ts` (FFI-01), `platform/sqlite.ts` and `platform/document_reader.ts` (the
+- **Scoping:** **SYNC.** After FFI-01 lands. Its exported surface is the contract FFI-04 and FFI-05 build on.
+  Smaller than first planned: FFI-01 already delivers `Database`/`Statement`, both step paths, deadlines and
+  abort; this item makes them Effect resources and adds the two things the platform callers need that the
+  binding does not have.
+- **Model:** **Opus 5.5 / Astra.** Scoped resource lifetimes and the interruption bridge.
+- **Branch / worktree:** `item/ffi-03-effect` · `/root/Software/tsdb-work/ffi03`.
+- **Owns:** `platform/sqlite_ffi/effect.ts` (new), `platform/sqlite_ffi/library.ts` (additive symbol
+  `sqlite3_get_autocommit`), `platform/sqlite_ffi/database.ts` (additive `Database.inTransaction` only),
+  `tests/unit/sqlite_ffi_effect_test.ts`, `platform/sqlite_ffi/mod.ts` (re-exports).
+- **Reads:** `platform/sqlite_ffi/*` (FFI-01), `platform/sqlite.ts` and `platform/document_reader.ts` (the
   exact call shapes to replace: `prepare().all/get/run`, `exec`, `isTransaction`, `setReadBigInts`, `isOpen`,
-  `close`), `platform/tenants/routing.ts` (`StorageLocation.open` returns the connection type after FFI-04).
+  `close`), `platform/tenants/routing.ts` (`StorageLocation.open`).
 - **Work:**
-  1. `openConnection(path, { readOnly, busyTimeoutMs, library })`: `Effect.acquireRelease` around `openV2`
-     with `SQLITE_OPEN_READWRITE|CREATE` or `SQLITE_OPEN_READONLY`, always `| SQLITE_OPEN_FULLMUTEX`;
-     `extended_result_codes(1)`; `busy_timeout`. Release: interrupt if a nonblocking step is pending, await
-     it, finalize every cached statement, `close_v2`. `isOpen`, `inTransaction` (`!get_autocommit`).
-  2. `Statement` with the blocking trio the callers use today — `run(binds): { changes, lastInsertRowid }`,
-     `get(binds): Row | undefined`, `all(binds): Row[]` — and the nonblocking pair
-     `allNonblocking(binds, { signal })` / `runNonblocking(binds, { signal })` returning `Effect`s that step
-     on the pool thread, and on interruption of the fiber **or** on the `signal` call `interrupt(db)`, await
-     the pending step, `reset`, and fail with `SqliteFfiError{code: 9}`. Rows are `Record<string, Value>` with
-     `bigint` for `INTEGER` columns (the reader's `setReadBigInts(true)` becomes the only behaviour; the
-     writer's decode path converts where it needs `number`).
-  3. **One statement in flight per connection**: a `pending` slot; a second step while one is pending is
-     `Effect.die` with a clear message (never a wait on the SQLite mutex from the event loop).
-  4. Bounded prepared-statement cache per connection keyed by SQL text (LRU, capacity 64, finalize on
-     eviction) so the writer's repeated point reads keep the 6 to 7 µs cost; the cache is bypassed for
-     `VACUUM INTO` and DDL.
-  5. `exec(sql)` for pragma/DDL/`BEGIN`/`COMMIT`/`ROLLBACK` strings: prepare, blocking step until done,
-     finalize; no multi-statement strings (the router's pragma string is split into three calls in FFI-04).
+  1. `openDatabase(path, options): Effect<Database, SqliteFfiError, Scope>` — `Effect.acquireRelease` around
+     `Database.open`; release calls `closeAsync` (cancels and waits for a pending execution, finalizes cached
+     statements, closes).
+  2. `Database.inTransaction` via `sqlite3_get_autocommit` — the replacement for `DatabaseSync.isTransaction`
+     the writer's rollback path reads.
+  3. Effect wrappers: `run/get/all` as `Effect.try` over the sync methods; `allAsync/runAsync/getAsync` as
+     `Effect.async` that passes an `AbortController` signal and aborts it on **fiber interruption**, so an
+     Effect `timeout` or scope close reaches `sqlite3_interrupt`; `SqliteCancelled` is surfaced as the typed
+     failure (FFI-05 maps it to `StatementDeadlineError`).
+  4. A bounded per-`Database` prepared-statement cache keyed by SQL text (LRU, capacity 64, finalize on
+     eviction), bypassed for `VACUUM INTO` and DDL, so the writer's per-call `prepare(sql.text)` pattern keeps
+     FFI-01's measured point-read cost.
 - **Acceptance evidence:**
-  - `tests/unit/ffi_connection_test.ts`: scope close with a pending nonblocking step interrupts and returns
-    within `graceMs`; fiber interruption of `allNonblocking` calls `interrupt` (observed by the step rejecting
-    with code 9) and leaves the connection usable for the next statement; a second step while one is pending
-    dies; cache eviction finalizes (no `SQLITE_MISUSE` or leak: `sqlite3_stmt` count via a test hook stays ≤
-    64); `BEGIN IMMEDIATE` on a second connection to the same file fails `SQLITE_BUSY` after `busy_timeout`,
-    as it does with `node:sqlite` today.
-  - Point-read cost through `Statement.get` with the cache: p50 ≤ `node:sqlite` p50 on the same run (FFI-01's
-    harness, re-pointed one layer up).
+  - `tests/unit/sqlite_ffi_effect_test.ts`: scope close with a pending async execution cancels it and
+    completes within 50 ms; `Effect.timeout` on `allAsync` yields `SqliteCancelled` and the connection answers
+    the next statement; interrupting the fiber aborts the execution (observed as `reason: "aborted"`); cache
+    eviction finalizes (statement count stays ≤ 64 through 500 distinct SQL texts); `inTransaction` flips
+    across `BEGIN`/`COMMIT`/`ROLLBACK`; `BEGIN IMMEDIATE` on a second connection fails `SQLITE_BUSY` after
+    `busyTimeoutMs`, as with `node:sqlite` today.
+  - Point-read cost through the cached `get`: p50 ≤ 1.3 × `node:sqlite` p50 on the same run (FFI-01's perf
+    test re-pointed one layer up).
   - `deno task ci` green; no `platform/` caller changed (FFI-04 does that).
 
 #### FFI-04 — Cutover of the statement path to the binding
@@ -279,7 +304,7 @@ reviewer than the builder (Astra reviews an Opus build and vice versa). Builders
 - **Scoping:** **SYNC, alone.** After FFI-02 and FFI-03. The §1.2 rule: every `node:sqlite` open of a live
   file in the API process switches in one commit.
 - **Model:** **Opus 5.5 / Astra.** Transaction and writer-queue boundaries, snapshot semantics, test migration
-  with a lock hazard.
+  with a lock hazard. Review by the other top-tier model.
 - **Branch / worktree:** `item/ffi-04-cutover` · `/root/Software/tsdb-work/ffi04`.
 - **Owns:** `platform/sqlite.ts`, `platform/document_reader.ts`, `platform/tenants/routing.ts`,
   `platform/backup.ts`, `platform/layers.ts` and `platform/server.ts` (wiring the `Config.sqlite` library path
@@ -291,17 +316,18 @@ reviewer than the builder (Astra reviews an Opus build and vice versa). Builders
   `tests/unit/number_dialects_test.ts`, `tests/property/tenant_routing_props.ts`,
   `tests/property/storage_commit_test.ts`, `tests/layers/storage_test_layer.ts` (comment-only: it has no
   SQLite).
-- **Reads:** `platform/ffi/*` (FFI-01/03), `platform/config.ts` (FFI-02), `core/compile/*`, `core/errors.ts`
-  (no new errors in this item).
+- **Reads:** `platform/sqlite_ffi/*` (FFI-01/03), `platform/config.ts` (FFI-02), `core/compile/*`,
+  `core/errors.ts` (no new errors in this item).
 - **Work:**
   1. `Storage` (`platform/sqlite.ts`): `DatabaseSync` → `openConnection(file, { readOnly: false })`;
      `database.prepare(sql.text)` → cached `Statement`; `isTransaction` → `inTransaction`; the three pragmas
      as three `exec` calls; `VACUUM INTO ?` unchanged in SQL, through `run`. **Semantics unchanged**: same
      `Semaphore(1)`, same `WRITER_QUEUE_CAP`, same `acquireUseRelease` transaction, same `nulProbe` contract,
      same `sql`/`tx` events. Every statement still takes the **blocking** path in this item.
-  2. Document reader: per-call `openConnection(file, { readOnly: true })`; `statement.all` through the
-     binding; drop `setReadBigInts` (bigint is the only behaviour). The `Effect.timeoutFail` at
-     `callTimeoutMs` stays for now (FFI-05 replaces it with the deadline).
+  2. Document reader: per-call `openDatabase(file, { readOnly: true, readBigInts: true })` (the
+     `setReadBigInts(true)` contract, unchanged); `statement.all` through the binding; throws mapped to
+     `ReaderError` as today. The `Effect.timeoutFail` at `callTimeoutMs` stays for now (FFI-05 replaces it
+     with the deadline).
   3. Router: `StorageLocation.open` returns the FFI connection (synchronously, inside the same `check` step —
      the containment and symlink re-check keeps its position); `prepare(location)` runs its DDL transaction on
      a short-lived connection and closes it.
@@ -332,17 +358,17 @@ reviewer than the builder (Astra reviews an Opus build and vice versa). Builders
 - **Scoping:** **SYNC.** After FFI-04. Adds one error to the closed taxonomy, so it cannot run beside another
   item.
 - **Model:** **Opus 5.5 / Astra.** Decides which statements can be interrupted, the error taxonomy change and
-  its HTTP mapping, and what happens when an interrupt does not return.
+  its HTTP mapping, and what happens when an interrupt does not return. Review by the other top-tier model.
 - **Branch / worktree:** `item/ffi-05-deadline` · `/root/Software/tsdb-work/ffi05`.
-- **Owns:** `platform/ffi/classify.ts` (new), `platform/document_reader.ts` and `platform/sqlite.ts` (path
-  selection and deadline wiring), `core/errors.ts` (additive `StatementDeadlineError`),
+- **Owns:** `platform/sqlite_ffi/classify.ts` (new), `platform/document_reader.ts` and `platform/sqlite.ts`
+  (path selection and deadline wiring), `core/errors.ts` (additive `StatementDeadlineError`),
   `platform/http/router.ts` (`toHttpStatus` row), `tests/errors_exhaustiveness.ts`, `core/events.ts` (additive
   optional `path: "blocking" | "nonblocking"` on `SqlPayload`), `docs/adr/0002-error-taxonomy.md` (one row),
   `tests/unit/ffi_classify_test.ts`, `tests/unit/document_reader_test.ts` and `tests/unit/storage_test.ts`
   (additive cases).
 - **Reads:** `sdk/db.ts` (`SelectPlan`, `Operation`), `core/compile/select.ts` and `ddl.ts` (that `_id` is the
   primary key, so `_id = ?` is the indexed single-row lookup), `platform/config.ts` (FFI-02 options),
-  `platform/ffi/connection.ts` (FFI-03).
+  `platform/sqlite_ffi/connection.ts` (FFI-03).
 - **Work:**
   1. `classify(operation): "bounded" | "unbounded"`. Bounded: `insert`, `patch`, `delete`, and a `select`
      whose `filters` contain `{ field: "_id", op: "eq" }` with no `aggregate`. Unbounded: every other
@@ -356,8 +382,8 @@ reviewer than the builder (Astra reviews an Opus build and vice versa). Builders
      `outcome: "rollback"` with that error tag, as it does for any failure. The outer
      `Effect.timeoutFail(callTimeoutMs)` stays as the last-resort guard but, by FFI-02's cross-field check,
      can no longer fire first.
-  3. Writer: the same rule inside a mutation's transaction. A bounded statement runs blocking as today; an
-     unbounded one (a handler's `find`/`count` inside a mutation) runs nonblocking under the same deadline; on
+  3. Writer: the same rule inside a mutation's transaction. A bounded statement runs sync as today; an
+     unbounded one (a handler's `find`/`count` inside a mutation) runs `allAsync` under the same deadline; on
      `StatementDeadlineError` the transaction's release half rolls back. The hot write still never waits
      behind a read: the writer connection runs one statement at a time under `Semaphore(1)` exactly as before.
   4. `StatementDeadlineError` → HTTP **504**; `errorMessage` names the deadline; `PlatformError` union and
@@ -387,7 +413,8 @@ reviewer than the builder (Astra reviews an Opus build and vice versa). Builders
 #### FFI-06 — Perf harnesses, integration evidence and the event-log column
 
 - **Scoping:** CONCURRENT with FFI-07. After FFI-05.
-- **Model:** **Sonnet / Sol.** Porting measured scripts to the landed API; checkable thresholds.
+- **Model:** **Sonnet / Sol** (`sonnet`, `gpt-6.1-sol`). Porting measured scripts to the landed API; checkable
+  thresholds. Review: Opus 5.5 / Astra.
 - **Branch / worktree:** `item/ffi-06-evidence` · `/root/Software/tsdb-work/ffi06`.
 - **Owns:** `perf/ffi_read_cost.ts`, `perf/ffi_interrupt.ts`, `perf/README.md` (additive),
   `tests/integration.ts` (additive scenario), `platform/eventlog/tables.ts` and `core/eventlog/ddl.ts`
@@ -395,8 +422,8 @@ reviewer than the builder (Astra reviews an Opus build and vice versa). Builders
   `platform/analysis/catalog.ts` (one additive query: deadline hits per handler per hour),
   `work-scripts/INDEX.md` (rows marking the PoC scripts as superseded by the `perf/` ports).
 - **Reads:** `work-scripts/deno/ffi-sqlite-read-cost.ts`, `ffi-sqlite-interrupt.ts`, `bash/lang-switch-poc.sh`
-  (on `research/fable-lang-switch`), `platform/ffi/*`, `docs/architecture/lang-switch-fable-data/*.json` (the
-  numbers to compare against).
+  (on `research/fable-lang-switch`), `platform/sqlite_ffi/*`,
+  `docs/architecture/lang-switch-fable-data/*.json` (the numbers to compare against).
 - **Work:**
   1. Port the two PoC scripts to the binding and FFI-03's `Statement`, same JSON output shape as the PoC so
      the committed PoC JSON is directly comparable; run with `deno run -A perf/ffi_*.ts` (no new `deno.json`
@@ -423,7 +450,7 @@ reviewer than the builder (Astra reviews an Opus build and vice versa). Builders
 - **Branch / worktree:** `item/ffi-07-props` · `/root/Software/tsdb-work/ffi07`.
 - **Owns:** `tests/property/ffi_roundtrip_test.ts`, `tests/property/ffi_interrupt_test.ts`, `docs/testing.md`
   (additive rows).
-- **Reads:** `platform/ffi/*`, `tests/property/sqlite_oracle_test.ts` (generators to reuse),
+- **Reads:** `platform/sqlite_ffi/*`, `tests/property/sqlite_oracle_test.ts` (generators to reuse),
   `tests/property/json_number_test.ts`, `tests/unit/nul_contract_test.ts`.
 - **Work:**
   1. Round trip: for generated values of every column kind (text with NULs and lone surrogates, integers
@@ -442,7 +469,8 @@ reviewer than the builder (Astra reviews an Opus build and vice versa). Builders
 
 - **Scoping:** After FFI-06 and FFI-07. **Docs-only** (CLAUDE.md rule: no edits under `core/`, `platform/`,
   `sdk/`, `app/`, `tests/`, `scripts/`, `perf/`, `deno.json`).
-- **Model:** **Sonnet / Sol.**
+- **Model:** **Haiku 5.5 / Luna (high)** — docs-only with a fixed checklist (precedent: SP-08 docs, Luna
+  build, review PASS). Review: Opus 5.5 / Astra; lands only with a PASS and explicit human approval.
 - **Branch / worktree:** `item/ffi-08-docs` · `/root/Software/tsdb-work/ffi08`.
 - **Owns:** `docs/architecture/c4-component-server.*` and `c4-container-platform.*` with their `diagrams/*.py`
   sources (the `node:sqlite` box becomes "FFI binding → system libsqlite3"; edge labels name the two step
