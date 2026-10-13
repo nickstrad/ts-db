@@ -20,6 +20,7 @@ import {
   SqliteUsageError,
   SqliteValueError,
 } from "../../platform/sqlite_ffi/mod.ts";
+import { unsupportedPlatform } from "../../platform/sqlite_ffi/library.ts";
 
 /** Rows are null-prototype objects; compare them as plain records. */
 const plain = (row: Row | undefined) => row === undefined ? undefined : { ...row };
@@ -45,6 +46,20 @@ Deno.test("library: loads the system libsqlite3 and reports its version", () => 
   const lib = loadLibrary();
   assert.match(lib.version, /^3\.\d+\.\d+/);
   assert.ok(lib.versionNumber >= 3_037_000);
+});
+
+Deno.test("library: only Apple arm64 is refused for the fixed variadic db_config signature", () => {
+  assert.match(unsupportedPlatform("darwin", "aarch64") ?? "", /Apple arm64 variadic convention/);
+  for (
+    const [os, arch] of [["linux", "x86_64"], ["linux", "aarch64"], ["darwin", "x86_64"], [
+      "windows",
+      "x86_64",
+    ]]
+  ) {
+    assert.equal(unsupportedPlatform(os, arch), undefined, `${os}/${arch}`);
+  }
+  // The host running this suite must be one the binding supports.
+  assert.equal(unsupportedPlatform(Deno.build.os, Deno.build.arch), undefined);
 });
 
 Deno.test("library: a missing library fails SqliteLibraryError load-failed", () => {

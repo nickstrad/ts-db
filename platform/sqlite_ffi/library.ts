@@ -38,7 +38,10 @@ const SYMBOLS = {
 
   sqlite3_open_v2: { parameters: ["buffer", "buffer", "i32", "pointer"], result: "i32" },
   sqlite3_close_v2: { parameters: ["pointer"], result: "i32" },
-  // Variadic in C: this fixed signature is for the DQS verbs (int on/off, int* out or NULL).
+  // Variadic in C: this fixed signature is for the DQS verbs (int on/off, int* out or NULL). It is
+  // correct only where variadic integer/pointer arguments travel exactly like fixed ones (x86_64 on
+  // any OS, Linux aarch64). Apple arm64 passes variadic arguments on the stack, so the call would
+  // read garbage; `loadLibrary` refuses that platform (see `unsupportedPlatform`).
   sqlite3_db_config: { parameters: ["pointer", "i32", "i32", "pointer"], result: "i32" },
   sqlite3_extended_result_codes: { parameters: ["pointer", "i32"], result: "i32" },
   sqlite3_busy_timeout: { parameters: ["pointer", "i32"], result: "i32" },
@@ -94,13 +97,30 @@ export interface SqliteLibrary {
 const loaded = new Map<string, SqliteLibrary>();
 
 /**
+ * Why the binding cannot run on this OS/architecture, or `undefined` when it can. The only refusal
+ * is Apple arm64: its calling convention passes the variadic arguments of `sqlite3_db_config` on
+ * the stack, which the binding's fixed four-parameter signature does not do, so SQLite would read
+ * garbage for the on/off flag and could write through a garbage `int*`.
+ */
+export function unsupportedPlatform(os: string, arch: string): string | undefined {
+  return os === "darwin" && arch === "aarch64"
+    ? "the binding's fixed sqlite3_db_config signature is not valid under the Apple arm64 variadic convention"
+    : undefined;
+}
+
+/**
  * Load and validate `libsqlite3`. With no `path`, tries `DEFAULT_LIBRARY_PATHS` in order and keeps
  * the first that opens. Fails `SqliteLibraryError` if none opens (including a missing `--allow-ffi`),
  * if the library is older than `MIN_VERSION_NUMBER`, or if it was built single-threaded
- * (`SQLITE_THREADSAFE=0`), which would make the off-thread step and `sqlite3_interrupt` unsafe.
+ * (`SQLITE_THREADSAFE=0`), which would make the off-thread step and `sqlite3_interrupt` unsafe. It
+ * also fails, as `"load-failed"`, on Apple arm64 (darwin/aarch64) before loading anything.
  */
 export function loadLibrary(path?: string): SqliteLibrary {
   const candidates = path === undefined ? DEFAULT_LIBRARY_PATHS : [path];
+  const unsupported = unsupportedPlatform(Deno.build.os, Deno.build.arch);
+  if (unsupported !== undefined) {
+    throw new SqliteLibraryError({ reason: "load-failed", paths: candidates, detail: unsupported });
+  }
   for (const candidate of candidates) {
     const hit = loaded.get(candidate);
     if (hit !== undefined) return hit;

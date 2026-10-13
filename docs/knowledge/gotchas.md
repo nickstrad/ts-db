@@ -217,6 +217,13 @@ SQL, which is why the test suite stays green, but they differ:
   `node:sqlite`'s unknown-column safety net and foreign-key enforcement for every connection, including
   read-only, Effect `openDatabase`, and the inspection helper. Configuration errors are captured before close;
   cleanup cannot replace them. Native error text still lives in `sqliteMessage`, not `message`.
+- **Variadic `sqlite3_db_config` and Apple arm64 (2026-10-13, FFI-04b review).** `sqlite3_db_config` is
+  variadic in C, but the binding declares it with a fixed `(pointer, i32, i32, pointer)` signature. That is
+  correct only where variadic integer/pointer arguments travel like fixed ones (x86_64 on any OS, Linux
+  aarch64). Apple arm64 passes variadic arguments on the stack, so the call would read garbage and SQLite
+  could write through a garbage `int*`. `loadLibrary` therefore refuses darwin/aarch64 with a
+  `SqliteLibraryError` (`unsupportedPlatform` in `library.ts`). Supporting macOS arm64 needs a variadic-aware
+  call path (e.g. a small C shim), not a different FFI type list.
 - **Number binds.** `node:sqlite` binds every JS `number` as REAL (`typeof(?)` of `1` is `real`) and refuses
   booleans. The binding binds integral safe numbers as INTEGER and booleans as 0/1. STRICT INTEGER/REAL
   columns and numeric comparisons do not see the difference. A TEXT-affinity comparison would (`'1'` against

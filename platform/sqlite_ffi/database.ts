@@ -431,9 +431,35 @@ export class Database {
       // Match node:sqlite on every open, including read-only, before executing any SQL.
       for (const verb of [SQLITE_DBCONFIG_DQS_DML, SQLITE_DBCONFIG_DQS_DDL]) {
         const rc = s.sqlite3_db_config(db, verb, 0, null);
-        if (rc !== SQLITE_OK) throw sqliteError(c, "open", rc);
+        if (rc !== SQLITE_OK) {
+          // sqlite3_db_config does not set the connection's error state, so sqlite3_errmsg would
+          // read "not an error"; describe the returned code itself.
+          throw new SqliteError({
+            op: "open",
+            code: rc & 0xff,
+            extendedCode: rc,
+            codeName: codeName(rc),
+            sqliteMessage: readCString(s.sqlite3_errstr(rc)),
+          });
+        }
       }
-      connection.exec("PRAGMA foreign_keys=ON");
+      try {
+        connection.exec("PRAGMA foreign_keys=ON");
+      } catch (error) {
+        // The failure belongs to opening the connection, not to caller SQL. `exec` has already
+        // copied the native text into the error, so re-labelling reads nothing further.
+        if (error instanceof SqliteError && error.op !== "open") {
+          throw new SqliteError({
+            op: "open",
+            code: error.code,
+            extendedCode: error.extendedCode,
+            codeName: error.codeName,
+            sqliteMessage: error.sqliteMessage,
+            ...(error.sql === undefined ? {} : { sql: error.sql }),
+          });
+        }
+        throw error;
+      }
       s.sqlite3_extended_result_codes(db, 1);
       if (busyTimeoutMs > 0) s.sqlite3_busy_timeout(db, busyTimeoutMs);
       return connection;

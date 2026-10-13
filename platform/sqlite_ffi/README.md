@@ -16,7 +16,9 @@ Connection defaults match `node:sqlite`: every `Database.open`, including read-o
 double-quoted string literals for both DML and DDL with `sqlite3_db_config` and enables foreign-key
 enforcement with `PRAGMA foreign_keys=ON`. These run once before any caller SQL; an unknown quoted column
 fails instead of becoming a string literal. A configuration failure closes the handle and fails the open. The
-Effect `openDatabase` and test inspection helper inherit these defaults through `Database.open`.
+Effect `openDatabase` and test inspection helper inherit these defaults through `Database.open`. The fixed
+`sqlite3_db_config` signature is invalid under Apple arm64's variadic convention, so `loadLibrary` refuses
+darwin/aarch64 with a `SqliteLibraryError`.
 
 ## The Effect layer (`effect.ts`)
 
