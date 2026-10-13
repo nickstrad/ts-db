@@ -1,7 +1,8 @@
 # Component — server process
 
-Audited against landed main `643b706` on 2026-10-11 (item 27). Both formats are generated from
-`diagrams/c4-component-server.py`; numbered relationships are identical. All boxes describe landed code.
+Audited against landed main `643b706` on 2026-10-11 (item 27); updated for FFI-01 and FFI-02 at `398be14` on
+2026-10-13. Both formats are generated from `diagrams/c4-component-server.py`; numbered relationships are
+identical. All boxes describe landed code.
 
 <!-- c4-render: diagrams/c4-component-server.py -->
 
@@ -57,13 +58,24 @@ Audited against landed main `643b706` on 2026-10-11 (item 27). Both formats are 
 ╎  └──────────────────────────────┘                                    ╎
 ╎                                                                      ╎
 ╎  ┌──────────────────────────────┐   ┌──────────────────────────────┐ ╎
-╎  │ Logger / EventSink           │   │ Config / IdGen               │ ╎
-╎  │ [Effect logger/service]      │   │ [Effect services]            │ ╎
-╎  │ platform/logging/            │   │ platform/config.ts;          │ ╎
-╎  │ Dropping queue; batched      │   │ platform/sqlite.ts           │ ╎
-╎  │ JSONL; final drain           │   │ Validated options; UUIDs;    │ ╎
-╎  └──────────────────────────────┘   │ Effect runtime Clock         │ ╎
-╎                                     └──────────────────────────────┘ ╎
+╎  │ FFI SQLite binding           │   │ Logger / EventSink           │ ╎
+╎  │ [Library; landed, unwired]   │   │ [Effect logger/service]      │ ╎
+╎  │ platform/sqlite_ffi/         │   │ platform/logging/            │ ╎
+╎  │ System libsqlite3 via        │   │ Dropping queue; batched      │ ╎
+╎  │ Deno.dlopen; sync +          │   │ JSONL; final drain           │ ╎
+╎  │ interruptible async. No      │   └──────────────────────────────┘ ╎
+╎  │ caller yet                   │                                    ╎
+╎  └──────────────────────────────┘                                    ╎
+╎                                                                      ╎
+╎  ┌──────────────────────────────┐                                    ╎
+╎  │ Config / IdGen               │                                    ╎
+╎  │ [Effect services]            │                                    ╎
+╎  │ platform/config.ts;          │                                    ╎
+╎  │ platform/sqlite.ts           │                                    ╎
+╎  │ Validated options (incl.     │                                    ╎
+╎  │ sqlite.*, parsed but         │                                    ╎
+╎  │ unread); UUIDs; Clock        │                                    ╎
+╎  └──────────────────────────────┘                                    ╎
 ╎                                                                      ╎
 ╰╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╯
 

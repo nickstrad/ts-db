@@ -1,7 +1,8 @@
 # Component — server process
 
-Audited against landed main `643b706` on 2026-10-11 (item 27). Both formats are generated from
-`diagrams/c4-component-server.py`; numbered relationships are identical. All boxes describe landed code.
+Audited against landed main `643b706` on 2026-10-11 (item 27); updated for FFI-01 and FFI-02 at `398be14` on
+2026-10-13. Both formats are generated from `diagrams/c4-component-server.py`; numbered relationships are
+identical. All boxes describe landed code.
 
 ```mermaid
 flowchart TB
@@ -16,8 +17,9 @@ flowchart TB
         backup["Backups / ObjectStore<br/>[Effect services]<br/>platform/backup.ts; platform/object_store.ts<br/>Snapshot/hash/manifest; local or signed S3"]
         rpc["ReaderClient / ReaderProcess<br/>[Effect services]<br/>platform/ipc.ts; platform/layers.ts<br/>Scoped child for ingest/analysis; capped queue, deadline, trace"]
         docread["DocumentReaderClient<br/>[Effect service]<br/>platform/document_reader.ts<br/>In-process SQLite queries; read-only connection; concurrency cap 32"]
+        ffi["FFI SQLite binding<br/>[Library; landed, unwired]<br/>platform/sqlite_ffi/<br/>System libsqlite3 via Deno.dlopen; sync + interruptible async. No caller yet"]
         logging["Logger / EventSink<br/>[Effect logger/service]<br/>platform/logging/<br/>Dropping queue; batched JSONL; final drain"]
-        config["Config / IdGen<br/>[Effect services]<br/>platform/config.ts; platform/sqlite.ts<br/>Validated options; UUIDs; Effect runtime Clock"]
+        config["Config / IdGen<br/>[Effect services]<br/>platform/config.ts; platform/sqlite.ts<br/>Validated options (incl. sqlite.*, parsed but unread); UUIDs; Clock"]
     end
         pg["Central registry<br/>[Postgres process/store]<br/>DATABASE_URL<br/>Tenant/key and headless auth data"]
         files["Application files<br/>[SQLite 3 WAL]<br/>DATA_DIR; TENANTS_DIR<br/>Legacy app files or tenant locations"]

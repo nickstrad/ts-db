@@ -67,6 +67,12 @@ NODES = [('http',
   'platform/document_reader.ts',
   'In-process SQLite queries; read-only connection; concurrency cap 32',
   True),
+ ('ffi',
+  'FFI SQLite binding',
+  'Library; landed, unwired',
+  'platform/sqlite_ffi/',
+  'System libsqlite3 via Deno.dlopen; sync + interruptible async. No caller yet',
+  True),
  ('logging',
   'Logger / EventSink',
   'Effect logger/service',
@@ -77,7 +83,7 @@ NODES = [('http',
   'Config / IdGen',
   'Effect services',
   'platform/config.ts; platform/sqlite.ts',
-  'Validated options; UUIDs; Effect runtime Clock',
+  'Validated options (incl. sqlite.*, parsed but unread); UUIDs; Clock',
   True),
  ('pg',
   'Central registry',
@@ -183,7 +189,7 @@ def mermaid():
 
 
 def document(github):
-    text = '# ' + TITLE + '\n\nAudited against landed main `643b706` on 2026-10-11 (item 27). Both formats are generated from\n'
+    text = '# ' + TITLE + '\n\nAudited against landed main `643b706` on 2026-10-11 (item 27); updated for FFI-01 and FFI-02 at `398be14`\non 2026-10-13. Both formats are generated from\n'
     text += '`diagrams/' + NAME + '.py`; numbered relationships are identical. All boxes describe landed code.\n\n'
     if github:
         text += '```mermaid\n' + mermaid() + '\n```\n'

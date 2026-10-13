@@ -8,18 +8,19 @@ Conventions, naming and the maintenance contract: [`AGENTS.md`](AGENTS.md).
 
 ## Index
 
-| Level | Diagram                        | What it shows                                                                                                                                                         | GitHub                                         | Terminal                                           |
-| ----- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- | -------------------------------------------------- |
-| 1     | System Context                 | The platform as one box: app developers, players, the operator, and the external object store, DuckDB analytics consumer and k6 load generator.                       | [github](c4-context-document-db.github.md)     | [terminal](c4-context-document-db.terminal.md)     |
-| 2     | Container — request path       | The server process, the DuckDB reader child process, the per-app SQLite files and the object store; document reads stay in-process while ingest and analysis use the reader. | [github](c4-container-platform.github.md)      | [terminal](c4-container-platform.terminal.md)      |
-| 2     | Container — observability path | Server/reader JSONL, the reader's connected ingest-then-sweep into the derived DuckDB event log, the reader composition, live named analysis, logs CLI and k6 loader. | [github](c4-container-observability.github.md) | [terminal](c4-container-observability.terminal.md) |
-| 3     | Component — server process     | The mounted HTTP/lifecycle components and services, including in-process document reads, per-app storage, backups, reader client, logging and dependencies.           | [github](c4-component-server.github.md)        | [terminal](c4-component-server.terminal.md)        |
+| Level | Diagram                        | What it shows                                                                                                                                                                                                                                  | GitHub                                         | Terminal                                           |
+| ----- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- | -------------------------------------------------- |
+| 1     | System Context                 | The platform as one box: app developers, players, the operator, and the external object store, DuckDB analytics consumer and k6 load generator.                                                                                                | [github](c4-context-document-db.github.md)     | [terminal](c4-context-document-db.terminal.md)     |
+| 2     | Container — request path       | The server process, the DuckDB reader child process, the per-app SQLite files and the object store; document reads stay in-process while ingest and analysis use the reader. A note records that the FFI SQLite binding is landed but unwired. | [github](c4-container-platform.github.md)      | [terminal](c4-container-platform.terminal.md)      |
+| 2     | Container — observability path | Server/reader JSONL, the reader's connected ingest-then-sweep into the derived DuckDB event log, the reader composition, live named analysis, logs CLI and k6 loader.                                                                          | [github](c4-container-observability.github.md) | [terminal](c4-container-observability.terminal.md) |
+| 3     | Component — server process     | The mounted HTTP/lifecycle components and services, including in-process document reads, per-app storage, backups, reader client, logging, dependencies and the landed-but-unwired FFI SQLite binding.                                         | [github](c4-component-server.github.md)        | [terminal](c4-component-server.terminal.md)        |
 
 Level 2 is split in two so neither picture is cluttered; together they cover one container set.
 
 ## Reports
 
-- [sqlite-document-reads.md](sqlite-document-reads.md) — verification report for the in-process SQLite document-read path (scope, verification matrix, benchmarks).
+- [sqlite-document-reads.md](sqlite-document-reads.md) — verification report for the in-process SQLite
+  document-read path (scope, verification matrix, benchmarks).
 
 ## Reading them in a terminal
 
@@ -32,10 +33,12 @@ glow docs/architecture/c4-component-server.terminal.md
 
 ## Audited state
 
-These diagrams describe landed main `643b706`, audited on 2026-10-11 for item 27. The earlier audit at
-`e423ed1` covered items 22/24/30–36; this refresh reads the landed changes since that snapshot, including
-items 23/25/26 and MT-01 through MT-10. All four pairs change: request/auth context, central Postgres and CLI
-containers, tenant components, and connected analysis/k6 observability paths.
+These diagrams describe landed main `643b706`, audited on 2026-10-11 for item 27, plus the FFI-01/FFI-02 delta
+at `398be14` (2026-10-13). The context and observability pairs are unchanged by FFI-01/02: no new actor,
+external system, process, store or event-log surface. The earlier audit at `e423ed1` covered items
+22/24/30–36; this refresh reads the landed changes since that snapshot, including items 23/25/26 and MT-01
+through MT-10. All four pairs change: request/auth context, central Postgres and CLI containers, tenant
+components, and connected analysis/k6 observability paths.
 
 | Item        | Landed as         | Diagram impact verified against code/diff                                                                                                                                    |
 | ----------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -54,10 +57,13 @@ containers, tenant components, and connected analysis/k6 observability paths.
 | MT-08       | `9ff9859`         | Headless Better Auth HTTP/CLI, Postgres users/sessions/memberships; no external identity provider.                                                                           |
 | MT-09       | `c9ba958`         | Tenant-routing properties; no new runtime C4 surface.                                                                                                                        |
 | MT-10       | `643b706`         | Reader live analysis wired to catalog/shared ingest instance; E2E uses distinct tenants for incompatible layouts (not per-app storage directories). Seven-scenario E2E gate. |
+| FFI-01      | `6f5c4d0`         | `platform/sqlite_ffi/` binding to system libsqlite3; Level 3 box added, no edges (no `platform/` or `sdk/` module imports it). Level 2 unchanged (note only).                |
+| FFI-02      | `398be14`         | `sqliteLibrary`, `statementDeadlineMs`, `statementInterruptGraceMs` in Config; validated, not yet read by any service (Level 3 Config box and notes).                        |
 
-**Connected:** server layers, tenant auth/registry/routing when enabled, in-process SQLite document queries, reader ingest and named analysis, admin/hourly ingest-then-sweep,
-standalone logs/tenant/auth/migration CLIs, k6 point loader. **Library only:**
-`startRetentionSweeper` (not mounted), `upgradeEventLog` (explicit operator API, no CLI). **Future:**
+**Connected:** server layers, tenant auth/registry/routing when enabled, in-process SQLite document queries,
+reader ingest and named analysis, admin/hourly ingest-then-sweep, standalone logs/tenant/auth/migration CLIs,
+k6 point loader. **Library only:** `startRetentionSweeper` (not mounted), `upgradeEventLog` (explicit operator
+API, no CLI), `platform/sqlite_ffi/` (FFI SQLite binding; landed, unwired until FFI-03/04). **Future:**
 control-plane routing, event-table pruning and DuckDB compaction. No future work is drawn as a running
 service. Tests and counts are dated in the root [README.md](../../README.md).
 
