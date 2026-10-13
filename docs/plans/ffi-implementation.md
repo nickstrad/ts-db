@@ -174,11 +174,13 @@ Each review and each fixup gets its own worktree too. Nobody edits another unit'
 
 ## 4. Items
 
-#### FFI-01 — The FFI binding module (built: `item/ffi-binding` @ `acdef43`)
+#### FFI-01 — The FFI binding module (built: `item/ffi-binding`; PASS at `9250359` after three repair rounds)
 
 - **Scoping:** CONCURRENT with FFI-02. **Built** on 2026-10-13 by Claude Opus 5.5 (`claude-ffi-binding`), from
   the PoC code and the study's §8 step 1; two commits (`5f998a8` the binding, `acdef43` the brief and claims).
-  Awaiting its independent review.
+  Reviews (all Astra, fresh units): FAIL 3 at `acdef43` → FAIL 2 at `9eec83b` → FAIL 1 at `ca348ea` → **PASS**
+  at `9250359` (reports under `agent-work/items/ffi-binding/` on the `review/ffi-01-astra*` branches). Each
+  round's lesson is in `docs/knowledge/gotchas.md`.
 - **Model:** **Opus 5.5 / Astra** — built by Opus 5.5, so the review goes to **Astra** (`gpt-6-astra`).
 - **Branch / worktree:** `item/ffi-binding` · `/root/Software/tsdb-work/ffi-binding` (the builder's, as
   recorded in `agent-work/items/ffi-binding/claims.md`).
@@ -261,17 +263,20 @@ Each review and each fixup gets its own worktree too. Nobody edits another unit'
     that no file outside Owns changed.
   - `deno task ci` green (with the two remaining pre-existing fmt failures outside this item excepted).
 
-#### FFI-03 — Effect integration layer over the binding
+#### FFI-03 — Effect integration layer over the binding (built: `item/ffi-03-effect` @ `2cbc49d`, in review)
 
-- **Scoping:** **SYNC.** After FFI-01 lands. Its exported surface is the contract FFI-04 and FFI-05 build on.
-  Smaller than first planned: FFI-01 already delivers `Database`/`Statement`, both step paths, deadlines and
-  abort; this item makes them Effect resources and adds the two things the platform callers need that the
-  binding does not have.
+- **Scoping:** **SYNC.** After FFI-01 lands (built on `item/ffi-binding` @ `9250359` while FFI-01 awaited
+  landing). Its exported surface is the contract FFI-04 and FFI-05 build on. Smaller than first planned:
+  FFI-01 already delivers `Database`/`Statement`, both step paths, deadlines and abort; this item makes them
+  Effect resources and adds the two things the platform callers need that the binding does not have.
 - **Model:** **Opus 5.5 / Astra.** Scoped resource lifetimes and the interruption bridge.
 - **Branch / worktree:** `item/ffi-03-effect` · `/root/Software/tsdb-work/ffi03`.
 - **Owns:** `platform/sqlite_ffi/effect.ts` (new), `platform/sqlite_ffi/library.ts` (additive symbol
   `sqlite3_get_autocommit`), `platform/sqlite_ffi/database.ts` (additive `Database.inTransaction` only),
-  `tests/unit/sqlite_ffi_effect_test.ts`, `platform/sqlite_ffi/mod.ts` (re-exports).
+  `tests/unit/sqlite_ffi_effect_test.ts`, `platform/sqlite_ffi/mod.ts` (re-exports),
+  `platform/sqlite_ffi/README.md`. As built, the surface is `openDatabase`, `exec/prepare/run/get/all`,
+  `runAsync/getAsync/allAsync(stmt, params, { timeoutMs })`, `prepareCached`, `isCacheable`,
+  `STATEMENT_CACHE_CAPACITY`, `isSqliteFfiError`, `Database.inTransaction`.
 - **Reads:** `platform/sqlite_ffi/*` (FFI-01), `platform/sqlite.ts` and `platform/document_reader.ts` (the
   exact call shapes to replace: `prepare().all/get/run`, `exec`, `isTransaction`, `setReadBigInts`, `isOpen`,
   `close`), `platform/tenants/routing.ts` (`StorageLocation.open`).
@@ -320,8 +325,10 @@ Each review and each fixup gets its own worktree too. Nobody edits another unit'
   `core/errors.ts` (no new errors in this item).
 - **Work:**
   1. `Storage` (`platform/sqlite.ts`): `DatabaseSync` → `openConnection(file, { readOnly: false })`;
-     `database.prepare(sql.text)` → cached `Statement`; `isTransaction` → `inTransaction`; the three pragmas
-     as three `exec` calls; `VACUUM INTO ?` unchanged in SQL, through `run`. **Semantics unchanged**: same
+     `database.prepare(sql.text)` → `prepareCached(db, sql.text)` used in the same step (a cached statement is
+     only safe to use immediately; an evicted one fails typed `"finalized"`); binds are an **array**
+     (`run(stmt, sql.values)`), not variadic; `isTransaction` → `inTransaction`; the three pragmas as three
+     `exec` calls; `VACUUM INTO ?` unchanged in SQL, through `run`. **Semantics unchanged**: same
      `Semaphore(1)`, same `WRITER_QUEUE_CAP`, same `acquireUseRelease` transaction, same `nulProbe` contract,
      same `sql`/`tx` events. Every statement still takes the **blocking** path in this item.
   2. Document reader: per-call `openDatabase(file, { readOnly: true, readBigInts: true })` (the
@@ -383,9 +390,11 @@ Each review and each fixup gets its own worktree too. Nobody edits another unit'
      `Effect.timeoutFail(callTimeoutMs)` stays as the last-resort guard but, by FFI-02's cross-field check,
      can no longer fire first.
   3. Writer: the same rule inside a mutation's transaction. A bounded statement runs sync as today; an
-     unbounded one (a handler's `find`/`count` inside a mutation) runs `allAsync` under the same deadline; on
-     `StatementDeadlineError` the transaction's release half rolls back. The hot write still never waits
-     behind a read: the writer connection runs one statement at a time under `Semaphore(1)` exactly as before.
+     unbounded **read** (a handler's `find`/`count` inside a mutation) runs `allAsync` under the same deadline
+     — writes stay sync, because an interruption that lands after an async write committed leaves the commit
+     standing while the fiber reports interruption (FFI-03 note 5); on `StatementDeadlineError` the
+     transaction's release half rolls back. The hot write still never waits behind a read: the writer
+     connection runs one statement at a time under `Semaphore(1)` exactly as before.
   4. `StatementDeadlineError` → HTTP **504**; `errorMessage` names the deadline; `PlatformError` union and
      `errors_exhaustiveness.ts` updated; ADR 0002 gets its row. The reader-call timeout (`IpcError{timeout}` →
      502) is unchanged for ingest/analysis calls.
