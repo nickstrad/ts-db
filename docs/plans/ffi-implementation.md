@@ -144,14 +144,14 @@ must verify rather than assume:
 
 ## 3. Batch table and build order
 
-| Batch | Items          | Scope                                                                  | Gate                                                                     |
-| ----- | -------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| FFI-A | FFI-01, FFI-02 | FFI binding module; config options and library resolution              | concurrent (disjoint files). FFI-01 **built** (`acdef43`), in review     |
-| FFI-B | FFI-03         | Connection and statement API over the binding (scoped, two step paths) | after FFI-01; **SYNC** — its interface is what FFI-04 and FFI-05 consume |
-| FFI-C | FFI-04         | Cutover: `Storage`, document reader, router, backup, tests             | after FFI-02 and FFI-03; **SYNC**, alone (the §1.2 rule)                 |
-| FFI-D | FFI-05         | Classifier and deadline-bounded execution; `StatementDeadlineError`    | after FFI-04; **SYNC** (changes the error taxonomy)                      |
-| FFI-E | FFI-06, FFI-07 | Perf harnesses and integration evidence; property tests                | concurrent, after FFI-05                                                 |
-| FFI-F | FFI-08         | Docs, C4 diagrams, ADR, knowledge                                      | after FFI-06 and FFI-07; docs-only                                       |
+| Batch | Items          | Scope                                                               | Gate                                                                                                                                                            |
+| ----- | -------------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| FFI-A | FFI-01, FFI-02 | FFI binding module; config options and library resolution           | **landed** on `main` 2026-10-13: merges `6f5c4d0` (FFI-01, Astra PASS @ `9250359`) and `398be14` (FFI-02, Astra PASS @ `83cfaf0`, human approval)               |
+| FFI-B | FFI-03         | Effect integration layer over the binding (scoped, two step paths)  | **PASS** at `daeb637` (Astra re-review); its base FFI-01 is on `main`, so it lands on authorization. **SYNC** — its interface is what FFI-04 and FFI-05 consume |
+| FFI-C | FFI-04         | Cutover: `Storage`, document reader, router, backup, tests          | after FFI-02 and FFI-03; **SYNC**, alone (the §1.2 rule)                                                                                                        |
+| FFI-D | FFI-05         | Classifier and deadline-bounded execution; `StatementDeadlineError` | after FFI-04; **SYNC** (changes the error taxonomy)                                                                                                             |
+| FFI-E | FFI-06, FFI-07 | Perf harnesses and integration evidence; property tests             | concurrent, after FFI-05                                                                                                                                        |
+| FFI-F | FFI-08         | Docs, C4 diagrams, ADR, knowledge                                   | after FFI-06 and FFI-07; docs-only                                                                                                                              |
 
 Build order: `FFI-01 ∥ FFI-02 → FFI-03 → FFI-04 → FFI-05 → (FFI-06 ∥ FFI-07) → FFI-08`.
 
