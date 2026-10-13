@@ -52,6 +52,25 @@ as a pre-existing DuckDB/Deno teardown flake. Policy: **chase, don't quarantine*
 `tokio-runtime-w` segfaults in dmesg share one stack page offset (one bug site). Reusable stress loop:
 `work-scripts/bash/segfault-stress.sh` (adopted from sq-07; until it lands, on `origin/haiku/sq-07`).
 
+## Two SQLite copies in one process must not share a file
+
+Added 2026-10-13 (FFI binding, `item/ffi-binding`). `platform/sqlite_ffi/` loads the system `libsqlite3`
+(3.45.1 on vm-1) next to the SQLite bundled inside `node:sqlite`. POSIX advisory locks belong to the process,
+not the descriptor, so when one copy closes any descriptor on a database file the kernel drops the locks the
+other copy holds on it, and the two copies then corrupt each other silently. While both libraries are loaded
+in one process, each database file is opened by exactly one of them. The perf parity test
+(`tests/unit/sqlite_ffi_perf_test.ts`) uses two identical files for that reason. The same rule is why the
+DuckDB reader is a separate process (plan §0).
+
+## `Deno.dlopen` and FFI `i64`: bigint in, bigint out
+
+Added 2026-10-13. On Deno 2.9.5 an `i64` FFI parameter's type is `bigint` only (a `number` fails `deno check`)
+and `i64` results are `number | bigint`. `platform/sqlite_ffi/` binds int32 values through `sqlite3_bind_int`
+and reads INTEGER columns through `sqlite3_column_double` (exact for every safe integer), falling back to
+`sqlite3_column_int64` only for `readBigInts` or the unsafe-integer error, which keeps bigint allocation off
+the point-read path. A dlopen'd library is not a resource for Deno's test sanitizer, so loading it lazily
+inside a test is fine.
+
 ## The VM is shared and loaded
 
 Sibling agents run concurrently; load averages of 12+ on 4 vCPUs are normal. Perf numbers (k6 p95/p99)
