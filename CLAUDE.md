@@ -22,6 +22,10 @@ Use `deno task <name>` for everything (see the plan's §2.3 for the full task li
 
 ## Branch and worktree etiquette
 
+- Each unit uses a newly spawned agent with fresh context and its own worktree. Commit work and useful
+  learning, then clean that worktree after coordinator inspection. Never reuse a completed session for another
+  unit. Follow the canonical [fresh-agent lifecycle](AGENTS.md#fresh-agent-lifecycle-every-unit-of-work),
+  including ownership-safe handoffs.
 - Plan items build on `item/NN-slug` branches in worktrees under `/root/Software/tsdb-work/`.
 - Side quests build on `haiku/sq-NN` branches — see `docs/side-quests.md`.
 - If you are not the agent assigned to a given branch/worktree, do not edit files in it or push to it. Check
