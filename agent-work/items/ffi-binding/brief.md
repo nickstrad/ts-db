@@ -103,7 +103,8 @@ call can miss a step that is still being dispatched, and it cannot carry over to
 
 Astra's re-review of `9eec83b` (`agent-work/items/ffi-binding/rereview-astra.md` on
 `review/ffi-01-astra-rereview`) returned FAIL with two defects in async signal cleanup. The second repair was
-made by Claude Opus 5.5 (`opus-ffi-01-fix2`, worktree `/root/Software/tsdb-work/ffi01-fix2`), commit `e45b2ae`:
+made by Claude Opus 5.5 (`opus-ffi-01-fix2`, worktree `/root/Software/tsdb-work/ffi01-fix2`), commit
+`e45b2ae`:
 
 1. 2026-10-13: **Native reads after caller cleanup.** Async cleanup now resets the statement and builds the
    pending reset error (or `SqliteCancelled`) while it still owns the open connection. It then clears the
@@ -118,3 +119,13 @@ made by Claude Opus 5.5 (`opus-ffi-01-fix2`, worktree `/root/Software/tsdb-work/
    `SqliteUsageError({ reason: "signal-cleanup", cause })`, a new additive `UsageFailure`, and the statement's
    changes stand. Tests: `cleanup: a throwing signal detachment (method|getter) ...` in
    `sqlite_ffi_cancel_test.ts`.
+
+### Third repair (2026-10-13)
+
+2026-10-13: Astra's second re-review of `ca348ea` (`rereview2-astra.md` on `review/ffi-01-astra-rereview2`)
+found that cleanup attached its `cause` by error class, so it could change a caller-owned binding error or
+replace it with a `TypeError`. Claude Opus 5.5 (`opus-ffi-01-fix3`) changed `database.ts` to decide ownership
+by identity (`Own`), so that only the error object the execution created gets a `cause`. The attach step
+swallows its own failures, and anything thrown from caller code is rethrown without being inspected. Tests:
+`cleanup: a throwing signal detachment (method|getter) never touches an exception the caller threw` in
+`sqlite_ffi_cancel_test.ts`.
