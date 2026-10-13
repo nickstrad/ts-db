@@ -263,7 +263,7 @@ Each review and each fixup gets its own worktree too. Nobody edits another unit'
     that no file outside Owns changed.
   - `deno task ci` green (with the two remaining pre-existing fmt failures outside this item excepted).
 
-#### FFI-03 — Effect integration layer over the binding (built: `item/ffi-03-effect` @ `2cbc49d`, in review)
+#### FFI-03 — Effect integration layer over the binding (PASS at `daeb637` on `item/ffi-03-effect`)
 
 - **Scoping:** **SYNC.** After FFI-01 lands (built on `item/ffi-binding` @ `9250359` while FFI-01 awaited
   landing). Its exported surface is the contract FFI-04 and FFI-05 build on. Smaller than first planned:
