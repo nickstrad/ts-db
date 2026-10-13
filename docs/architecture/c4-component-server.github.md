@@ -1,6 +1,6 @@
 # Component — server process
 
-Audited against landed main `643b706` on 2026-10-11 (item 27); updated for FFI-01 to FFI-03 at `182e85d` on
+Audited against landed main `643b706` on 2026-10-11 (item 27); updated for FFI-01 to FFI-04 at `51a5283` on
 2026-10-13. Both formats are generated from `diagrams/c4-component-server.py`; numbered relationships are
 identical. All boxes describe landed code.
 
@@ -17,9 +17,9 @@ flowchart TB
         backup["Backups / ObjectStore<br/>[Effect services]<br/>platform/backup.ts; platform/object_store.ts<br/>Snapshot/hash/manifest; local or signed S3"]
         rpc["ReaderClient / ReaderProcess<br/>[Effect services]<br/>platform/ipc.ts; platform/layers.ts<br/>Scoped child for ingest/analysis; capped queue, deadline, trace"]
         docread["DocumentReaderClient<br/>[Effect service]<br/>platform/document_reader.ts<br/>In-process SQLite queries; read-only connection; concurrency cap 32"]
-        ffi["FFI SQLite binding<br/>[Library; landed, unwired]<br/>platform/sqlite_ffi/<br/>System libsqlite3 via Deno.dlopen; sync + interruptible async; Effect layer (scoped open, 64-statement cache, typed errors). No caller yet; FFI-04 wires it"]
+        ffi["FFI SQLite binding<br/>[Library in server process]<br/>platform/sqlite_ffi/<br/>System libsqlite3 via Deno.dlopen; every server SQLite open goes through it (FFI-04), node:sqlite is not loaded. Blocking path with 64-statement cache in use; interruptible async API and statement deadline not used yet"]
         logging["Logger / EventSink<br/>[Effect logger/service]<br/>platform/logging/<br/>Dropping queue; batched JSONL; final drain"]
-        config["Config / IdGen<br/>[Effect services]<br/>platform/config.ts; platform/sqlite.ts<br/>Validated options (incl. sqlite.*, parsed but unread); UUIDs; Clock"]
+        config["Config / IdGen<br/>[Effect services]<br/>platform/config.ts; platform/sqlite.ts<br/>Validated options (sqlite.library read by every open; statement deadline and grace parsed but unread); UUIDs; Clock"]
     end
         pg["Central registry<br/>[Postgres process/store]<br/>DATABASE_URL<br/>Tenant/key and headless auth data"]
         files["Application files<br/>[SQLite 3 WAL]<br/>DATA_DIR; TENANTS_DIR<br/>Legacy app files or tenant locations"]
@@ -32,29 +32,33 @@ flowchart TB
     http -->|"(4) Provide authenticated tenant per request"| context
     context -->|"(5) Resolve tenant writer; never use caller selectors"| storage
     apps -->|"(6) Build per-app LocalFolderRouter"| route
-    route -->|"(7) Prepare validated SQLite capability and schema"| files
+    route -->|"(7) Open and prepare validated tenant SQLite file; schema guard"| ffi
     storage -->|"(8) Resolve/prepare tenant location before opening a cached writer"| route
     http -->|"(9) Mutation Effect inside serialized transaction"| storage
     http -->|"(10) Document query in-process; compiled SQLite SQL"| docread
     docread -->|"(11) Resolve registered query, schema and file"| apps
-    docread -->|"(12) node:sqlite read-only connection and transaction"| files
+    docread -->|"(12) Read-only connection and transaction; prepared-statement cache"| ffi
     http -->|"(13) Ingest/analysis RPC; trace context"| rpc
-    storage -->|"(14) node:sqlite transaction and snapshot reads"| files
+    storage -->|"(14) Writer connection, transactions and snapshot reads; blocking path"| ffi
     life -->|"(15) Scoped backup timer"| backup
     backup -->|"(16) Consistent VACUUM INTO snapshot"| storage
-    backup -->|"(17) Verified snapshot and manifest publication"| objects
-    tenant -->|"(18) Parameterized registry SQL; lazy scoped pool"| pg
-    life -->|"(19) Ping; hourly ingest; reader-exit watch and finalizer"| rpc
-    rpc -->|"(20) JSONL RPC; scoped child shutdown"| reader
-    storage -->|"(21) SQL/tx/queue events"| logging
-    http -->|"(22) HTTP/handler spans and failures"| logging
-    life -->|"(23) Startup/shutdown and timer events"| logging
-    backup -->|"(24) Backup and object-transfer events"| logging
-    logging -->|"(25) Batched append; rotation and scope drain"| jsonl
-    config -->|"(26) App schemas, tokens and paths; generated ids"| apps
-    config -->|"(27) DATABASE_URL and scope-owned cache"| tenant
-    config -->|"(28) TENANTS_DIR and router selection"| route
-    config -->|"(29) Level, queue, flush and rotation settings"| logging
+    backup -->|"(17) Read-only quick_check of the snapshot copy before publication"| ffi
+    backup -->|"(18) Verified snapshot and manifest publication"| objects
+    tenant -->|"(19) Parameterized registry SQL; lazy scoped pool"| pg
+    life -->|"(20) Ping; hourly ingest; reader-exit watch and finalizer"| rpc
+    rpc -->|"(21) JSONL RPC; scoped child shutdown"| reader
+    storage -->|"(22) SQL/tx/queue events"| logging
+    http -->|"(23) HTTP/handler spans and failures"| logging
+    life -->|"(24) Startup/shutdown and timer events"| logging
+    backup -->|"(25) Backup and object-transfer events"| logging
+    logging -->|"(26) Batched append; rotation and scope drain"| jsonl
+    config -->|"(27) App schemas, tokens and paths; generated ids"| apps
+    config -->|"(28) DATABASE_URL and scope-owned cache"| tenant
+    config -->|"(29) TENANTS_DIR and router selection"| route
+    config -->|"(30) Level, queue, flush and rotation settings"| logging
+    config -->|"(31) sqlite.library: the libsqlite3 path passed to every open"| ffi
+    apps -->|"(32) Load libsqlite3 once at startup; sqlite-library lifecycle event names path and version"| ffi
+    ffi -->|"(33) libsqlite3 file I/O; WAL transactions and read-only snapshots"| files
     classDef planned stroke-dasharray: 5 3
     classDef person fill:#fff,stroke-width:2px
     classDef external fill:#f4f4f4
@@ -67,37 +71,41 @@ flowchart TB
 
 ## Relationships
 
-| #  | From                         | To                           | Relationship                                                   |
-| -- | ---------------------------- | ---------------------------- | -------------------------------------------------------------- |
-| 1  | HTTP API / auth              | AppRegistry / AppServices    | Resolve app and named handler                                  |
-| 2  | HTTP API / auth              | TenantRegistry               | Resolve hashed credentials; admin tenant/key CRUD              |
-| 3  | HTTP API / auth              | Central registry             | Better Auth session/registration SQL                           |
-| 4  | HTTP API / auth              | TenantContext                | Provide authenticated tenant per request                       |
-| 5  | TenantContext                | Storage                      | Resolve tenant writer; never use caller selectors              |
-| 6  | AppRegistry / AppServices    | TenantStorageRouter          | Build per-app LocalFolderRouter                                |
-| 7  | TenantStorageRouter          | Application files            | Prepare validated SQLite capability and schema                 |
-| 8  | Storage                      | TenantStorageRouter          | Resolve/prepare tenant location before opening a cached writer |
-| 9  | HTTP API / auth              | Storage                      | Mutation Effect inside serialized transaction                  |
-| 10 | HTTP API / auth              | DocumentReaderClient         | Document query in-process; compiled SQLite SQL                 |
-| 11 | DocumentReaderClient         | AppRegistry / AppServices    | Resolve registered query, schema and file                      |
-| 12 | DocumentReaderClient         | Application files            | node:sqlite read-only connection and transaction               |
-| 13 | HTTP API / auth              | ReaderClient / ReaderProcess | Ingest/analysis RPC; trace context                             |
-| 14 | Storage                      | Application files            | node:sqlite transaction and snapshot reads                     |
-| 15 | Server lifecycle             | Backups / ObjectStore        | Scoped backup timer                                            |
-| 16 | Backups / ObjectStore        | Storage                      | Consistent VACUUM INTO snapshot                                |
-| 17 | Backups / ObjectStore        | Object storage               | Verified snapshot and manifest publication                     |
-| 18 | TenantRegistry               | Central registry             | Parameterized registry SQL; lazy scoped pool                   |
-| 19 | Server lifecycle             | ReaderClient / ReaderProcess | Ping; hourly ingest; reader-exit watch and finalizer           |
-| 20 | ReaderClient / ReaderProcess | Reader child                 | JSONL RPC; scoped child shutdown                               |
-| 21 | Storage                      | Logger / EventSink           | SQL/tx/queue events                                            |
-| 22 | HTTP API / auth              | Logger / EventSink           | HTTP/handler spans and failures                                |
-| 23 | Server lifecycle             | Logger / EventSink           | Startup/shutdown and timer events                              |
-| 24 | Backups / ObjectStore        | Logger / EventSink           | Backup and object-transfer events                              |
-| 25 | Logger / EventSink           | Server JSONL                 | Batched append; rotation and scope drain                       |
-| 26 | Config / IdGen               | AppRegistry / AppServices    | App schemas, tokens and paths; generated ids                   |
-| 27 | Config / IdGen               | TenantRegistry               | DATABASE_URL and scope-owned cache                             |
-| 28 | Config / IdGen               | TenantStorageRouter          | TENANTS_DIR and router selection                               |
-| 29 | Config / IdGen               | Logger / EventSink           | Level, queue, flush and rotation settings                      |
+| #  | From                         | To                           | Relationship                                                                           |
+| -- | ---------------------------- | ---------------------------- | -------------------------------------------------------------------------------------- |
+| 1  | HTTP API / auth              | AppRegistry / AppServices    | Resolve app and named handler                                                          |
+| 2  | HTTP API / auth              | TenantRegistry               | Resolve hashed credentials; admin tenant/key CRUD                                      |
+| 3  | HTTP API / auth              | Central registry             | Better Auth session/registration SQL                                                   |
+| 4  | HTTP API / auth              | TenantContext                | Provide authenticated tenant per request                                               |
+| 5  | TenantContext                | Storage                      | Resolve tenant writer; never use caller selectors                                      |
+| 6  | AppRegistry / AppServices    | TenantStorageRouter          | Build per-app LocalFolderRouter                                                        |
+| 7  | TenantStorageRouter          | FFI SQLite binding           | Open and prepare validated tenant SQLite file; schema guard                            |
+| 8  | Storage                      | TenantStorageRouter          | Resolve/prepare tenant location before opening a cached writer                         |
+| 9  | HTTP API / auth              | Storage                      | Mutation Effect inside serialized transaction                                          |
+| 10 | HTTP API / auth              | DocumentReaderClient         | Document query in-process; compiled SQLite SQL                                         |
+| 11 | DocumentReaderClient         | AppRegistry / AppServices    | Resolve registered query, schema and file                                              |
+| 12 | DocumentReaderClient         | FFI SQLite binding           | Read-only connection and transaction; prepared-statement cache                         |
+| 13 | HTTP API / auth              | ReaderClient / ReaderProcess | Ingest/analysis RPC; trace context                                                     |
+| 14 | Storage                      | FFI SQLite binding           | Writer connection, transactions and snapshot reads; blocking path                      |
+| 15 | Server lifecycle             | Backups / ObjectStore        | Scoped backup timer                                                                    |
+| 16 | Backups / ObjectStore        | Storage                      | Consistent VACUUM INTO snapshot                                                        |
+| 17 | Backups / ObjectStore        | FFI SQLite binding           | Read-only quick_check of the snapshot copy before publication                          |
+| 18 | Backups / ObjectStore        | Object storage               | Verified snapshot and manifest publication                                             |
+| 19 | TenantRegistry               | Central registry             | Parameterized registry SQL; lazy scoped pool                                           |
+| 20 | Server lifecycle             | ReaderClient / ReaderProcess | Ping; hourly ingest; reader-exit watch and finalizer                                   |
+| 21 | ReaderClient / ReaderProcess | Reader child                 | JSONL RPC; scoped child shutdown                                                       |
+| 22 | Storage                      | Logger / EventSink           | SQL/tx/queue events                                                                    |
+| 23 | HTTP API / auth              | Logger / EventSink           | HTTP/handler spans and failures                                                        |
+| 24 | Server lifecycle             | Logger / EventSink           | Startup/shutdown and timer events                                                      |
+| 25 | Backups / ObjectStore        | Logger / EventSink           | Backup and object-transfer events                                                      |
+| 26 | Logger / EventSink           | Server JSONL                 | Batched append; rotation and scope drain                                               |
+| 27 | Config / IdGen               | AppRegistry / AppServices    | App schemas, tokens and paths; generated ids                                           |
+| 28 | Config / IdGen               | TenantRegistry               | DATABASE_URL and scope-owned cache                                                     |
+| 29 | Config / IdGen               | TenantStorageRouter          | TENANTS_DIR and router selection                                                       |
+| 30 | Config / IdGen               | Logger / EventSink           | Level, queue, flush and rotation settings                                              |
+| 31 | Config / IdGen               | FFI SQLite binding           | sqlite.library: the libsqlite3 path passed to every open                               |
+| 32 | AppRegistry / AppServices    | FFI SQLite binding           | Load libsqlite3 once at startup; sqlite-library lifecycle event names path and version |
+| 33 | FFI SQLite binding           | Application files            | libsqlite3 file I/O; WAL transactions and read-only snapshots                          |
 
 ## Runtime notes
 
@@ -111,4 +119,7 @@ handles, and shutdown drains leases before closing them. Retention and named ana
 never as server-side DuckDB components. Item 26 removes compatibility wrappers and platform/compiler.ts; pure
 compilation now lives in core/compile/ and introduces no new runtime component. HTTP status mapping lives in
 core/errors.ts. Better Auth connections are bounded to each request/CLI operation, separate from the lazy
-registry pool.
+registry pool. FFI-04: Storage, DocumentReaderClient, TenantStorageRouter and the backup verifier open SQLite
+only through the FFI binding, on Config.sqlite.library; node:sqlite is not in the server runtime graph
+(tests/unit/boundaries_test.ts). Startup loads libsqlite3 once and logs a lifecycle event, phase
+sqlite-library, with the resolved path and version.

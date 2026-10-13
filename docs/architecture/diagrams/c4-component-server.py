@@ -69,9 +69,9 @@ NODES = [('http',
   True),
  ('ffi',
   'FFI SQLite binding',
-  'Library; landed, unwired',
+  'Library in server process',
   'platform/sqlite_ffi/',
-  'System libsqlite3 via Deno.dlopen; sync + interruptible async; Effect layer (scoped open, 64-statement cache, typed errors). No caller yet; FFI-04 wires it',
+  'System libsqlite3 via Deno.dlopen; every server SQLite open goes through it (FFI-04), node:sqlite is not loaded. Blocking path with 64-statement cache in use; interruptible async API and statement deadline not used yet',
   True),
  ('logging',
   'Logger / EventSink',
@@ -83,7 +83,7 @@ NODES = [('http',
   'Config / IdGen',
   'Effect services',
   'platform/config.ts; platform/sqlite.ts',
-  'Validated options (incl. sqlite.*, parsed but unread); UUIDs; Clock',
+  'Validated options (sqlite.library read by every open; statement deadline and grace parsed but unread); UUIDs; Clock',
   True),
  ('pg',
   'Central registry',
@@ -121,16 +121,17 @@ EDGES = [('http', 'apps', 'Resolve app and named handler'),
  ('http', 'context', 'Provide authenticated tenant per request'),
  ('context', 'storage', 'Resolve tenant writer; never use caller selectors'),
  ('apps', 'route', 'Build per-app LocalFolderRouter'),
- ('route', 'files', 'Prepare validated SQLite capability and schema'),
+ ('route', 'ffi', 'Open and prepare validated tenant SQLite file; schema guard'),
  ('storage', 'route', 'Resolve/prepare tenant location before opening a cached writer'),
  ('http', 'storage', 'Mutation Effect inside serialized transaction'),
  ('http', 'docread', 'Document query in-process; compiled SQLite SQL'),
  ('docread', 'apps', 'Resolve registered query, schema and file'),
- ('docread', 'files', 'node:sqlite read-only connection and transaction'),
+ ('docread', 'ffi', 'Read-only connection and transaction; prepared-statement cache'),
  ('http', 'rpc', 'Ingest/analysis RPC; trace context'),
- ('storage', 'files', 'node:sqlite transaction and snapshot reads'),
+ ('storage', 'ffi', 'Writer connection, transactions and snapshot reads; blocking path'),
  ('life', 'backup', 'Scoped backup timer'),
  ('backup', 'storage', 'Consistent VACUUM INTO snapshot'),
+ ('backup', 'ffi', 'Read-only quick_check of the snapshot copy before publication'),
  ('backup', 'objects', 'Verified snapshot and manifest publication'),
  ('tenant', 'pg', 'Parameterized registry SQL; lazy scoped pool'),
  ('life', 'rpc', 'Ping; hourly ingest; reader-exit watch and finalizer'),
@@ -143,8 +144,11 @@ EDGES = [('http', 'apps', 'Resolve app and named handler'),
  ('config', 'apps', 'App schemas, tokens and paths; generated ids'),
  ('config', 'tenant', 'DATABASE_URL and scope-owned cache'),
  ('config', 'route', 'TENANTS_DIR and router selection'),
- ('config', 'logging', 'Level, queue, flush and rotation settings')]
-NOTES = 'Config is acquired before logging, then IdGen, ObjectStore/AppRegistry, TenantRegistry, AppServices\nand ReaderClient. Shutdown drains HTTP, stops timers, closes reader and DB handles, emits the final\nlifecycle event, then drains logging. Every partial startup releases acquired resources.\nAuth derives TenantContext before consuming app arguments; the tenant SQLite location is prepared\nbehind a shared initialization barrier. Tenant key revocation invalidates the local cache; other\ninstances converge within its TTL. Tenant-mode writers use a bounded scope-owned handle cache (default 64 handles, 60-second idle expiry);\nrequests lease handles, and shutdown drains leases before closing them.\nRetention and named analysis execute in the reader, never as server-side DuckDB components.\nItem 26 removes compatibility wrappers and platform/compiler.ts; pure compilation now lives in\ncore/compile/ and introduces no new runtime component. HTTP status mapping lives in core/errors.ts.\nBetter Auth connections are bounded to each request/CLI operation, separate from the lazy registry pool.'
+ ('config', 'logging', 'Level, queue, flush and rotation settings'),
+ ('config', 'ffi', 'sqlite.library: the libsqlite3 path passed to every open'),
+ ('apps', 'ffi', 'Load libsqlite3 once at startup; sqlite-library lifecycle event names path and version'),
+ ('ffi', 'files', 'libsqlite3 file I/O; WAL transactions and read-only snapshots')]
+NOTES = 'Config is acquired before logging, then IdGen, ObjectStore/AppRegistry, TenantRegistry, AppServices\nand ReaderClient. Shutdown drains HTTP, stops timers, closes reader and DB handles, emits the final\nlifecycle event, then drains logging. Every partial startup releases acquired resources.\nAuth derives TenantContext before consuming app arguments; the tenant SQLite location is prepared\nbehind a shared initialization barrier. Tenant key revocation invalidates the local cache; other\ninstances converge within its TTL. Tenant-mode writers use a bounded scope-owned handle cache (default 64 handles, 60-second idle expiry);\nrequests lease handles, and shutdown drains leases before closing them.\nRetention and named analysis execute in the reader, never as server-side DuckDB components.\nItem 26 removes compatibility wrappers and platform/compiler.ts; pure compilation now lives in\ncore/compile/ and introduces no new runtime component. HTTP status mapping lives in core/errors.ts.\nBetter Auth connections are bounded to each request/CLI operation, separate from the lazy registry pool.\nFFI-04: Storage, DocumentReaderClient, TenantStorageRouter and the backup verifier open SQLite only through\nthe FFI binding, on Config.sqlite.library; node:sqlite is not in the server runtime graph (tests/unit/boundaries_test.ts).\nStartup loads libsqlite3 once and logs a lifecycle event, phase sqlite-library, with the resolved path and version.'
 NAME = 'c4-component-server'
 
 
@@ -189,7 +193,7 @@ def mermaid():
 
 
 def document(github):
-    text = '# ' + TITLE + '\n\nAudited against landed main `643b706` on 2026-10-11 (item 27); updated for FFI-01 to FFI-03 at `182e85d`\non 2026-10-13. Both formats are generated from\n'
+    text = '# ' + TITLE + '\n\nAudited against landed main `643b706` on 2026-10-11 (item 27); updated for FFI-01 to FFI-04 at `51a5283`\non 2026-10-13. Both formats are generated from\n'
     text += '`diagrams/' + NAME + '.py`; numbered relationships are identical. All boxes describe landed code.\n\n'
     if github:
         text += '```mermaid\n' + mermaid() + '\n```\n'
