@@ -70,6 +70,14 @@ files through `tests/helpers/sqlite_inspect.ts` (`inspect(path)` read-only, `{ w
 side connections). `tests/unit/boundaries_test.ts` forbids `node:sqlite` anywhere under `platform/` and
 `tests/` except exact-path allow-lists, and walks both processes' runtime import graphs.
 
+Update 2026-10-13 (FFI-04 repair 1): an allow-list entry proves only that a file _may_ import `node:sqlite`,
+not that it keeps the drivers on separate files. The FFI-04 build allow-listed
+`tests/property/sqlite_oracle_test.ts` as "in-memory only", but its NUL regression held `Storage` (now the
+binding) on a temp file and opened the same file through `new DatabaseSync(file)` to write beneath it. Green
+tests did not show it; Astra found it by tracing each open's scope. When a cutover changes which driver a
+shared helper (`makeStorage`, a layer) uses, re-audit every `DatabaseSync(` in the allow-listed files: each
+must open `:memory:` or a path nothing else in the process opens, for the whole time it is open.
+
 ## `Deno.dlopen` and FFI `i64`: bigint in, bigint out
 
 Added 2026-10-13. On Deno 2.9.5 an `i64` FFI parameter's type is `bigint` only (a `number` fails `deno check`)
