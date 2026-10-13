@@ -1,6 +1,6 @@
 # Component — server process
 
-Audited against landed main `643b706` on 2026-10-11 (item 27); updated for FFI-01 to FFI-04 at `51a5283` on
+Audited against landed main `643b706` on 2026-10-11 (item 27); updated for FFI-01 to FFI-04b at `702c354` on
 2026-10-13. Both formats are generated from `diagrams/c4-component-server.py`; numbered relationships are
 identical. All boxes describe landed code.
 
@@ -65,7 +65,12 @@ identical. All boxes describe landed code.
 ╎  │ Deno.dlopen; every server    │   │ JSONL; final drain           │ ╎
 ╎  │ SQLite open goes through it  │   └──────────────────────────────┘ ╎
 ╎  │ (FFI-04), node:sqlite is not │                                    ╎
-╎  │ loaded. Blocking path with   │                                    ╎
+╎  │ loaded. Every open applies   │                                    ╎
+╎  │ node:sqlite-compatible       │                                    ╎
+╎  │ defaults (double-quoted      │                                    ╎
+╎  │ strings off, foreign keys    │                                    ╎
+╎  │ on); darwin/aarch64 refused. │                                    ╎
+╎  │ Blocking path with           │                                    ╎
 ╎  │ 64-statement cache in use;   │                                    ╎
 ╎  │ interruptible async API and  │                                    ╎
 ╎  │ statement deadline not used  │                                    ╎
@@ -165,4 +170,6 @@ core/errors.ts. Better Auth connections are bounded to each request/CLI operatio
 registry pool. FFI-04: Storage, DocumentReaderClient, TenantStorageRouter and the backup verifier open SQLite
 only through the FFI binding, on Config.sqlite.library; node:sqlite is not in the server runtime graph
 (tests/unit/boundaries_test.ts). Startup loads libsqlite3 once and logs a lifecycle event, phase
-sqlite-library, with the resolved path and version.
+sqlite-library, with the resolved path and version. FFI-04b: every FFI open, read-only included, applies
+node:sqlite-compatible connection defaults (double-quoted string literals off, foreign_keys on) before any
+caller SQL, and loadLibrary refuses darwin/aarch64.

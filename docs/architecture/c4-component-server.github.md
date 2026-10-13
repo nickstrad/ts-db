@@ -1,6 +1,6 @@
 # Component — server process
 
-Audited against landed main `643b706` on 2026-10-11 (item 27); updated for FFI-01 to FFI-04 at `51a5283` on
+Audited against landed main `643b706` on 2026-10-11 (item 27); updated for FFI-01 to FFI-04b at `702c354` on
 2026-10-13. Both formats are generated from `diagrams/c4-component-server.py`; numbered relationships are
 identical. All boxes describe landed code.
 
@@ -17,7 +17,7 @@ flowchart TB
         backup["Backups / ObjectStore<br/>[Effect services]<br/>platform/backup.ts; platform/object_store.ts<br/>Snapshot/hash/manifest; local or signed S3"]
         rpc["ReaderClient / ReaderProcess<br/>[Effect services]<br/>platform/ipc.ts; platform/layers.ts<br/>Scoped child for ingest/analysis; capped queue, deadline, trace"]
         docread["DocumentReaderClient<br/>[Effect service]<br/>platform/document_reader.ts<br/>In-process SQLite queries; read-only connection; concurrency cap 32"]
-        ffi["FFI SQLite binding<br/>[Library in server process]<br/>platform/sqlite_ffi/<br/>System libsqlite3 via Deno.dlopen; every server SQLite open goes through it (FFI-04), node:sqlite is not loaded. Blocking path with 64-statement cache in use; interruptible async API and statement deadline not used yet"]
+        ffi["FFI SQLite binding<br/>[Library in server process]<br/>platform/sqlite_ffi/<br/>System libsqlite3 via Deno.dlopen; every server SQLite open goes through it (FFI-04), node:sqlite is not loaded. Every open applies node:sqlite-compatible defaults (double-quoted strings off, foreign keys on); darwin/aarch64 refused. Blocking path with 64-statement cache in use; interruptible async API and statement deadline not used yet"]
         logging["Logger / EventSink<br/>[Effect logger/service]<br/>platform/logging/<br/>Dropping queue; batched JSONL; final drain"]
         config["Config / IdGen<br/>[Effect services]<br/>platform/config.ts; platform/sqlite.ts<br/>Validated options (sqlite.library read by every open; statement deadline and grace parsed but unread); UUIDs; Clock"]
     end
@@ -122,4 +122,6 @@ core/errors.ts. Better Auth connections are bounded to each request/CLI operatio
 registry pool. FFI-04: Storage, DocumentReaderClient, TenantStorageRouter and the backup verifier open SQLite
 only through the FFI binding, on Config.sqlite.library; node:sqlite is not in the server runtime graph
 (tests/unit/boundaries_test.ts). Startup loads libsqlite3 once and logs a lifecycle event, phase
-sqlite-library, with the resolved path and version.
+sqlite-library, with the resolved path and version. FFI-04b: every FFI open, read-only included, applies
+node:sqlite-compatible connection defaults (double-quoted string literals off, foreign_keys on) before any
+caller SQL, and loadLibrary refuses darwin/aarch64.

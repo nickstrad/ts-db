@@ -33,9 +33,9 @@ glow docs/architecture/c4-component-server.terminal.md
 
 ## Audited state
 
-These diagrams describe landed main `643b706`, audited on 2026-10-11 for item 27, plus the FFI-01 to FFI-04
-delta at `51a5283` (2026-10-13). The context and observability pairs are unchanged by FFI-01 to FFI-04: no new
-actor, external system, process, store or event-log surface. The earlier audit at `e423ed1` covered items
+These diagrams describe landed main `643b706`, audited on 2026-10-11 for item 27, plus the FFI-01 to FFI-04b
+delta at `702c354` (2026-10-13). The context and observability pairs are unchanged by FFI-01 to FFI-04b: no
+new actor, external system, process, store or event-log surface. The earlier audit at `e423ed1` covered items
 22/24/30–36; this refresh reads the landed changes since that snapshot, including items 23/25/26 and MT-01
 through MT-10. All four pairs change: request/auth context, central Postgres and CLI containers, tenant
 components, and connected analysis/k6 observability paths.
@@ -61,6 +61,7 @@ components, and connected analysis/k6 observability paths.
 | FFI-02      | `398be14`         | `sqliteLibrary`, `statementDeadlineMs`, `statementInterruptGraceMs` in Config; validated, not yet read by any service (Level 3 Config box and notes).                                                                                                                                                                                              |
 | FFI-03      | `182e85d`         | Effect layer in `platform/sqlite_ffi/` (scoped open, 64-statement cache, typed errors) and `Database.inTransaction`; still no importer, so the box stays edgeless (label updated).                                                                                                                                                                 |
 | FFI-04      | `51a5283`         | Storage, DocumentReaderClient, TenantStorageRouter and the backup verifier open SQLite through the binding on `Config.sqlite.library`; `node:sqlite` leaves the server runtime graph; startup `sqlite-library` lifecycle event. Level 3: the box gains edges (29 to 33 relationships) and the node:sqlite wording goes; Level 2: edge 3 and notes. |
+| FFI-04b     | `702c354`         | Binding-internal: every `Database.open` (read-only included) applies `node:sqlite`-compatible defaults (double-quoted strings off, `foreign_keys=ON`), and `loadLibrary` refuses darwin/aarch64. No new box, edge or process: Level 3 binding label and notes only; Level 2 and the context and observability pairs unchanged.                     |
 
 **Connected:** server layers, tenant auth/registry/routing when enabled, in-process SQLite document queries,
 reader ingest and named analysis, admin/hourly ingest-then-sweep, standalone logs/tenant/auth/migration CLIs,
