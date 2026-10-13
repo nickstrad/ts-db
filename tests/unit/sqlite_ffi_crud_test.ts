@@ -20,6 +20,7 @@ import {
   SqliteUsageError,
   SqliteValueError,
 } from "../../platform/sqlite_ffi/mod.ts";
+import { unsupportedPlatform } from "../../platform/sqlite_ffi/library.ts";
 
 /** Rows are null-prototype objects; compare them as plain records. */
 const plain = (row: Row | undefined) => row === undefined ? undefined : { ...row };
@@ -47,6 +48,20 @@ Deno.test("library: loads the system libsqlite3 and reports its version", () => 
   assert.ok(lib.versionNumber >= 3_037_000);
 });
 
+Deno.test("library: only Apple arm64 is refused for the fixed variadic db_config signature", () => {
+  assert.match(unsupportedPlatform("darwin", "aarch64") ?? "", /Apple arm64 variadic convention/);
+  for (
+    const [os, arch] of [["linux", "x86_64"], ["linux", "aarch64"], ["darwin", "x86_64"], [
+      "windows",
+      "x86_64",
+    ]]
+  ) {
+    assert.equal(unsupportedPlatform(os, arch), undefined, `${os}/${arch}`);
+  }
+  // The host running this suite must be one the binding supports.
+  assert.equal(unsupportedPlatform(Deno.build.os, Deno.build.arch), undefined);
+});
+
 Deno.test("library: a missing library fails SqliteLibraryError load-failed", () => {
   assert.throws(() => loadLibrary("/nonexistent/libsqlite3.so"), (e: unknown) => {
     assert.ok(e instanceof SqliteLibraryError);
@@ -55,6 +70,66 @@ Deno.test("library: a missing library fails SqliteLibraryError load-failed", () 
     return true;
   });
 });
+
+for (const readOnly of [false, true]) {
+  Deno.test(
+    `defaults: unknown quoted columns fail on a ${readOnly ? "read-only" : "read-write"} open`,
+    withDb((writer, dir) => {
+      writer.exec("CREATE TABLE t(id INTEGER PRIMARY KEY)");
+      using db = Database.open(join(dir, "t.db"), { readOnly });
+      for (const sql of ['SELECT "nope"', 'SELECT id FROM t WHERE "nope" = ?']) {
+        assert.throws(() => db.prepare(sql), (e: unknown) => {
+          assert.ok(e instanceof SqliteError);
+          assert.equal(e.op, "prepare");
+          assert.match(e.sqliteMessage, /no such column/);
+          return true;
+        });
+      }
+      assert.equal(db.prepare('SELECT "id" FROM t').get(), undefined);
+      assert.equal(db.prepare("SELECT 'nope' AS value").get()?.value, "nope");
+    }),
+  );
+
+  Deno.test(
+    `defaults: foreign keys enabled on a ${readOnly ? "read-only" : "read-write"} open`,
+    withDb((writer, dir) => {
+      // A setting on one connection must not determine the default on the next.
+      writer.exec("PRAGMA foreign_keys=OFF; CREATE TABLE t(id INTEGER PRIMARY KEY)");
+      using db = Database.open(join(dir, "t.db"), { readOnly });
+      assert.equal(db.prepare("PRAGMA foreign_keys").get()?.foreign_keys, 1);
+    }),
+  );
+}
+
+Deno.test(
+  "defaults: DDL rejects double-quoted string literals",
+  withDb((db) => {
+    assert.throws(() => db.exec('CREATE TABLE t(id INTEGER CHECK(id <> "nope"))'), (e: unknown) => {
+      assert.ok(e instanceof SqliteError);
+      assert.match(e.sqliteMessage, /no such column/);
+      return true;
+    });
+    db.exec('CREATE TABLE t("id" INTEGER CHECK("id" > 0))');
+  }),
+);
+
+Deno.test(
+  "defaults: orphan inserts fail with SQLITE_CONSTRAINT_FOREIGNKEY",
+  withDb((db) => {
+    db.exec("CREATE TABLE parent(id INTEGER PRIMARY KEY); CREATE TABLE child(id REFERENCES parent(id))");
+    const insert = db.prepare("INSERT INTO child VALUES (?)");
+    assert.throws(() => insert.run([1]), (e: unknown) => {
+      assert.ok(e instanceof SqliteError);
+      assert.equal(e.code, 19);
+      assert.equal(e.extendedCode, 787);
+      assert.equal(e.codeName, "SQLITE_CONSTRAINT_FOREIGNKEY");
+      return true;
+    });
+    assert.equal(db.prepare("SELECT count(*) AS n FROM child").get()?.n, 0);
+    db.exec("INSERT INTO parent VALUES (1)");
+    assert.equal(insert.run([1]).changes, 1);
+  }),
+);
 
 Deno.test(
   "crud (sync): insert, select, update, delete with positional and named parameters",

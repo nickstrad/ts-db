@@ -69,6 +69,8 @@ const SQLITE_TEXT = 3;
 const SQLITE_BLOB = 4;
 
 const SQLITE_STMTSTATUS_REPREPARE = 5;
+const SQLITE_DBCONFIG_DQS_DML = 1013;
+const SQLITE_DBCONFIG_DQS_DDL = 1014;
 
 const SQLITE_OPEN_READONLY = 0x1;
 const SQLITE_OPEN_READWRITE = 0x2;
@@ -424,9 +426,54 @@ export class Database {
       active: null,
       statements: new Set(),
     };
-    s.sqlite3_extended_result_codes(db, 1);
-    if (busyTimeoutMs > 0) s.sqlite3_busy_timeout(db, busyTimeoutMs);
-    return new Database(c, library);
+    const connection = new Database(c, library);
+    try {
+      // Match node:sqlite on every open, including read-only, before executing any SQL.
+      for (const verb of [SQLITE_DBCONFIG_DQS_DML, SQLITE_DBCONFIG_DQS_DDL]) {
+        const rc = s.sqlite3_db_config(db, verb, 0, null);
+        if (rc !== SQLITE_OK) {
+          // sqlite3_db_config does not set the connection's error state, so sqlite3_errmsg would
+          // read "not an error"; describe the returned code itself.
+          throw new SqliteError({
+            op: "open",
+            code: rc & 0xff,
+            extendedCode: rc,
+            codeName: codeName(rc),
+            sqliteMessage: readCString(s.sqlite3_errstr(rc)),
+          });
+        }
+      }
+      try {
+        connection.exec("PRAGMA foreign_keys=ON");
+      } catch (error) {
+        // The failure belongs to opening the connection, not to caller SQL. `exec` has already
+        // copied the native text into the error, so re-labelling reads nothing further.
+        if (error instanceof SqliteError && error.op !== "open") {
+          throw new SqliteError({
+            op: "open",
+            code: error.code,
+            extendedCode: error.extendedCode,
+            codeName: error.codeName,
+            sqliteMessage: error.sqliteMessage,
+            ...(error.sql === undefined ? {} : { sql: error.sql }),
+          });
+        }
+        throw error;
+      }
+      s.sqlite3_extended_result_codes(db, 1);
+      if (busyTimeoutMs > 0) s.sqlite3_busy_timeout(db, busyTimeoutMs);
+      return connection;
+    } catch (error) {
+      // Native error text is already copied. Nothing has escaped or reached a pool thread;
+      // release the handle without letting a cleanup failure replace the original throw.
+      c.open = false;
+      try {
+        s.sqlite3_close_v2(db);
+      } catch {
+        // Preserve the original failure, without inspecting or mutating a caller's exception.
+      }
+      throw error;
+    }
   }
 
   /** The path the connection was opened with. */
