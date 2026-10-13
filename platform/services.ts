@@ -348,9 +348,10 @@ export interface StorageService {
 }
 
 /**
- * Live: `StorageLive` (scoped `node:sqlite`). Test: `StorageTest` (in-memory doc store).
+ * Live: `StorageLive` (a scoped FFI SQLite connection, `platform/sqlite_ffi/`). Test: `StorageTest`
+ * (in-memory doc store).
  *
- * One layer instance per app: the writer owns a single `DatabaseSync` handle, so item 22 builds the
+ * One layer instance per app: the writer owns a single SQLite connection, so item 22 builds the
  * per-app stacks rather than passing an `appId` to every call.
  */
 export class Storage extends Context.Tag("ts-db/Storage")<Storage, StorageService>() {}

@@ -1,6 +1,5 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { Deferred, Effect, Either, Fiber, Option } from "effect";
 import { compileDDL } from "../../core/compile/ddl.ts";
@@ -17,6 +16,7 @@ import {
 } from "../../platform/document_reader.ts";
 import { type App, EventSink, type ReaderRequest } from "../../platform/services.ts";
 import { defineFunctions } from "../../sdk/functions.ts";
+import { inspect } from "../helpers/sqlite_inspect.ts";
 
 function right<A, E>(value: Either.Either<A, E>): A {
   assert.ok(Either.isRight(value));
@@ -36,12 +36,12 @@ const game = {
 test("document execution is capped, queued reads are interruptible, and health pings stay responsive", async () => {
   const root = await Deno.makeTempDir({ prefix: "sp05-concurrency-" });
   const file = join(root, "app.sqlite");
-  const writer = new DatabaseSync(file);
+  const writer = inspect(file, { write: true });
   try {
     writer.exec("PRAGMA journal_mode=WAL");
     for (const ddl of right(compileDDL(schema))) writer.exec(ddl);
     const insert = right(compileInsert(schema, "games", game, { _id: "game-1", _creationTime: 1 }));
-    writer.prepare(insert.text).run(...insert.values);
+    writer.run(insert.text, insert.values);
     await Effect.runPromise(
       Effect.scoped(Effect.gen(function* () {
         const full = yield* Deferred.make<void>();
@@ -145,7 +145,7 @@ for (const tenancy of ["off", "api-key"] as const) {
         functions,
         token: "test",
       };
-      const writer = new DatabaseSync(file);
+      const writer = inspect(file, { write: true });
       try {
         writer.exec("PRAGMA journal_mode=WAL");
         for (const ddl of right(compileDDL(app.schema))) writer.exec(ddl);
@@ -154,7 +154,7 @@ for (const tenancy of ["off", "api-key"] as const) {
             ...game,
             xPlayer: i === 3 ? "céline 😀" : "alice",
           }, { _id: `game-${i}`, _creationTime: i }));
-          writer.prepare(insert.text).run(...insert.values);
+          writer.run(insert.text, insert.values);
         }
         const requests: ReaderRequest[] = [
           { kind: "query", appId, name: "getGame", args: { gameId: "game-1" } },
@@ -291,7 +291,7 @@ test("document read-only open does not create a missing database", async () => {
 test("document deadline expires the context, closes the reader, and releases admission", async () => {
   const root = await Deno.makeTempDir({ prefix: "sp02-deadline-" });
   const file = join(root, "app.sqlite");
-  const writer = new DatabaseSync(file);
+  const writer = inspect(file, { write: true });
   try {
     writer.exec("PRAGMA journal_mode=WAL");
     for (const ddl of right(compileDDL(schema))) writer.exec(ddl);
@@ -327,7 +327,7 @@ test("document deadline expires the context, closes the reader, and releases adm
           }),
           null,
         );
-        assert.equal(writer.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get()?.busy, 0);
+        assert.equal(writer.get("PRAGMA wal_checkpoint(TRUNCATE)")?.busy, 0);
       }).pipe(
         Effect.provide(ConfigTest({ reader: { callTimeoutMs: 50 } })),
         Effect.provide(AppRegistryTest([app])),

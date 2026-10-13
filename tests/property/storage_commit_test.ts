@@ -2,8 +2,8 @@
  * Property tests for the transaction commit path of the `Storage` service (plan item 15).
  *
  * Every property runs against `StorageTest` (the item-20 in-memory double: fast, and kept honest by
- * the conformance suite in `tests/core_test.ts`) and against `StorageLive` (real `node:sqlite` over a
- * temp file, `BEGIN IMMEDIATE` … `COMMIT` / `ROLLBACK`):
+ * the conformance suite in `tests/core_test.ts`) and against `StorageLive` (real SQLite through the
+ * FFI binding over a temp file, `BEGIN IMMEDIATE` … `COMMIT` / `ROLLBACK`):
  *
  * 1. **Atomicity.** A random sequence of batches, each a random list of document operations (insert,
  *    increment the counter, edit or delete an item) with an optional injected failure at a random

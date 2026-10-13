@@ -10,7 +10,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { inspect } from "../helpers/sqlite_inspect.ts";
 
 const ADMIN = "admin-token";
 const COLUMNS = { id: "tic-tac-toe", token: "columns-token", storage: "columns" } as const;
@@ -125,12 +125,10 @@ test(
       assert.equal(status.code, 0, await stderr);
 
       // Every acknowledged mutation is durable; the file is consistent; nothing is half-written.
-      const db = new DatabaseSync(join(env.DATA_DIR, `${COLUMNS.id}.sqlite`), { readOnly: true });
+      const db = inspect(join(env.DATA_DIR, `${COLUMNS.id}.sqlite`));
       try {
-        assert.equal((db.prepare("PRAGMA quick_check").get() as { quick_check: string }).quick_check, "ok");
-        const ids = new Set(
-          (db.prepare("SELECT _id FROM games").all() as { _id: string }[]).map((row) => row._id),
-        );
+        assert.equal(db.get("PRAGMA quick_check")?.quick_check, "ok");
+        const ids = new Set(db.all("SELECT _id FROM games").map((row) => row._id as string));
         for (const id of acknowledged) assert.ok(ids.has(id), `acknowledged game ${id} was lost`);
         assert.ok(ids.size >= acknowledged.length + traceIds.length);
         assert.ok(ids.size <= burst.length + traceIds.length);

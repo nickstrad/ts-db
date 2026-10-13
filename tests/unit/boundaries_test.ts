@@ -6,7 +6,12 @@
  * - no file in `core/` imports `platform/`, `sdk/`, `node:*` or `npm:*`, or references `Deno.`;
  * - no `console.*` outside `platform/logging/` (documented degradation path) and `scripts/`;
  * - no `Deno.env` outside `platform/config.ts`;
- * - `platform/duckdb.ts` and `platform/reader.ts` never mention `node:sqlite`;
+ * - nothing under `platform/` mentions `node:sqlite` (FFI-04; it replaced "`platform/duckdb.ts` and
+ *   `platform/reader.ts` never mention `node:sqlite`"), except the FFI binding's own prose, listed
+ *   by exact path, which may contrast the binding with that driver but never import it;
+ * - nothing under `tests/` mentions `node:sqlite`, except an explicit, exact-path allow-list (below);
+ * - neither process's runtime module graph (`platform/server.ts`, `platform/reader.ts`) reaches
+ *   `node:sqlite`;
  * - `platform/sqlite.ts` never mentions `@duckdb/node-api`;
  * - no `throw new Error` in `core/` or `platform/` (errors go through the tagged channel).
  *
@@ -18,6 +23,11 @@
  *   non-shipped trees out, rather than failing on them.
  * - Comments are stripped before scanning, so prose about a boundary (e.g. "the pre-port
  *   `platform/compiler.ts`") is not flagged; string literals are kept, so import specifiers are.
+ *   The `node:sqlite` rules are the exception: they read raw text, comments included, every file
+ *   type, because one process must never open a file through two SQLite copies (FFI plan §1.2,
+ *   `docs/knowledge/gotchas.md`), and a comment that names the old driver is either stale or
+ *   explains an exemption that belongs on a list. An allow-list entry that no longer mentions the
+ *   driver fails too, so the lists only change by a visible diff.
  */
 import assert from "node:assert/strict";
 import { join } from "node:path";
@@ -25,15 +35,20 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 
-/** All `.ts` files under `dir`, recursively, as repo-relative paths. */
-async function tsFiles(dir: string): Promise<string[]> {
+/** All files under `dir` whose name passes `keep`, recursively, as repo-relative paths. */
+async function filesUnder(dir: string, keep: (name: string) => boolean): Promise<string[]> {
   const out: string[] = [];
   for await (const entry of Deno.readDir(join(ROOT, dir))) {
     const rel = join(dir, entry.name);
-    if (entry.isDirectory) out.push(...await tsFiles(rel));
-    else if (entry.isFile && entry.name.endsWith(".ts")) out.push(rel);
+    if (entry.isDirectory) out.push(...await filesUnder(rel, keep));
+    else if (entry.isFile && keep(entry.name)) out.push(rel);
   }
   return out.sort();
+}
+
+/** All `.ts` files under `dir`, recursively, as repo-relative paths. */
+function tsFiles(dir: string): Promise<string[]> {
+  return filesUnder(dir, (name) => name.endsWith(".ts"));
 }
 
 const sources = new Map<string, string>();
@@ -166,12 +181,135 @@ Deno.test("boundaries: no Deno.env in the shipped library outside platform/confi
   assert.deepEqual(bad, []);
 });
 
-Deno.test("boundaries: the DuckDB side never mentions node:sqlite", async () => {
+// ---------------------------------------------------------------------------
+// One SQLite copy per process: node:sqlite (FFI-04)
+// ---------------------------------------------------------------------------
+
+const NODE_SQLITE = "node:sqlite";
+
+/**
+ * Files under `platform/` that may name `node:sqlite` in prose, never import it: the FFI binding's
+ * own documentation, which explains the binding by contrast with that driver (its cost, its NUL
+ * truncation, the two-copies rule). `platform/sqlite_ffi/` belongs to FFI-01/FFI-03, so FFI-04
+ * exempts these by exact path instead of rewording them.
+ */
+const PLATFORM_PROSE_ONLY: readonly string[] = [
+  "platform/sqlite_ffi/README.md",
+  "platform/sqlite_ffi/database.ts",
+  "platform/sqlite_ffi/effect.ts",
+  "platform/sqlite_ffi/library.ts",
+  "platform/sqlite_ffi/mod.ts",
+];
+
+/**
+ * Files under `tests/` that may import `node:sqlite`. Each uses it only on databases nothing else
+ * in the process opens: `:memory:` or its own temp files, never a file a server, `Storage` or the
+ * document reader has open.
+ * - The two oracle suites: a different SQLite build is a better oracle than the one under test.
+ * - The binding's own suites: `node:sqlite` is their parity and behaviour oracle (coordinator
+ *   ruling at FFI-04 dispatch).
+ */
+const TESTS_MAY_IMPORT: readonly string[] = [
+  "tests/property/json_number_test.ts",
+  "tests/property/sqlite_oracle_test.ts",
+  "tests/unit/sqlite_ffi_effect_test.ts",
+  "tests/unit/sqlite_ffi_perf_test.ts",
+];
+
+/**
+ * Files under `tests/` that may name `node:sqlite` without importing it.
+ * - This file: it states the rule.
+ * - `tests/unit/eventlog_test.ts`: asserts the event-log modules never contain the specifier.
+ * - `tests/integration.ts`, `tests/property/decode_test.ts`: prose only; outside FFI-04's files, so
+ *   listed here rather than reworded (a later docs pass can shrink the list).
+ */
+const TESTS_MAY_NAME: readonly string[] = [
+  "tests/integration.ts",
+  "tests/property/decode_test.ts",
+  "tests/unit/boundaries_test.ts",
+  "tests/unit/eventlog_test.ts",
+];
+
+/** Whether `rel`'s code (comments stripped; `.ts` only) imports `node:sqlite`. */
+function importsNodeSqlite(rel: string, src: string): boolean {
+  return rel.endsWith(".ts") && importSpecifiers(noComments(src)).includes(NODE_SQLITE);
+}
+
+/**
+ * Every file under `dir` that mentions `node:sqlite` (raw text) but is not allowed to, every allowed
+ * file that imports it without being allowed to import, and every list entry that no longer
+ * mentions it (or no longer exists).
+ */
+async function nodeSqliteViolations(
+  dir: string,
+  mayImport: readonly string[],
+  mayName: readonly string[],
+): Promise<string[]> {
   const bad: string[] = [];
-  for (const rel of ["platform/duckdb.ts", "platform/reader.ts"]) {
-    if ((await load(rel)).includes("node:sqlite")) bad.push(rel);
+  const files = await filesUnder(dir, () => true);
+  for (const rel of files) {
+    const src = await load(rel);
+    if (!src.includes(NODE_SQLITE)) continue;
+    if (mayImport.includes(rel)) continue;
+    if (!mayName.includes(rel)) bad.push(`${rel}: mentions ${NODE_SQLITE}`);
+    else if (importsNodeSqlite(rel, src)) bad.push(`${rel}: imports ${NODE_SQLITE} (listed as prose only)`);
   }
-  assert.deepEqual(bad, []);
+  for (const rel of [...mayImport, ...mayName]) {
+    if (!files.includes(rel)) bad.push(`${rel}: listed, but no such file`);
+    else if (!(await load(rel)).includes(NODE_SQLITE)) bad.push(`${rel}: listed, but no longer mentions it`);
+  }
+  return bad;
+}
+
+Deno.test("boundaries: nothing under platform/ mentions node:sqlite, except the binding's prose", async () => {
+  assert.deepEqual(await nodeSqliteViolations("platform", [], PLATFORM_PROSE_ONLY), []);
+});
+
+Deno.test("boundaries: nothing under tests/ mentions node:sqlite, except the exact-path allow-list", async () => {
+  assert.deepEqual(await nodeSqliteViolations("tests", TESTS_MAY_IMPORT, TESTS_MAY_NAME), []);
+});
+
+/** Every specifier `entry` reaches at runtime (`deno info --json`, dynamic imports included). */
+async function runtimeGraph(entry: string): Promise<Set<string>> {
+  const { stdout, code } = await new Deno.Command(Deno.execPath(), {
+    args: ["info", "--json", entry],
+    cwd: ROOT,
+    stdout: "piped",
+    stderr: "inherit",
+  }).output();
+  assert.equal(code, 0, `deno info ${entry}`);
+  type Dependency = { code?: { specifier?: string } };
+  const graph = JSON.parse(new TextDecoder().decode(stdout)) as {
+    roots: string[];
+    modules: { specifier: string; dependencies?: Dependency[] }[];
+  };
+  const bySpecifier = new Map(graph.modules.map((module) => [module.specifier, module]));
+  const reached = new Set<string>();
+  const pending = [...graph.roots];
+  while (pending.length > 0) {
+    const specifier = pending.pop()!;
+    if (reached.has(specifier)) continue;
+    reached.add(specifier);
+    for (const dependency of bySpecifier.get(specifier)?.dependencies ?? []) {
+      if (dependency.code?.specifier) pending.push(dependency.code.specifier);
+    }
+  }
+  return reached;
+}
+
+Deno.test("boundaries: neither process's runtime module graph reaches node:sqlite", async () => {
+  const local = (rel: string) => new URL(rel, `file://${ROOT}`).href;
+  // Each walk must reach the module that proves it walked the right graph, or it proves nothing.
+  for (
+    const [entry, witness] of [
+      ["platform/server.ts", "platform/sqlite_ffi/database.ts"],
+      ["platform/reader.ts", "platform/duckdb.ts"],
+    ] as const
+  ) {
+    const reached = await runtimeGraph(entry);
+    assert.ok(reached.has(local(witness)), `${entry}: the walk never reached ${witness}; it is broken`);
+    assert.equal(reached.has(NODE_SQLITE), false, `${entry} reaches ${NODE_SQLITE} at runtime`);
+  }
 });
 
 Deno.test("boundaries: the SQLite side never mentions @duckdb/node-api", async () => {

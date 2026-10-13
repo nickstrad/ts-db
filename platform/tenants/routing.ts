@@ -6,12 +6,17 @@
  * Locations are capabilities issued by resolve, not user-supplied paths. The SQLite capability
  * opens synchronously after rechecking containment and symlinks, including SQLite sidecars.
  * The configured directory must be owned by the server (not writable by untrusted local users):
- * node:sqlite cannot open a prevalidated fd, so no path API can defeat a hostile local rename race.
+ * SQLite opens by path (`sqlite3_open_v2` takes no file descriptor), so a prevalidated fd cannot be
+ * handed to it, and no path API can defeat a hostile local rename race.
+ *
+ * Connections are the FFI binding's (`platform/sqlite_ffi/`), on the library `Config.sqlite.library`
+ * names, the same one `Storage` and the document reader use: one process never opens a file through
+ * two SQLite copies.
  */
 import { Context, Effect, Either, Layer } from "effect";
 import { closeSync, constants, lstatSync, mkdirSync, openSync, realpathSync } from "node:fs";
 import { dirname, join, resolve as absolute } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { Database } from "../sqlite_ffi/mod.ts";
 import { compileDDL } from "../../core/compile/ddl.ts";
 import type { Schema } from "../../core/schema.ts";
 import { StorageError, type TenantError, UnknownTenant } from "../../core/errors.ts";
@@ -25,8 +30,11 @@ export type StorageLocation = {
   readonly [locationBrand]: true;
   readonly _tag: "SqliteFile";
   readonly path: string;
-  /** Driver capability; checks the location again in the same synchronous step as open. */
-  readonly open: () => DatabaseSync;
+  /**
+   * Driver capability: a read-write FFI connection, opened in the same synchronous step as the
+   * location's re-check. The caller owns it and closes it.
+   */
+  readonly open: () => Database;
 };
 
 export interface TenantStorageRouterService {
@@ -45,8 +53,15 @@ export class TenantContext extends Context.Tag("ts-db/TenantContext")<
   { readonly tenantId: TenantId }
 >() {}
 
-/** No I/O until prepare/open; resolve only validates and constructs a deterministic location. */
-export function makeLocalFolderRouter(tenantsDir: string, schema: Schema): TenantStorageRouterService {
+/**
+ * No I/O until prepare/open; resolve only validates and constructs a deterministic location.
+ * `libraryPath` is `Config.sqlite.library` (absent: the binding's default list).
+ */
+export function makeLocalFolderRouter(
+  tenantsDir: string,
+  schema: Schema,
+  libraryPath?: string,
+): TenantStorageRouterService {
   const root = absolute(tenantsDir);
   const issued = new WeakSet<StorageLocation>();
   const locations = new Map<TenantId, StorageLocation>();
@@ -102,7 +117,7 @@ export function makeLocalFolderRouter(tenantsDir: string, schema: Schema): Tenan
           path,
           open: () => {
             check(path);
-            return new DatabaseSync(path);
+            return Database.open(path, { libraryPath });
           },
         });
         issued.add(location);
@@ -131,11 +146,12 @@ export function makeLocalFolderRouter(tenantsDir: string, schema: Schema): Tenan
               throw new StorageError({ operation: "open", detail: "Schema/storage changed" });
             }
             for (const sql of ddl.right) db.exec(sql);
-            if (!existing) db.prepare('INSERT INTO "_platform_schema" VALUES (1, ?)').run(fingerprint);
+            if (!existing) db.prepare('INSERT INTO "_platform_schema" VALUES (1, ?)').run([fingerprint]);
             db.exec("COMMIT");
           } finally {
+            // A short-lived connection on the blocking path: `close` finalizes the statements above.
             try {
-              if (db.isTransaction) db.exec("ROLLBACK");
+              if (db.inTransaction) db.exec("ROLLBACK");
             } finally {
               db.close();
             }
@@ -152,8 +168,8 @@ export const LocalFolderRouter = (schema: Schema): Layer.Layer<TenantStorageRout
   Layer.effect(
     TenantStorageRouter,
     Effect.gen(function* () {
-      const { tenancy } = yield* Config;
+      const { tenancy, sqlite } = yield* Config;
       if (tenancy.router !== "local") return yield* new UnknownTenant({});
-      return makeLocalFolderRouter(tenancy.tenantsDir, schema);
+      return makeLocalFolderRouter(tenancy.tenantsDir, schema, sqlite.library);
     }),
   );

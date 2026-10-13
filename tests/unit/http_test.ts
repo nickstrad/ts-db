@@ -12,7 +12,6 @@ import { UnusedTenantRegistry } from "../layers/tenant_registry_test_layer.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { Context, Deferred, Effect, Exit, Fiber, Layer, Option, Ref, type Scope, TestContext } from "effect";
 import {
   HandlerKindMismatch,
@@ -57,6 +56,7 @@ import {
   type TestEvents,
 } from "../layers/index.ts";
 import { functions } from "../../app/functions.ts";
+import { inspect } from "../helpers/sqlite_inspect.ts";
 
 // ===========================================================================
 // The in-process platform
@@ -86,7 +86,7 @@ class ReaderFault
 
 /** A real SQLite file, so `BackupsLive`'s `quick_check` has something to check. */
 function writeValidSnapshot(path: string): void {
-  const db = new DatabaseSync(path);
+  const db = inspect(path, { write: true });
   try {
     db.exec("CREATE TABLE t (v TEXT)");
   } finally {

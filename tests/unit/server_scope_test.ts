@@ -31,10 +31,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DatabaseSync } from "node:sqlite";
 import { Cause, Deferred, Duration, Effect, Exit, Option } from "effect";
 import type { StartupStep } from "../../platform/layers.ts";
 import { makeServer, type ServerOptions } from "../../platform/server.ts";
+import { inspect } from "../helpers/sqlite_inspect.ts";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 const ADMIN = "admin-token";
@@ -381,7 +381,7 @@ test(
   { timeout: 60_000 },
   () =>
     inProcess("app-open", async (s) => {
-      // A directory where the second app's SQLite file should be: `DatabaseSync` cannot open it.
+      // A directory where the second app's SQLite file should be: SQLite cannot open it.
       await Deno.mkdir(join(s.dataDir, `${JSON_APP.id}.sqlite`), { recursive: true });
       const exit = await runServer({ stop: Deferred.make<string>() });
       const failure = failureOf(exit);
@@ -565,10 +565,10 @@ async function assertDrained(
   assert.equal(records[event].status, 200);
   assert.ok(at(records, "stopping") < event, "the held request finished before the stop");
   assert.ok(event < at(records, "http-drained"), "the drain finished before the held request");
-  const db = new DatabaseSync(file, { readOnly: true });
+  const db = inspect(file);
   try {
-    assert.equal((db.prepare("PRAGMA quick_check").get() as { quick_check: string }).quick_check, "ok");
-    assert.ok(db.prepare("SELECT 1 FROM games WHERE _id = ?").get(gameId), `held game ${gameId} was lost`);
+    assert.equal(db.get("PRAGMA quick_check")?.quick_check, "ok");
+    assert.ok(db.get("SELECT 1 FROM games WHERE _id = ?", [gameId]), `held game ${gameId} was lost`);
   } finally {
     db.close();
   }

@@ -21,7 +21,6 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { DuckDBInstance } from "@duckdb/node-api";
 import { AwsClient } from "aws4fetch";
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Option } from "effect";
@@ -55,6 +54,7 @@ import {
 import { StorageLive } from "../../platform/sqlite.ts";
 import { schema } from "../../app/schema.ts";
 import { functions } from "../../app/functions.ts";
+import { inspect } from "../helpers/sqlite_inspect.ts";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -65,10 +65,10 @@ const dec = new TextDecoder();
 
 /** Writes a tiny, valid, standalone SQLite database at `path`. */
 function writeValidSnapshot(path: string, marker = "snapshot"): void {
-  const db = new DatabaseSync(path);
+  const db = inspect(path, { write: true });
   try {
     db.exec("CREATE TABLE t (v TEXT)");
-    db.prepare("INSERT INTO t (v) VALUES (?)").run(marker);
+    db.run("INSERT INTO t (v) VALUES (?)", [marker]);
   } finally {
     db.close();
   }
@@ -249,14 +249,11 @@ test("BackupsLive over real Storage + local ObjectStore: ordered puts, restorabl
     const restored = join(dir, "restored.sqlite");
     await Deno.writeFile(restored, object);
     integrityCheck(restored);
-    const db = new DatabaseSync(restored, { readOnly: true });
+    const db = inspect(restored);
     try {
-      const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((r) =>
-        r.name
-      );
+      const tables = db.all("SELECT name FROM sqlite_master WHERE type = 'table'").map((r) => r.name);
       assert.ok(tables.length > 0);
-      const games = db.prepare(`SELECT count(*) AS n FROM ${tables.find((t) => String(t).includes("games"))}`)
-        .get();
+      const games = db.get(`SELECT count(*) AS n FROM ${tables.find((t) => String(t).includes("games"))}`);
       assert.equal(games?.n, 1);
     } finally {
       db.close();

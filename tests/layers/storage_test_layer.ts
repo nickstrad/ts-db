@@ -62,7 +62,7 @@
  * filed here because the oracle's generators never produce a lone surrogate. It keeps its old number,
  * 3, because `tests/core_test.ts` pins it as "known divergence 3".
  *
- * 3. Text containing a lone surrogate (e.g. `"a\uD800b"`): `node:sqlite` binds strings as UTF-8,
+ * 3. Text containing a lone surrogate (e.g. `"a\uD800b"`): the live driver binds strings as UTF-8,
  *    which replaces it with U+FFFD. In the `columns` layout a scalar text column reads back as
  *    `"a�b"` (and `eq "a\uD800b"` still matches, since the bound filter is replaced the same way);
  *    array fields are stored there as JSON text, where `JSON.stringify` escapes it as `\ud800`, so
@@ -104,7 +104,7 @@ import { Documents, type Operation, type SelectPlan } from "../../sdk/db.ts";
 import type { AnyDefinition } from "../../sdk/functions.ts";
 import { IdGen, Storage, type StorageService } from "../../platform/services.ts";
 
-/** Jobs admitted to the writer queue at once. `platform/sqlite.ts`'s `WRITER_QUEUE_CAP`, not imported: that module loads `node:sqlite`. */
+/** Jobs admitted to the writer queue at once. `platform/sqlite.ts`'s `WRITER_QUEUE_CAP`, not imported: that module loads the FFI SQLite binding. */
 export const WRITER_QUEUE_CAP = 1000;
 
 // ===========================================================================
@@ -468,7 +468,7 @@ export function makeStorageTest(
             new StorageError({
               operation: "select",
               table: plan.table,
-              detail: `Stored text in "${column}" contains U+0000, which node:sqlite truncates on read`,
+              detail: `Stored text in "${column}" contains U+0000, which the text storage contract rejects`,
             }),
           );
         }

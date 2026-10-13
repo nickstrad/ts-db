@@ -5,8 +5,8 @@
  * Every test is an effect run by `tests/helpers/run.ts`'s `runTest` under `node:test`, with the
  * in-memory `TestLayer` (ids, events, object store, `TestClock`, config) provided.
  *
- * - The storage-dependent originals run against the real `StorageLive` over a real `node:sqlite`
- *   file: competing moves, rollback, quoting, WAL snapshots and schema drift are what only the real
+ * - The storage-dependent originals run against the real `StorageLive` over a real SQLite file
+ *   (the FFI binding, `platform/sqlite_ffi/`): competing moves, rollback, quoting, WAL snapshots and schema drift are what only the real
  *   driver can show. Argument validation runs against `StorageTest`; the compiler tests are pure.
  * - The conformance suite runs one scripted sequence against `StorageLive` and against
  *   `StorageTest`, in both physical layouts, and asserts deep equality of every step's outcome and
@@ -26,7 +26,6 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { Cause, Deferred, Effect, Either, Exit, Fiber, Option, TestClock } from "effect";
 import {
   CompileError,
@@ -61,6 +60,7 @@ import { schema } from "../app/schema.ts";
 import { functions } from "../app/functions.ts";
 import type { ArgsOf, Names, ResultOf } from "../sdk/functions.ts";
 import { runTest } from "./helpers/run.ts";
+import { inspect as inspectFile } from "./helpers/sqlite_inspect.ts";
 import {
   DocumentStoreTest,
   evaluateSelect,
@@ -85,7 +85,7 @@ const T0 = 1_700_000_000_000;
 
 /** `StorageLive` needs a real file. Under `--deny-write` (the fast, layer-only run) those tests skip. */
 const LIVE = Deno.permissions.querySync({ name: "write" }).state === "granted";
-const needsSqlite = LIVE ? false : "needs write permission for a real node:sqlite file";
+const needsSqlite = LIVE ? false : "needs write permission for a real SQLite file";
 
 /** A temp directory, removed when the test's scope closes (after the storage handle, which opens later). */
 const tempDir = Effect.acquireRelease(
@@ -311,10 +311,10 @@ for (const layout of ["columns", "json"] as const) {
       assert.ok(existsSync(`${file}-wal`) && statSync(`${file}-wal`).size > 0);
       const backup = join(dir, "backup.sqlite");
       yield* storage.snapshot(backup);
-      const db = new DatabaseSync(backup, { readOnly: true });
+      const db = inspectFile(backup);
       try {
-        assert.equal(db.prepare("SELECT COUNT(*) AS n FROM games").get()!.n, 1);
-        assert.equal(db.prepare("PRAGMA quick_check").get()!.quick_check, "ok");
+        assert.equal(db.get("SELECT COUNT(*) AS n FROM games")!.n, 1);
+        assert.equal(db.get("PRAGMA quick_check")!.quick_check, "ok");
       } finally {
         db.close();
       }
@@ -478,7 +478,7 @@ type Outcome =
 
 /**
  * A typed error, as its tag plus its structured fields. `cause` is dropped: on the live side it
- * holds the `node:sqlite` exception object, which the double has no equivalent of.
+ * holds the SQLite binding's error object, which the double has no equivalent of.
  *
  * A `StorageError` also drops `detail`, keeping only `operation` and `table`. Its live `detail` is
  * the driver's message text (SQLite's wording, e.g. `UNIQUE constraint failed: items._id`), which

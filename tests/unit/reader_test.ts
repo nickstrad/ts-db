@@ -2,15 +2,16 @@
  * Unit tests for the `Reader` service and the reader process (plan item 16).
  *
  * **Two processes, on purpose.** `deno task test` runs every test module in one OS process, and the
- * regression and property suites load `node:sqlite` there. DuckDB's `sqlite` extension is a second
- * copy of the SQLite library, and the two must never share an address space — the rule that makes
- * the reader a separate process in production applies to tests as well. So this module has two
- * halves, selected by `TS_DB_READER_FIXTURE`:
+ * regression and property suites load the writer's SQLite there (the FFI binding over the system
+ * `libsqlite3`). DuckDB's `sqlite` extension is a second copy of the SQLite library, and the two must
+ * never share an address space — the rule that makes the reader a separate process in production
+ * applies to tests as well. So this module has two halves, selected by `TS_DB_READER_FIXTURE`:
  *
  * - **Parent** (the variable is unset): never loads DuckDB. It writes the SQLite fixture files with
- *   `node:sqlite` and the pure compiler, then (1) runs this same module again as a child `deno test`
- *   pointed at the fixture, and (2) drives the real `platform/reader.ts` over stdin/stdout.
- * - **Child** (the variable names the fixture directory): never loads `node:sqlite`. It exercises
+ *   the FFI binding (`tests/helpers/sqlite_inspect.ts`) and the pure compiler, then (1) runs this
+ *   same module again as a child `deno test` pointed at the fixture, and (2) drives the real
+ *   `platform/reader.ts` over stdin/stdout.
+ * - **Child** (the variable names the fixture directory): never loads the writer's SQLite. It exercises
  *   `ReaderLive` in-process against real DuckDB, with a probe driver recording the order native
  *   handles are opened and closed in.
  *
@@ -60,19 +61,19 @@ const GAME = {
 
 /** Writes both apps' SQLite files the way `loadApps` names them, each holding one game. */
 async function writeFixture(dir: string): Promise<void> {
-  const { DatabaseSync } = await import("node:sqlite");
+  const { inspect } = await import("../helpers/sqlite_inspect.ts");
   const layouts = [
     ["tic-tac-toe.sqlite", schema],
     ["tic-tac-toe-json.sqlite", withStorage(schema, "json")],
   ] as const;
   for (const [file, layout] of layouts) {
-    const db = new DatabaseSync(join(dir, file));
+    const db = inspect(join(dir, file), { write: true });
     try {
       for (const statement of expectRight(compileDDL(layout))) db.exec(statement);
       const insert = expectRight(
         compileInsert(layout, "games", GAME, { _id: "game-1", _creationTime: 1 }),
       );
-      db.prepare(insert.text).run(...insert.values);
+      db.run(insert.text, insert.values);
     } finally {
       db.close();
     }
@@ -122,7 +123,7 @@ async function runReader(dataDir: string, logDir: string, input: string) {
 }
 
 if (fixture === undefined) {
-  test("Reader service suite passes in its own process (DuckDB never shares one with node:sqlite)", async () => {
+  test("Reader service suite passes in its own process (DuckDB never shares one with the writer's SQLite)", async () => {
     await withFixture(async (dir) => {
       const output = await new Deno.Command(Deno.execPath(), {
         args: ["test", "-A", "--no-check", fileURLToPath(import.meta.url)],
@@ -276,7 +277,7 @@ if (fixture === undefined) {
 }
 
 // ===========================================================================
-// Child half: real DuckDB, no node:sqlite
+// Child half: real DuckDB, no writer SQLite
 // ===========================================================================
 
 if (fixture !== undefined) {
