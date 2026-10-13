@@ -12,6 +12,12 @@ Deno FFI to the system `libsqlite3`. Three layers:
 `mod.ts` re-exports all four. `database.ts`'s module comment is the execution contract: one execution per
 connection (others fail `"busy"`), executions run to completion and reset, explicit lifetimes.
 
+Connection defaults match `node:sqlite`: every `Database.open`, including read-only opens, disables
+double-quoted string literals for both DML and DDL with `sqlite3_db_config` and enables foreign-key
+enforcement with `PRAGMA foreign_keys=ON`. These run once before any caller SQL; an unknown quoted column
+fails instead of becoming a string literal. A configuration failure closes the handle and fails the open. The
+Effect `openDatabase` and test inspection helper inherit these defaults through `Database.open`.
+
 ## The Effect layer (`effect.ts`)
 
 - `openDatabase(path, options)`: `Effect<Database, SqliteFfiError, Scope>`. The scope's release runs

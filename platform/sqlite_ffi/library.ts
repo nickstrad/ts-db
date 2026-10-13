@@ -38,6 +38,8 @@ const SYMBOLS = {
 
   sqlite3_open_v2: { parameters: ["buffer", "buffer", "i32", "pointer"], result: "i32" },
   sqlite3_close_v2: { parameters: ["pointer"], result: "i32" },
+  // Variadic in C: this fixed signature is for the DQS verbs (int on/off, int* out or NULL).
+  sqlite3_db_config: { parameters: ["pointer", "i32", "i32", "pointer"], result: "i32" },
   sqlite3_extended_result_codes: { parameters: ["pointer", "i32"], result: "i32" },
   sqlite3_busy_timeout: { parameters: ["pointer", "i32"], result: "i32" },
   sqlite3_errmsg: { parameters: ["pointer"], result: "pointer" },

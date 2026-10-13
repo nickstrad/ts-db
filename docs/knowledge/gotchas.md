@@ -210,13 +210,13 @@ SQL, which is why the test suite stays green, but they differ:
   Code that builds a `detail` from `e.message` gets `""`. Use `sqliteFailureMessage` in `platform/sqlite.ts`:
   `SqliteError.sqliteMessage` is the `sqlite3_errmsg` text `node:sqlite` put in `message`, and open failures
   append the file as that driver did.
-- **Connection defaults.** `node:sqlite` (Deno 2.9.5) opens with `foreign_keys=ON` and double-quoted string
-  literals off: `SELECT "nope"` fails "no such column". The system `libsqlite3` 3.45.1 keeps its compile-time
-  defaults: `foreign_keys=0` and DQS on, so `SELECT "nope"` returns the text `nope` and `WHERE "nope" = ?`
-  compares two literals. The schema has no foreign keys and the compiler only quotes identifiers it validated,
-  but a compiler bug that names an unknown column now returns wrong rows instead of failing. The binding has
-  no `sqlite3_db_config`, so turning DQS off is a binding change (raised as `decision_needed` by
-  `claude-opus-ffi-04`).
+- **Connection defaults (matched by FFI-04b, 2026-10-13).** FFI-04 initially inherited the system library's
+  compile-time defaults (`foreign_keys=0`, DQS on), so `SELECT "nope"` returned a string instead of failing.
+  Superseded by `Database.open` in `platform/sqlite_ffi/database.ts`: before any SQL it disables DQS for DML
+  and DDL with checked `sqlite3_db_config` calls, then runs `PRAGMA foreign_keys=ON`. This restores
+  `node:sqlite`'s unknown-column safety net and foreign-key enforcement for every connection, including
+  read-only, Effect `openDatabase`, and the inspection helper. Configuration errors are captured before close;
+  cleanup cannot replace them. Native error text still lives in `sqliteMessage`, not `message`.
 - **Number binds.** `node:sqlite` binds every JS `number` as REAL (`typeof(?)` of `1` is `real`) and refuses
   booleans. The binding binds integral safe numbers as INTEGER and booleans as 0/1. STRICT INTEGER/REAL
   columns and numeric comparisons do not see the difference. A TEXT-affinity comparison would (`'1'` against

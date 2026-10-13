@@ -69,6 +69,8 @@ const SQLITE_TEXT = 3;
 const SQLITE_BLOB = 4;
 
 const SQLITE_STMTSTATUS_REPREPARE = 5;
+const SQLITE_DBCONFIG_DQS_DML = 1013;
+const SQLITE_DBCONFIG_DQS_DDL = 1014;
 
 const SQLITE_OPEN_READONLY = 0x1;
 const SQLITE_OPEN_READWRITE = 0x2;
@@ -424,9 +426,28 @@ export class Database {
       active: null,
       statements: new Set(),
     };
-    s.sqlite3_extended_result_codes(db, 1);
-    if (busyTimeoutMs > 0) s.sqlite3_busy_timeout(db, busyTimeoutMs);
-    return new Database(c, library);
+    const connection = new Database(c, library);
+    try {
+      // Match node:sqlite on every open, including read-only, before executing any SQL.
+      for (const verb of [SQLITE_DBCONFIG_DQS_DML, SQLITE_DBCONFIG_DQS_DDL]) {
+        const rc = s.sqlite3_db_config(db, verb, 0, null);
+        if (rc !== SQLITE_OK) throw sqliteError(c, "open", rc);
+      }
+      connection.exec("PRAGMA foreign_keys=ON");
+      s.sqlite3_extended_result_codes(db, 1);
+      if (busyTimeoutMs > 0) s.sqlite3_busy_timeout(db, busyTimeoutMs);
+      return connection;
+    } catch (error) {
+      // Native error text is already copied. Nothing has escaped or reached a pool thread;
+      // release the handle without letting a cleanup failure replace the original throw.
+      c.open = false;
+      try {
+        s.sqlite3_close_v2(db);
+      } catch {
+        // Preserve the original failure, without inspecting or mutating a caller's exception.
+      }
+      throw error;
+    }
   }
 
   /** The path the connection was opened with. */
