@@ -58,9 +58,10 @@ coordinator inspection and subsequent cleanup.
 Opus review (NITS, `review/ffi-04b-opus`) on `f01425f`; fixup by `claude-sonnet-ffi-04b-fixup`.
 
 - NIT 1: `loadLibrary` now refuses darwin/aarch64 (Apple arm64 variadic convention makes the fixed
-  `sqlite3_db_config` signature invalid) with `SqliteLibraryError` `load-failed`; comment, `gotchas.md` and README
-  updated. Unit test covers the pure `unsupportedPlatform(os, arch)` predicate; the refusal itself cannot run on
-  this Linux host without faking `Deno.build`, which was not done.
-- NIT 2: every failure in the open-time defaults block reports `op: "open"`; a non-OK `sqlite3_db_config` message
-  comes from `sqlite3_errstr(rc)`. Untested (reachable only on OOM, no mocking).
-- Validation: lint, check, test (675 passed, 0 failed, 1 ignored), test:prop (79 passed), touched-file fmt all pass.
+  `sqlite3_db_config` signature invalid) with `SqliteLibraryError` `load-failed`; comment, `gotchas.md` and
+  README updated. Unit test covers the pure `unsupportedPlatform(os, arch)` predicate; the refusal itself
+  cannot run on this Linux host without faking `Deno.build`, which was not done.
+- NIT 2: every failure in the open-time defaults block reports `op: "open"`; a non-OK `sqlite3_db_config`
+  message comes from `sqlite3_errstr(rc)`. Untested (reachable only on OOM, no mocking).
+- Validation: lint, check, test (675 passed, 0 failed, 1 ignored), test:prop (79 passed), touched-file fmt all
+  pass.
