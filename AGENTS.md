@@ -112,7 +112,8 @@ this becomes the shared set of building blocks agents start from instead of re-c
 `index.md`. **Read `docs/knowledge/index.md` at session/orientation start**, before planning new work.
 **Update it when you learn something durable**: a landing, a decision, a debugging session that taught you
 something another agent would otherwise rediscover. Date new entries (`YYYY-MM-DD`); link, don't duplicate;
-mark superseded entries instead of deleting history. Markdown only — never the `kb` CLI.
+mark superseded entries instead of deleting history. Markdown only in the repo — the `kb` CLI is for
+VM/environment knowledge (the box-level store at `/root/Raw/knowledge`), never the home for project knowledge.
 
 ## Diagram maintenance (C4 architecture docs)
 
