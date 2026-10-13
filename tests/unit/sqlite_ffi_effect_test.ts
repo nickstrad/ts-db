@@ -21,7 +21,6 @@ import {
   type BindParams,
   Database,
   exec,
-  type ExecOptions,
   get,
   getAsync,
   isCacheable,
@@ -33,7 +32,8 @@ import {
   SqliteCancelled,
   SqliteError,
   SqliteUsageError,
-  type Statement,
+  SqliteValueError,
+  Statement,
   STATEMENT_CACHE_CAPACITY,
 } from "../../platform/sqlite_ffi/mod.ts";
 
@@ -52,21 +52,23 @@ const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 /**
  * Records the binding promise behind each `allAsync` / `runAsync` call on `st`, settled to its
  * value or rejection, so a test can see what the binding reported after the fiber was interrupted
- * (the interrupted Effect itself only reports the interruption).
+ * (the interrupted Effect itself only reports the interruption). The wrappers call the binding's
+ * methods from `Statement.prototype`, never through the instance, so the spy wraps the prototype
+ * for the life of the returned handle (`using`).
  */
-function spy(st: Statement): Promise<unknown>[] {
+function spy(st: Statement): { outcomes: Promise<unknown>[] } & Disposable {
+  const proto = Statement.prototype;
+  const original = { allAsync: proto.allAsync, runAsync: proto.runAsync };
   const outcomes: Promise<unknown>[] = [];
-  const allAsyncOf = st.allAsync.bind(st);
-  const runAsyncOf = st.runAsync.bind(st);
-  const record = <A>(p: Promise<A>) => {
-    outcomes.push(p.then((v) => v, (e: unknown) => e));
-    return p;
-  };
-  Object.assign(st, {
-    allAsync: (params?: BindParams, options?: ExecOptions) => record(allAsyncOf(params, options)),
-    runAsync: (params?: BindParams, options?: ExecOptions) => record(runAsyncOf(params, options)),
-  });
-  return outcomes;
+  const recorded = <F extends (this: Statement, ...args: never[]) => Promise<unknown>>(f: F) =>
+    function (this: Statement, ...args: Parameters<F>) {
+      const p = f.apply(this, args);
+      if (this === st) outcomes.push(p.then((v) => v, (e: unknown) => e));
+      return p;
+    };
+  proto.allAsync = recorded(original.allAsync) as typeof proto.allAsync;
+  proto.runAsync = recorded(original.runAsync) as typeof proto.runAsync;
+  return { outcomes, [Symbol.dispose]: () => void Object.assign(proto, original) };
 }
 
 function failureOf<A, E>(exit: Exit.Exit<A, E>): E {
@@ -112,7 +114,8 @@ Deno.test("scope: closing the scope cancels a pending async execution and closes
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
       scoped = yield* openDatabase(join(dir, "scoped.db"));
       const st = yield* prepare(scoped, FOREVER);
-      outcomes = spy(st);
+      using spied = spy(st);
+      outcomes = spied.outcomes;
       fiber = yield* Effect.forkScoped(allAsync(st, undefined, BACKSTOP));
       yield* Effect.sleep(30);
       assert.equal(scoped.inFlight, true);
@@ -135,7 +138,8 @@ Deno.test("interrupt: interrupting the fiber aborts the execution and waits unti
   const db = Database.open(join(dir, "interrupt.db"));
   try {
     const st = db.prepare(FOREVER);
-    const outcomes = spy(st);
+    using spied = spy(st);
+    const { outcomes } = spied;
     const fiber = Effect.runFork(allAsync(st, undefined, BACKSTOP));
     await delay(30);
     assert.equal(db.inFlight, true);
@@ -168,7 +172,8 @@ Deno.test("timeout: Effect.timeout and timeoutMs both stop the statement and fre
   const db = Database.open(join(dir, "timeout.db"));
   try {
     const st = db.prepare(FOREVER);
-    const outcomes = spy(st);
+    using spied = spy(st);
+    const { outcomes } = spied;
 
     // Effect.timeout: the fiber is interrupted, so the Effect reports Effect's TimeoutException;
     // the binding underneath was cancelled ("aborted") and had settled before timeout returned.
@@ -247,6 +252,294 @@ Deno.test("failures: binding errors are typed failures; caller exceptions are de
       assert.deepEqual({ ...(yield* get(named, { x: 1 })) }, { x: 1 });
     })));
   } finally {
+    cleanup();
+  }
+});
+
+/**
+ * The value in the defect channel, asserting there is no typed failure beside it. Messages are built
+ * only on failure: rendering the cause would inspect the defect, which may be a throwing proxy.
+ */
+function defectOf<A, E>(exit: Exit.Exit<A, E>): unknown {
+  if (!Exit.isFailure(exit)) assert.fail("expected a failure");
+  if (Option.isSome(Cause.failureOption(exit.cause))) {
+    assert.fail(`typed failure: ${Cause.pretty(exit.cause)}`);
+  }
+  const defect = Cause.dieOption(exit.cause);
+  if (Option.isNone(defect)) assert.fail(`expected a defect, got ${Cause.pretty(exit.cause)}`);
+  return defect.value;
+}
+
+Deno.test("provenance: a caller-thrown binding error is a defect, by identity and untouched", async () => {
+  const { dir, cleanup } = scratch();
+  const db = Database.open(join(dir, "provenance.db"));
+  try {
+    const named = db.prepare("SELECT :x AS x");
+    const one = db.prepare("SELECT 1 AS one");
+    // The reviewer's case (frozen) and an extensible one, where an added `cause` would show.
+    const errors = [
+      Object.freeze(new SqliteUsageError({ reason: "busy", detail: "caller-owned, frozen" })),
+      new SqliteUsageError({ reason: "busy", detail: "caller-owned, extensible" }),
+    ];
+    for (const thrown of errors) {
+      const before = Object.getOwnPropertyDescriptors(thrown);
+      const hadCause = Object.hasOwn(thrown, "cause");
+      const params = {
+        get x() {
+          throw thrown;
+        },
+      } as unknown as BindParams;
+      const throwingTimeout = {
+        get timeoutMs(): number {
+          throw thrown;
+        },
+      };
+      const cases: [string, Exit.Exit<unknown, unknown>][] = [
+        ["sync parameter getter", Effect.runSyncExit(get(named, params))],
+        ["async parameter getter", await Effect.runPromiseExit(getAsync(named, params))],
+        ["async timeoutMs getter", await Effect.runPromiseExit(getAsync(one, undefined, throwingTimeout))],
+        // Inside a span `Effect.die` would hand back a span-recording proxy instead of the value.
+        ["sync, inside a span", Effect.runSyncExit(Effect.withSpan(get(named, params), "read"))],
+        [
+          "async, inside a span",
+          await Effect.runPromiseExit(Effect.withSpan(getAsync(named, params), "read")),
+        ],
+      ];
+      for (const [name, exit] of cases) {
+        assert.equal(defectOf(exit), thrown, name);
+        assert.equal(db.inFlight, false, name);
+      }
+      assert.deepEqual(Object.getOwnPropertyDescriptors(thrown), before);
+      assert.equal(Object.hasOwn(thrown, "cause"), hadCause);
+      // The connection is reusable on both paths.
+      assert.deepEqual({ ...Effect.runSync(get(named, { x: 1 })) }, { x: 1 });
+      assert.deepEqual({ ...(await Effect.runPromise(getAsync(named, { x: 2 }))) }, { x: 2 });
+    }
+
+    // A thrown proxy whose every trap throws is the defect itself; nothing ran a trap on it.
+    const trapped: string[] = [];
+    const opaque = new Proxy({}, {
+      get: (_t, trap) => () => {
+        trapped.push(String(trap));
+        throw new Error(`trap ${String(trap)}`);
+      },
+    });
+    const thrownProxy = new Proxy({}, opaque);
+    const proxyParams = {
+      get x() {
+        throw thrownProxy;
+      },
+    } as unknown as BindParams;
+    assert.equal(defectOf(Effect.runSyncExit(get(named, proxyParams))), thrownProxy);
+    assert.equal(defectOf(await Effect.runPromiseExit(getAsync(named, proxyParams))), thrownProxy);
+    assert.deepEqual(trapped, []);
+
+    // The parameter container itself a proxy: its traps run in the snapshot, so their throws are defects.
+    const thrown = Object.freeze(new SqliteUsageError({ reason: "bind-count", detail: "from a trap" }));
+    const keysTrap = new Proxy({ x: 1 }, {
+      ownKeys() {
+        throw thrown;
+      },
+    }) as BindParams;
+    const elementTrap = new Proxy([1], {
+      get(target, key, receiver) {
+        if (key === "0") throw thrown;
+        return Reflect.get(target, key, receiver);
+      },
+    }) as BindParams;
+    const positional = db.prepare("SELECT ? AS v");
+    assert.equal(defectOf(Effect.runSyncExit(get(named, keysTrap))), thrown);
+    assert.equal(defectOf(await Effect.runPromiseExit(getAsync(named, keysTrap))), thrown);
+    assert.equal(defectOf(Effect.runSyncExit(get(positional, elementTrap))), thrown);
+    assert.equal(defectOf(await Effect.runPromiseExit(getAsync(positional, elementTrap))), thrown);
+    // A well-behaved proxy reads through.
+    assert.deepEqual({ ...Effect.runSync(get(positional, new Proxy([7], {}))) }, { v: 7 });
+
+    // timeoutMs rendered by the binding's own message: the object's toString runs in the snapshot.
+    const rendered = { toString: () => "soon" } as unknown as number;
+    const invalid = failureOf(await Effect.runPromiseExit(getAsync(one, undefined, { timeoutMs: rendered })));
+    assert.ok(invalid instanceof SqliteUsageError && invalid.reason === "invalid-option", String(invalid));
+    assert.equal(invalid.detail, "timeoutMs must be a finite number >= 0, got soon");
+    const unrendered = {
+      toString() {
+        throw thrown;
+      },
+    } as unknown as number;
+    assert.equal(
+      defectOf(await Effect.runPromiseExit(getAsync(one, undefined, { timeoutMs: unrendered }))),
+      thrown,
+    );
+
+    // Open options are read once in the snapshot too.
+    const openOptions = {
+      get busyTimeoutMs(): number {
+        throw thrown;
+      },
+    };
+    assert.equal(
+      defectOf(await Effect.runPromiseExit(Effect.scoped(openDatabase(join(dir, "o.db"), openOptions)))),
+      thrown,
+    );
+    assert.equal(db.inFlight, false);
+  } finally {
+    await db.closeAsync();
+    cleanup();
+  }
+});
+
+Deno.test("provenance: the binding runs no caller code after the snapshot", async () => {
+  const { dir, cleanup } = scratch();
+  const db = Database.open(join(dir, "receiver.db"));
+  try {
+    const thrown = Object.freeze(new SqliteUsageError({ reason: "busy", detail: "caller-owned" }));
+    const thrower = () => {
+      throw thrown;
+    };
+
+    // A look-alike statement or connection is a defect (the binding's private-field TypeError); its
+    // methods never run.
+    const fake = {
+      get: thrower,
+      getAsync: thrower,
+      parameterCount: 0,
+      sql: "SELECT 1",
+    } as unknown as Statement;
+    const fakeDefect = defectOf(Effect.runSyncExit(get(fake)));
+    assert.ok(fakeDefect instanceof TypeError, String(fakeDefect));
+    assert.ok(defectOf(await Effect.runPromiseExit(getAsync(fake))) instanceof TypeError);
+    const fakeDb = { exec: thrower, prepare: thrower, inFlight: false } as unknown as Database;
+    assert.ok(defectOf(Effect.runSyncExit(exec(fakeDb, "SELECT 1"))) instanceof TypeError);
+    assert.ok(defectOf(Effect.runSyncExit(prepare(fakeDb, "SELECT 1"))) instanceof TypeError);
+
+    // Methods and getters shadowed on a real instance are ignored: the binding's own run.
+    const st = db.prepare("SELECT ? AS v");
+    Object.defineProperty(st, "get", { value: thrower });
+    Object.defineProperty(st, "getAsync", { value: thrower });
+    Object.defineProperty(st, "parameterCount", { get: thrower });
+    assert.deepEqual({ ...Effect.runSync(get(st, [1])) }, { v: 1 });
+    assert.deepEqual({ ...(await Effect.runPromise(getAsync(st, [2]))) }, { v: 2 });
+
+    // `sql` (the one public property the binding reads) is pinned on first use; one already turned
+    // into an accessor is a defect, and the accessor never runs.
+    assert.throws(() => Object.defineProperty(st, "sql", { get: thrower }), TypeError);
+    assert.equal(st.sql, "SELECT ? AS v");
+    const tampered = db.prepare("SELECT 4 AS v");
+    Object.defineProperty(tampered, "sql", { get: thrower });
+    assert.ok(defectOf(Effect.runSyncExit(get(tampered))) instanceof TypeError);
+
+    // Views are read through their internal slots, never their (shadowable) properties.
+    const hex = db.prepare("SELECT hex(?) AS h");
+    const bytes = new Uint8Array([0, 1, 2, 3, 4]).subarray(1, 4);
+    for (const key of ["buffer", "byteOffset", "byteLength"]) {
+      Object.defineProperty(bytes, key, { get: thrower });
+    }
+    const view = new DataView(new Uint8Array([9, 8, 7, 6]).buffer, 1, 2);
+    for (const key of ["buffer", "byteOffset", "byteLength"]) {
+      Object.defineProperty(view, key, { get: thrower });
+    }
+    assert.deepEqual({ ...Effect.runSync(get(hex, [bytes])) }, { h: "010203" });
+    assert.deepEqual({ ...(await Effect.runPromise(getAsync(hex, [view]))) }, { h: "0807" });
+    assert.deepEqual({ ...Effect.runSync(get(hex, [new Uint8Array(0)])) }, { h: "" });
+
+    // A getter that closes the connection runs before the binding starts: the binding then reports
+    // its own typed "closed", not a caller exception.
+    const scratchDb = Database.open(join(dir, "closing.db"));
+    const closing = scratchDb.prepare("SELECT :x AS x");
+    const closer = {
+      get x() {
+        scratchDb.close();
+        return 1;
+      },
+    } as unknown as BindParams;
+    const closed = failureOf(Effect.runSyncExit(get(closing, closer)));
+    assert.ok(closed instanceof SqliteUsageError && closed.reason === "closed", String(closed));
+
+    // Last, since it disables `db.prepare` for the rest of the test: the cache goes through the
+    // binding's prototypes too.
+    Object.defineProperty(db, "prepare", { value: thrower });
+    Object.defineProperty(db, "inFlight", { get: thrower });
+    const cached = Effect.runSync(prepare(db, "SELECT 3 AS v"));
+    Object.defineProperty(cached, "isFinalized", { get: thrower });
+    assert.equal(Effect.runSync(prepare(db, "SELECT 3 AS v")), cached);
+    assert.deepEqual({ ...Effect.runSync(get(cached)) }, { v: 3 });
+  } finally {
+    await db.closeAsync();
+    cleanup();
+  }
+});
+
+Deno.test("provenance: the binding's own errors stay typed failures", async () => {
+  const { dir, cleanup } = scratch();
+  const db = Database.open(join(dir, "typed.db"));
+  try {
+    const positional = db.prepare("SELECT ? AS v");
+    const named = db.prepare("SELECT :x AS x");
+    for (
+      const [params, reason] of [
+        [[], "bind-count"],
+        [[1, 2], "bind-count"],
+        [{ y: 1 }, "bind-name"],
+      ] as const
+    ) {
+      const st = Array.isArray(params) ? positional : named;
+      for (
+        const exit of [Effect.runSyncExit(get(st, params)), await Effect.runPromiseExit(getAsync(st, params))]
+      ) {
+        const err = failureOf(exit);
+        assert.ok(err instanceof SqliteUsageError && err.reason === reason, String(err));
+      }
+    }
+    // A list whose length the binding rejects is not read at all.
+    let reads = 0;
+    const long = new Proxy([1, 2, 3], {
+      get(target, key, receiver) {
+        if (key !== "length") reads++;
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    const count = failureOf(Effect.runSyncExit(get(positional, long)));
+    assert.ok(
+      count instanceof SqliteUsageError && count.detail === "expected 1 parameter(s), got 3",
+      String(count),
+    );
+    assert.equal(reads, 0);
+
+    // Values the binding cannot bind, a proxy among them (decided by `typeof`, no trap runs).
+    const trapped: string[] = [];
+    const proxyValue = new Proxy({}, {
+      get(_t, key) {
+        trapped.push(String(key));
+        return undefined;
+      },
+    });
+    for (const value of [{}, proxyValue, undefined, Symbol("s")]) {
+      const params = [value] as unknown as BindParams;
+      for (
+        const exit of [
+          Effect.runSyncExit(get(positional, params)),
+          await Effect.runPromiseExit(getAsync(positional, params)),
+        ]
+      ) {
+        const err = failureOf(exit);
+        assert.ok(err instanceof SqliteValueError && err.reason === "unsupported-bind-type", String(err));
+      }
+    }
+    assert.deepEqual(trapped, []);
+    const range = failureOf(Effect.runSyncExit(get(positional, [2n ** 64n])));
+    assert.ok(range instanceof SqliteValueError && range.reason === "integer-out-of-range", String(range));
+
+    // Cancellation and SQLite's own errors.
+    const forever = db.prepare(FOREVER);
+    const deadline = failureOf(await Effect.runPromiseExit(allAsync(forever, undefined, { timeoutMs: 10 })));
+    assert.ok(deadline instanceof SqliteCancelled && deadline.reason === "deadline", String(deadline));
+    const syntax = failureOf(Effect.runSyncExit(exec(db, "SELEC 1")));
+    assert.ok(syntax instanceof SqliteError && syntax.op === "exec", String(syntax));
+    const negative = failureOf(await Effect.runPromiseExit(getAsync(positional, [1], { timeoutMs: -1 })));
+    assert.ok(negative instanceof SqliteUsageError && negative.reason === "invalid-option", String(negative));
+    assert.equal(db.inFlight, false);
+    assert.deepEqual({ ...Effect.runSync(get(positional, [5])) }, { v: 5 });
+  } finally {
+    await db.closeAsync();
     cleanup();
   }
 });

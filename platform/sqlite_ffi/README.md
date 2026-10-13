@@ -23,8 +23,49 @@ connection (others fail `"busy"`), executions run to completion and reset, expli
 - `Database.inTransaction` (`sqlite3_get_autocommit(db) === 0`) replaces `DatabaseSync.isTransaction`. It is
   false on a closed connection and fails `"busy"` while an execution holds the connection.
 
-Every binding error is a typed failure. Anything else a call throws came from caller code (a parameter getter,
-a proxy) and becomes a defect carrying the original value; nothing inspects or changes it.
+### Failures: typed or defect, decided by when the throw happens
+
+A binding error class says nothing about who threw it: caller code can throw a `SqliteUsageError` it caught
+earlier, or build one. So every wrapper runs in two phases, and the phase decides the channel. The thrown
+value is never inspected.
+
+1. **Snapshot.** The wrapper reads everything the caller supplied, once, into fresh plain values. Caller code
+   runs only here: parameter and option getters, proxy traps, array accessors. Anything thrown is a **defect
+   carrying the thrown value**, untouched: no `cause` added, no property read, a proxy stays that proxy. The
+   wrapper makes the defect with `Effect.failCause(Cause.die(value))`, not `Effect.die`. `Effect.die` runs an
+   `in` check on the value (a proxy's `has` trap), and inside a span it returns a span-recording proxy in
+   place of the value.
+2. **Binding.** The binding's own methods run on the snapshot, taken from `Statement.prototype` and
+   `Database.prototype`, never looked up on the instance. They run no caller code, so a `SqliteFfiError`
+   thrown now is the binding's own and becomes a **typed failure**. Any other thrown value is a defect.
+
+What the snapshot does with each input:
+
+| Input                           | Snapshot                                                                                |
+| ------------------------------- | --------------------------------------------------------------------------------------- |
+| positional parameters           | fresh array, each element read once; a list of the wrong length is not read             |
+| named parameters                | fresh null-prototype object of the own enumerable string keys                           |
+| `ArrayBufferView` value         | fresh `Uint8Array` over the same bytes, read through the view's internal slots          |
+| other values                    | passed as is; the binding binds primitives and rejects other objects by `typeof` alone  |
+| `timeoutMs`, `busyTimeoutMs`    | read once; an object is rendered to text here, and the binding rejects it as before     |
+| other open options              | read once into a fresh object                                                           |
+| `path`, `sql`, `libraryPath`    | must already be strings, or the call is a defect (`TypeError`)                          |
+| statement / connection receiver | must be one the binding created, or the call is a defect (`TypeError` from the binding) |
+
+The binding reads one public property of a statement, `sql`, into the errors it builds, and an async execution
+spans event-loop turns. So the first time the layer sees a statement, it makes `sql` read-only and
+non-configurable, as its type already declares. A `sql` that is already an accessor is a defect.
+
+What this changes for callers:
+
+- Every parameter getter runs before the binding starts, including getters the binding would never have
+  reached because an earlier parameter failed.
+- A getter that closes the connection or finalizes the statement now succeeds. The binding then fails with its
+  own typed `"closed"` / `"finalized"`.
+- Instrumentation that wraps a statement's methods has to wrap `Statement.prototype`, as the tests' `spy`
+  does. Instance properties are ignored.
+
+Out of scope: code that patches built-ins or the binding's prototypes changes the binding itself.
 
 ## The interruption bridge
 
