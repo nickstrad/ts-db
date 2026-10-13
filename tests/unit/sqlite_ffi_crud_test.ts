@@ -1,11 +1,16 @@
 /**
  * FFI SQLite binding (`platform/sqlite_ffi/`): ordinary CRUD correctness, value round-trips, and the
  * typed failure surface, through both the synchronous and the nonblocking execution modes.
+ *
+ * Reentrancy probes (caller getters that finalize, close or execute mid-call) run in subprocesses
+ * under an external `timeout`: the failure mode they guard against is a native crash, which would
+ * otherwise take the test runner down with it.
  */
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   Database,
   loadLibrary,
@@ -312,3 +317,197 @@ Deno.test(
     assert.deepEqual(plain(star.get()), { b: 1, c: "z" });
   }),
 );
+
+Deno.test(
+  "reset errors: a RETURNING row whose commit fails SQLITE_BUSY is an error, never a result",
+  withDb(async (a, dir) => {
+    // Default rollback-journal mode: a writer's commit needs an EXCLUSIVE lock, which a reader's
+    // open transaction (SHARED lock) blocks. The INSERT's first step yields the RETURNING row; the
+    // commit happens in the reset that follows `get`'s first row, fails SQLITE_BUSY (5) and rolls
+    // the insert back.
+    a.exec("CREATE TABLE t(x INTEGER); INSERT INTO t VALUES (1);");
+    using b = Database.open(join(dir, "t.db"));
+    const xs = () => a.prepare("SELECT x FROM t ORDER BY x").all().map((r) => r.x);
+    const busy = (e: unknown) => {
+      assert.ok(e instanceof SqliteError, String(e));
+      assert.equal(e.op, "reset");
+      assert.equal(e.code, 5);
+      assert.equal(e.codeName, "SQLITE_BUSY");
+      assert.equal(e.sql, insert.sql);
+      return true;
+    };
+    const insert = a.prepare("INSERT INTO t VALUES (?) RETURNING x");
+
+    b.exec("BEGIN; SELECT * FROM t;");
+    assert.throws(() => insert.get([2]), busy);
+    await assert.rejects(() => insert.getAsync([2]), busy);
+    // Without RETURNING the commit happens in the last step: the same lock fails it there.
+    assert.throws(() => a.prepare("INSERT INTO t VALUES (2)").run(), (e: unknown) => {
+      assert.ok(e instanceof SqliteError && e.op === "step" && e.code === 5, String(e));
+      return true;
+    });
+    assert.deepEqual(xs(), [1], "the rolled-back inserts are gone");
+    assert.equal(a.inFlight, false);
+    b.exec("ROLLBACK");
+
+    // Statement and connection are reusable once the reader lets go.
+    assert.deepEqual(plain(insert.get([2])), { x: 2 });
+    assert.deepEqual(plain(await insert.getAsync([3])), { x: 3 });
+    assert.deepEqual(xs(), [1, 2, 3]);
+  }),
+);
+
+const CONFIG = fileURLToPath(new URL("../../deno.json", import.meta.url));
+const MOD = new URL("../../platform/sqlite_ffi/mod.ts", import.meta.url).href;
+
+/**
+ * Run `code` in a fresh `deno eval` under an external watchdog (`timeout`, then SIGKILL) with core
+ * dumps off, assert a clean exit, and return the JSON the probe prints last. A crash exits
+ * 128 + signal (139 for SIGSEGV), a hang 124/137.
+ */
+async function probe(code: string, seconds = 20) {
+  const out = await new Deno.Command("sh", {
+    args: [
+      "-c",
+      'ulimit -c 0; exec timeout -k 2 "$@"',
+      "sh",
+      `${seconds}s`,
+      Deno.execPath(),
+      "eval",
+      "--config",
+      CONFIG,
+      "--ext=ts",
+      `const { Database } = await import(${JSON.stringify(MOD)});\n` +
+      `const tag = (e) => String(e?._tag ?? "throw") + ":" + String(e?.reason ?? e?.message ?? "");\n` +
+      code,
+    ],
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  const stdout = new TextDecoder().decode(out.stdout).trim();
+  const stderr = new TextDecoder().decode(out.stderr);
+  assert.equal(out.code, 0, `probe exited ${out.code} (139 = SIGSEGV, 124/137 = hung)\n${stdout}\n${stderr}`);
+  return JSON.parse(stdout.split("\n").at(-1) ?? "null");
+}
+
+Deno.test("reentrancy: a parameter getter that finalizes its own statement gets a typed error", async () => {
+  // The review's first probe, plus what happens next: the statement was not finalized and still runs.
+  const result = await probe(`
+const db = Database.open(":memory:");
+const st = db.prepare("SELECT :x AS x");
+let outer;
+try {
+  st.get({ get x() { st.finalize(); return 1; } });
+  outer = "returned";
+} catch (e) {
+  outer = tag(e);
+}
+const next = st.get({ x: 5 })?.x;
+console.log(JSON.stringify({ outer, finalized: st.isFinalized, inFlight: db.inFlight, next }));
+`);
+  assert.deepEqual(result, { outer: "SqliteUsageError:busy", finalized: false, inFlight: false, next: 5 });
+});
+
+Deno.test("reentrancy: an option getter that closes the connection gets a typed error", async () => {
+  // The review's second probe: `timeoutMs` is read while the async execution holds the connection.
+  const result = await probe(`
+const db = Database.open(":memory:");
+const st = db.prepare("SELECT 1 AS x");
+let outer;
+try {
+  await st.getAsync(undefined, { get timeoutMs() { db.close(); return 100; } });
+  outer = "returned";
+} catch (e) {
+  outer = tag(e);
+}
+const next = (await st.getAsync())?.x;
+db.close();
+console.log(JSON.stringify({ outer, open: db.isOpen, next }));
+`);
+  assert.deepEqual(result, { outer: "SqliteUsageError:busy", open: false, next: 1 });
+});
+
+Deno.test("reentrancy: nested calls from any caller getter are refused, never overlapping", async () => {
+  // Every way caller code runs inside an execution (named and positional-accessor parameters, sync
+  // and async; the async option getters) crossed with every nested call on the same connection.
+  // The getter swallows the nested call's error and returns 7, so the outer call completes with
+  // x = 7; then the statement runs again with x = 9 to show it was neither freed nor left active.
+  const result = await probe(`
+const shapes = {
+  syncNamed: (st, act) => st.get({ get x() { act(); return 7; } }),
+  syncPositional: (st, act) => st.get(Object.defineProperty([0], 0, { get() { act(); return 7; } })),
+  asyncNamed: (st, act) => st.getAsync({ get x() { act(); return 7; } }),
+  asyncPositional: (st, act) => st.getAsync(Object.defineProperty([0], 0, { get() { act(); return 7; } })),
+  asyncTimeoutGetter: (st, act) => st.getAsync({ x: 7 }, { get timeoutMs() { act(); return 1000; } }),
+  asyncSignalGetter: (st, act) => st.getAsync({ x: 7 }, { get signal() { act(); return undefined; } }),
+};
+const actions = {
+  finalizeSelf: (db, st) => st.finalize(),
+  finalizeOther: (db, st, other) => other.finalize(),
+  close: (db) => db.close(),
+  closeAsync: (db) => db.closeAsync(),
+  prepare: (db) => db.prepare("SELECT 2"),
+  exec: (db) => db.exec("SELECT 2"),
+  getSelf: (db, st) => st.get({ x: 1 }),
+  getOther: (db, st, other) => other.get(),
+  getAsyncSelf: (db, st) => st.getAsync({ x: 1 }),
+  allAsyncOther: (db, st, other) => other.allAsync(),
+  interrupt: (db) => db.interrupt(),
+};
+const out = {};
+for (const [shape, call] of Object.entries(shapes)) {
+  for (const [name, action] of Object.entries(actions)) {
+    const db = Database.open(":memory:");
+    const st = db.prepare("SELECT :x AS x");
+    const other = db.prepare("SELECT 3 AS y");
+    let nested = "not-called";
+    let pending;
+    const act = () => {
+      try {
+        const r = action(db, st, other);
+        if (r instanceof Promise) pending = r.then(() => "ok", tag);
+        else nested = "ok";
+      } catch (e) {
+        nested = tag(e);
+      }
+    };
+    let outer;
+    try {
+      outer = (await call(st, act))?.x;
+    } catch (e) {
+      outer = tag(e);
+    }
+    if (pending) nested = await pending;
+    const after = db.isOpen ? st.get({ x: 9 })?.x : "closed";
+    out[shape + "/" + name] = [nested, outer, after];
+    await db.closeAsync();
+  }
+}
+console.log(JSON.stringify(out));
+`);
+  const busy = "SqliteUsageError:busy";
+  const expected: Record<string, unknown[]> = {};
+  for (const shape of ["syncNamed", "syncPositional", "asyncNamed", "asyncPositional"]) {
+    for (const name of ["finalizeSelf", "finalizeOther", "close", "prepare", "exec", "getSelf", "getOther"]) {
+      expected[`${shape}/${name}`] = [busy, 7, 9];
+    }
+    // The async nested calls reject rather than throw; the rejection is the same busy error.
+    expected[`${shape}/getAsyncSelf`] = [busy, 7, 9];
+    expected[`${shape}/allAsyncOther`] = [busy, 7, 9];
+    // No statement is running while parameters are bound, so the interrupt is a no-op (SQLite's
+    // documented semantics) and does not touch the step that follows.
+    expected[`${shape}/interrupt`] = ["ok", 7, 9];
+  }
+  for (const shape of ["asyncTimeoutGetter", "asyncSignalGetter"]) {
+    for (const name of Object.keys(expected).filter((k) => k.startsWith("asyncNamed/"))) {
+      expected[`${shape}/${name.slice("asyncNamed/".length)}`] = expected[name];
+    }
+  }
+  // closeAsync waits for the execution: a sync one completes first, an async one is cancelled
+  // (it never submits its step), and the connection is closed afterwards either way.
+  for (const shape of ["syncNamed", "syncPositional"]) expected[`${shape}/closeAsync`] = ["ok", 7, "closed"];
+  for (const shape of ["asyncNamed", "asyncPositional", "asyncTimeoutGetter", "asyncSignalGetter"]) {
+    expected[`${shape}/closeAsync`] = ["ok", "SqliteCancelled:aborted", "closed"];
+  }
+  assert.deepEqual(result, expected);
+});

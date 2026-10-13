@@ -20,10 +20,17 @@
  *    call on that connection (sync or async, including `close`) fails `"busy"` instead of blocking
  *    the main thread on SQLite's connection mutex or racing the pool thread. `closeAsync` cancels
  *    the in-flight execution and waits for it. Concurrency comes from more connections.
+ *    An execution, sync or async, reserves its connection *before* it evaluates any caller-supplied
+ *    code (parameter and option getters, array accessors, proxies, the signal's methods), so such
+ *    code that finalizes, closes, prepares or executes on the same connection fails `"busy"`
+ *    instead of freeing a handle the execution is about to use.
  * 2. **Executions run to completion.** Every method steps its statement to the end (or to the first
  *    row for `get`) and resets it before returning, so no statement is left active between calls.
- *    That keeps `sqlite3_interrupt` scoped to the one execution that asked for it: SQLite clears the
- *    interrupt flag when the next statement starts on an otherwise idle connection.
+ *    That keeps `sqlite3_interrupt` scoped to the one execution that asked for it: per SQLite's
+ *    contract an interrupt affects only statements started before the connection's running-statement
+ *    count returns to zero, and the execution's own reset brings it to zero. The reset's result code
+ *    is checked: for `get` it is where an autocommit write (`INSERT ... RETURNING`) commits, and a
+ *    failed commit is rolled back, so it fails the execution (`SqliteError({ op: "reset" })`).
  * 3. **Lifetimes are explicit.** `close` finalizes the connection's statements; a statement or
  *    connection used after that fails `"finalized"` / `"closed"` rather than touching freed memory.
  *    No `FinalizationRegistry`: a dropped connection leaks its handle, it does not crash.
@@ -186,17 +193,52 @@ export interface ExecOptions {
 // Connection state shared by a Database and its Statements
 // ---------------------------------------------------------------------------
 
-/** The bookkeeping for one in-flight async execution. */
+/**
+ * The bookkeeping for one execution holding a connection (`Connection.active`).
+ *
+ * Cancellation invariant (async executions). `sqlite3_step_nb` returns its promise when the call is
+ * *submitted* to the blocking pool, not when a pool thread *enters* `sqlite3_step`, so an
+ * outstanding step promise does not mean SQLite is running the statement. An interrupt that lands
+ * in that dispatch-to-entry window finds no running statement and SQLite discards it
+ * (https://www.sqlite.org/c3ref/interrupt.html); a single interrupt would then be lost and an
+ * unbounded statement would never return. So once an execution is cancelled while a step is
+ * outstanding, it calls `sqlite3_interrupt` at once and again every `REINTERRUPT_MS` until that
+ * step's promise settles. The repeat timer is cleared synchronously in the step's continuation,
+ * before any other code can start a statement on the connection, and the execution holds the
+ * connection throughout, so every interrupt targets this execution's statement: one that lands
+ * before entry is discarded and repeated, one inside the step stops it, and one that lands after
+ * the step returned (statement still active) is cleared by SQLite when the execution's reset brings
+ * the running-statement count to zero. None reaches the connection's next execution.
+ */
 interface Execution {
-  /** True while a pool thread is inside `sqlite3_step_nb` for this execution. */
+  /** True from the submission of a `sqlite3_step_nb` until its promise settles. */
   inStep: boolean;
   cancelled: CancelReason | null;
   cancelledAt: number;
-  /** Cancel the execution: interrupt it if it is inside a step, else stop it before the next one. */
+  /**
+   * Cancel the execution: keep interrupting while a step is outstanding (see above), else stop it
+   * before the next step.
+   */
   cancel(reason: CancelReason): void;
   /** Resolves once the execution has reset its statement and released the connection. */
   readonly settled: Promise<void>;
 }
+
+/**
+ * The reservation a synchronous execution holds while it binds and steps. It cannot be cancelled
+ * (it runs on the main thread) and is over before any awaiting code resumes, hence the already
+ * settled promise: `closeAsync` called from a parameter getter closes after the execution.
+ */
+const SYNC_EXECUTION: Execution = {
+  inStep: false,
+  cancelled: null,
+  cancelledAt: 0,
+  cancel() {},
+  settled: Promise.resolve(),
+};
+
+/** How often a cancelled async execution repeats `sqlite3_interrupt` until its step returns. */
+const REINTERRUPT_MS = 1;
 
 interface Connection {
   readonly s: SqliteSymbols;
@@ -267,7 +309,7 @@ function usage(reason: UsageFailure, detail: string, sql?: string): SqliteUsageE
 function assertIdle(c: Connection, what: string, sql?: string): void {
   if (!c.open) throw usage("closed", `${what} on a closed connection`, sql);
   if (c.active !== null) {
-    throw usage("busy", `${what} while an async execution is in flight on this connection`, sql);
+    throw usage("busy", `${what} while another execution holds this connection`, sql);
   }
 }
 
@@ -351,7 +393,10 @@ export class Database {
     return this.#c.open;
   }
 
-  /** True while an async execution holds this connection. */
+  /**
+   * True while an execution holds this connection: an async one in flight, or a sync one that is
+   * evaluating caller-supplied parameter getters.
+   */
   get inFlight(): boolean {
     return this.#c.active !== null;
   }
@@ -359,9 +404,11 @@ export class Database {
   /** Run zero or more `;`-separated statements without parameters or results (`sqlite3_exec`). */
   exec(sql: string): void {
     const c = this.#c;
-    assertIdle(c, "exec", sql);
+    // Encode before the lifetime check, so no caller code (a non-string's `toString`) runs after it.
     assertNoNul(sql);
-    const rc = c.s.sqlite3_exec(c.db, cString(sql), null, null, null);
+    const text = cString(sql);
+    assertIdle(c, "exec", sql);
+    const rc = c.s.sqlite3_exec(c.db, text, null, null, null);
     if (rc !== SQLITE_OK) throw sqliteError(c, "exec", rc, sql);
   }
 
@@ -371,9 +418,10 @@ export class Database {
    */
   prepare(sql: string): Statement {
     const c = this.#c;
-    assertIdle(c, "prepare", sql);
+    // Encode before the lifetime check, so no caller code (a non-string's `toString`) runs after it.
     assertNoNul(sql);
     const bytes = encoder.encode(sql);
+    assertIdle(c, "prepare", sql);
     // Copy into a fresh ArrayBuffer so the bytes live in a stable off-heap backing store: the tail
     // pointer SQLite returns is an address inside this buffer.
     const buf = new Uint8Array(new ArrayBuffer(bytes.length + 1));
@@ -406,22 +454,31 @@ export class Database {
   }
 
   /**
-   * `sqlite3_interrupt` on this connection, unconditionally. Prefer `timeoutMs` / `signal` on the
-   * async methods, which scope the interrupt to one execution and report `SqliteCancelled`.
+   * `sqlite3_interrupt` on this connection, once, whatever is (or is not) running. Prefer
+   * `timeoutMs` / `signal` on the async methods: they scope the interrupt to one execution, repeat
+   * it until the step has really stopped, and report `SqliteCancelled`.
+   *
+   * Semantics are SQLite's (https://www.sqlite.org/c3ref/interrupt.html): an in-flight async step
+   * that SQLite is running fails `SqliteError` with `SQLITE_INTERRUPT`. With no statement running
+   * the call is a no-op and does not affect later statements; that includes an async step that was
+   * submitted to the pool but has not entered SQLite yet, so a single call can miss it. Because the
+   * binding never leaves a statement active between executions, the interrupt cannot carry over
+   * into the connection's next execution.
    */
   interrupt(): void {
     if (this.#c.open) this.#c.s.sqlite3_interrupt(this.#c.db);
   }
 
   /**
-   * Finalize every statement and close the connection. Idempotent. Fails `"busy"` while an async
-   * execution is in flight (closing under a running pool thread would free memory it is using);
-   * use `closeAsync` to cancel and wait instead.
+   * Finalize every statement and close the connection. Idempotent. Fails `"busy"` while an
+   * execution holds the connection (closing under a running pool thread, or under a sync execution
+   * that is evaluating parameter getters, would free memory it is about to use); use `closeAsync` to
+   * cancel and wait instead.
    */
   close(): void {
     const c = this.#c;
     if (!c.open) return;
-    if (c.active !== null) throw usage("busy", "close while an async execution is in flight");
+    if (c.active !== null) throw usage("busy", "close while an execution holds this connection");
     for (const st of c.statements) st[finalizeInternal]();
     c.statements.clear();
     c.open = false;
@@ -429,7 +486,11 @@ export class Database {
     if (rc !== SQLITE_OK) throw sqliteError(c, "close", rc);
   }
 
-  /** Cancel the in-flight async execution (if any), wait for it to release the connection, close. */
+  /**
+   * Cancel the in-flight async execution (if any), wait until its outstanding step has returned and
+   * it has released the connection, then close. The cancel keeps interrupting until the step
+   * returns, so this cannot hang on a step that was still being dispatched when it was called.
+   */
   async closeAsync(): Promise<void> {
     // Loop: another caller may start an execution between one settling and this continuation.
     for (let active = this.#c.active; active !== null; active = this.#c.active) {
@@ -529,11 +590,11 @@ export class Statement {
     return this.#async("all", params, options) as Promise<Row[]>;
   }
 
-  /** Release the statement. Idempotent. Fails `"busy"` while an async execution is in flight. */
+  /** Release the statement. Idempotent. Fails `"busy"` while an execution holds the connection. */
   finalize(): void {
     if (this.#finalized) return;
     if (this.#c.active !== null) {
-      throw usage("busy", "finalize while an async execution is in flight", this.sql);
+      throw usage("busy", "finalize while an execution holds this connection", this.sql);
     }
     this[finalizeInternal]();
     this.#c.statements.delete(this);
@@ -555,8 +616,13 @@ export class Statement {
 
   #sync(mode: Mode, params: BindParams | undefined): RunResult | Row | Row[] | undefined {
     this.#assertUsable(mode);
-    const { s } = this.#c;
+    const c = this.#c;
+    const s = c.s;
     const stmt = this.#stmt;
+    // Reserve the connection before `#bind` evaluates caller code (getters, proxies): a getter that
+    // finalizes, closes or executes on this connection now fails "busy" instead of freeing `stmt`.
+    c.active = SYNC_EXECUTION;
+    let result: RunResult | Row | Row[] | undefined;
     try {
       this.#bind(params);
       const rows: Row[] = [];
@@ -571,16 +637,17 @@ export class Statement {
           continue;
         }
         if (rc === SQLITE_DONE) break;
-        throw sqliteError(this.#c, "step", rc, this.sql);
+        throw sqliteError(c, "step", rc, this.sql);
       }
-      return this.#result(mode, rows);
-    } finally {
-      s.sqlite3_reset(stmt);
-      if (this.#holdsCopies) {
-        s.sqlite3_clear_bindings(stmt);
-        this.#holdsCopies = false;
-      }
+      result = this.#result(mode, rows);
+    } catch (e) {
+      // The original failure wins; a reset that repeats a step error is not reported twice.
+      this.#finish();
+      throw e;
     }
+    const rc = this.#finish();
+    if (rc !== SQLITE_OK) throw sqliteError(c, "reset", rc, this.sql);
+    return result;
   }
 
   async #async(
@@ -589,25 +656,22 @@ export class Statement {
     options: ExecOptions = {},
   ): Promise<RunResult | Row | Row[] | undefined> {
     this.#assertUsable(`${mode}Async`);
-    const { timeoutMs, signal } = options;
-    if (timeoutMs !== undefined && !(Number.isFinite(timeoutMs) && timeoutMs >= 0)) {
-      throw usage("invalid-option", `timeoutMs must be a finite number >= 0, got ${timeoutMs}`, this.sql);
-    }
     const c = this.#c;
     const { s, db } = c;
     const stmt = this.#stmt;
     const started = performance.now();
-    if (signal?.aborted) {
-      throw new SqliteCancelled({
-        reason: "aborted",
-        sql: this.sql,
-        elapsedMs: 0,
-        cancelLatencyMs: 0,
-        ...(timeoutMs === undefined ? {} : { timeoutMs }),
-      });
-    }
 
     let release!: () => void;
+    let reinterrupt: ReturnType<typeof setInterval> | undefined;
+    // See `Execution`: interrupt now and keep interrupting until the outstanding step settles. Only
+    // called while `exec` holds the connection, so `db` is open and no other statement can run.
+    const interruptUntilStepReturns = () => {
+      if (reinterrupt !== undefined || !c.open) return;
+      s.sqlite3_interrupt(db);
+      reinterrupt = setInterval(() => {
+        if (c.open) s.sqlite3_interrupt(db);
+      }, REINTERRUPT_MS);
+    };
     const exec: Execution = {
       inStep: false,
       cancelled: null,
@@ -616,16 +680,19 @@ export class Statement {
         if (exec.cancelled !== null) return;
         exec.cancelled = reason;
         exec.cancelledAt = performance.now();
-        // Only interrupt while our step is on a pool thread: an interrupt with no statement running
-        // would linger and hit the connection's next statement.
-        if (exec.inStep && c.open) s.sqlite3_interrupt(db);
+        // Between steps the loop sees the flag before submitting the next one.
+        if (exec.inStep) interruptUntilStepReturns();
       },
       settled: new Promise<void>((resolve) => (release = resolve)),
     };
+    // Reserve the connection before evaluating any caller code (option getters, the signal's
+    // methods, parameter getters): see rule 1 in the module comment.
     c.active = exec;
-    const timer = timeoutMs === undefined ? undefined : setTimeout(() => exec.cancel("deadline"), timeoutMs);
+
+    let timeoutMs: number | undefined;
+    let signal: AbortSignal | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const onAbort = () => exec.cancel("aborted");
-    signal?.addEventListener("abort", onAbort, { once: true });
     const cancelledError = () => {
       const now = performance.now();
       return new SqliteCancelled({
@@ -636,8 +703,30 @@ export class Statement {
         ...(timeoutMs === undefined ? {} : { timeoutMs }),
       });
     };
+    // Reset, release the connection, then detach from the signal (caller code, so last: by then
+    // nothing of this execution touches a native handle). Returns `sqlite3_reset`'s result code.
+    const finish = (): number => {
+      if (timer !== undefined) clearTimeout(timer);
+      const rc = this.#finish();
+      release();
+      signal?.removeEventListener("abort", onAbort);
+      return rc;
+    };
 
+    let result: RunResult | Row | Row[] | undefined;
     try {
+      timeoutMs = options.timeoutMs;
+      signal = options.signal;
+      if (timeoutMs !== undefined && !(Number.isFinite(timeoutMs) && timeoutMs >= 0)) {
+        throw usage("invalid-option", `timeoutMs must be a finite number >= 0, got ${timeoutMs}`, this.sql);
+      }
+      if (signal?.aborted) {
+        exec.cancelled = "aborted";
+        exec.cancelledAt = started;
+        throw cancelledError();
+      }
+      if (timeoutMs !== undefined) timer = setTimeout(() => exec.cancel("deadline"), timeoutMs);
+      signal?.addEventListener("abort", onAbort, { once: true });
       this.#bind(params);
       const rows: Row[] = [];
       let names: string[] | null = null;
@@ -648,7 +737,12 @@ export class Statement {
         try {
           rc = await s.sqlite3_step_nb(stmt);
         } finally {
+          // Synchronously after the step settles, before anything else can use the connection.
           exec.inStep = false;
+          if (reinterrupt !== undefined) {
+            clearInterval(reinterrupt);
+            reinterrupt = undefined;
+          }
         }
         if (rc === SQLITE_ROW) {
           if (mode === "run") continue;
@@ -661,18 +755,39 @@ export class Statement {
         if (exec.cancelled !== null && (rc & 0xff) === SQLITE_INTERRUPT) throw cancelledError();
         throw sqliteError(c, "step", rc, this.sql);
       }
-      return this.#result(mode, rows);
-    } finally {
-      if (timer !== undefined) clearTimeout(timer);
-      signal?.removeEventListener("abort", onAbort);
-      s.sqlite3_reset(stmt);
+      result = this.#result(mode, rows);
+    } catch (e) {
+      // The original failure (step error, cancellation, usage) wins over whatever reset repeats.
+      finish();
+      throw e;
+    }
+    const rc = finish();
+    if (rc !== SQLITE_OK) {
+      // A cancel that landed after the last step returned can surface only at reset.
+      if (exec.cancelled !== null && (rc & 0xff) === SQLITE_INTERRUPT) throw cancelledError();
+      throw sqliteError(c, "reset", rc, this.sql);
+    }
+    return result;
+  }
+
+  /**
+   * Reset the statement (unless it was finalized, which the connection reservation prevents),
+   * drop SQLite's copies of bound text/blobs, and release the connection. Returns the reset's
+   * result code: the error of the last step, or of the commit that a reset after `get`'s first row
+   * performs for an autocommit write (https://www.sqlite.org/c3ref/reset.html).
+   */
+  #finish(): number {
+    const c = this.#c;
+    let rc = SQLITE_OK;
+    if (!this.#finalized) {
+      rc = c.s.sqlite3_reset(this.#stmt);
       if (this.#holdsCopies) {
-        s.sqlite3_clear_bindings(stmt);
+        c.s.sqlite3_clear_bindings(this.#stmt);
         this.#holdsCopies = false;
       }
-      c.active = null;
-      release();
     }
+    c.active = null;
+    return rc;
   }
 
   #result(mode: Mode, rows: Row[]): RunResult | Row | Row[] | undefined {

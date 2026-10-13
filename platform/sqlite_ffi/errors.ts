@@ -25,6 +25,12 @@ export type SqliteOp =
   | "prepare"
   | "bind"
   | "step"
+  /**
+   * `sqlite3_reset` after an otherwise successful execution: for `get`, which stops at the first
+   * row, the reset is where an autocommit write commits, so a commit failure (`SQLITE_BUSY`) and
+   * the rollback that goes with it surface here.
+   */
+  | "reset"
   | "finalize";
 
 /** Why `libsqlite3` was rejected at load time. */

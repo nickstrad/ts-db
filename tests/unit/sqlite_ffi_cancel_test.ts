@@ -5,11 +5,16 @@
  *
  * Latency bounds are deliberately loose against a shared 4-vCPU VM (Fable's probe measured
  * 0.3–8.8 ms); the measured numbers are printed so a regression is visible before it fails.
+ *
+ * Cancels issued while a step is still being dispatched to the pool (immediate abort, immediate
+ * `closeAsync`, `timeoutMs: 0`) run in a subprocess under an external `timeout`: the failure mode
+ * they guard against is a hang, which would otherwise take the test runner down with it.
  */
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Database, SqliteCancelled, SqliteUsageError } from "../../platform/sqlite_ffi/mod.ts";
 
 /** Never terminates: an unbounded recursive CTE. */
@@ -241,4 +246,115 @@ Deno.test("options: timeoutMs is validated; timeoutMs 0 cancels at once", async 
     await db.closeAsync();
     cleanup();
   }
+});
+
+const CONFIG = fileURLToPath(new URL("../../deno.json", import.meta.url));
+const MOD = new URL("../../platform/sqlite_ffi/mod.ts", import.meta.url).href;
+
+/**
+ * Run `code` in a fresh `deno eval` under an external watchdog (`timeout`, then SIGKILL) with core
+ * dumps off. The probe prints one JSON line last; a hang exits 124/137, a crash 128 + signal.
+ */
+async function probe(code: string, seconds: number) {
+  const out = await new Deno.Command("sh", {
+    args: [
+      "-c",
+      'ulimit -c 0; exec timeout -k 2 "$@"',
+      "sh",
+      `${seconds}s`,
+      Deno.execPath(),
+      "eval",
+      "--config",
+      CONFIG,
+      "--ext=ts",
+      code,
+    ],
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  const stdout = new TextDecoder().decode(out.stdout).trim();
+  const stderr = new TextDecoder().decode(out.stderr);
+  assert.equal(out.code, 0, `probe exited ${out.code} (124/137 = hung, 139 = SIGSEGV)\n${stdout}\n${stderr}`);
+  return JSON.parse(stdout.split("\n").at(-1) ?? "null");
+}
+
+Deno.test("race: cancels issued before the pool thread enters sqlite3_step still stop it", async () => {
+  // Each cancel below lands right after `sqlite3_step_nb` was submitted, typically before a pool
+  // thread is inside SQLite, where a single `sqlite3_interrupt` is discarded. Bounded counts:
+  // BOUNDED counts n = 1 .. 100000, so 100000 rows.
+  const result = await probe(
+    `
+const { Database } = await import(${JSON.stringify(MOD)});
+const FOREVER = ${JSON.stringify(FOREVER)};
+const BOUNDED = "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 100000) " +
+  "SELECT count(*) AS n FROM c";
+const tag = (e) => String(e?._tag) + ":" + String(e?.reason ?? e?.codeName ?? "");
+const done = () => "completed";
+const out = { aborts: [], abortMs: [], reuse: [], deadline0: [], deadline0Ms: [], after: [],
+  closes: [], closeMs: [], queued: [], queuedMs: 0, queuedReuse: [] };
+const db = Database.open(":memory:");
+const forever = db.prepare(FOREVER);
+const bounded = db.prepare(BOUNDED);
+for (let i = 0; i < 100; i++) {
+  const ac = new AbortController();
+  const p = forever.getAsync(undefined, { signal: ac.signal }).then(done, tag);
+  const t0 = performance.now();
+  ac.abort();
+  out.aborts.push(await p);
+  out.abortMs.push(performance.now() - t0);
+  // No interrupt lingers into the next execution, async or sync.
+  if (i % 10 === 9) out.reuse.push((await bounded.getAsync())?.n, bounded.get()?.n);
+}
+for (let i = 0; i < 50; i++) {
+  const e = await forever.getAsync(undefined, { timeoutMs: 0 }).then(done, (e) => e);
+  out.deadline0.push(tag(e));
+  out.deadline0Ms.push(e.cancelLatencyMs);
+}
+out.after = [
+  db.prepare("SELECT  42  AS  x").get()?.x,
+  (await db.prepare("SELECT 43 AS x").getAsync())?.x,
+  (await bounded.allAsync())[0]?.n,
+];
+await db.closeAsync();
+for (let i = 0; i < 50; i++) {
+  const d = Database.open(":memory:");
+  const p = d.prepare(FOREVER).getAsync().then(done, tag);
+  const t0 = performance.now();
+  await d.closeAsync();
+  out.closeMs.push(performance.now() - t0);
+  out.closes.push((await p) + (d.isOpen ? ":open" : ":closed"));
+}
+// Sixteen connections cancelled in one tick, while their steps are still queued for the pool.
+const dbs = Array.from({ length: 16 }, () => Database.open(":memory:"));
+const ac = new AbortController();
+const ps = dbs.map((d) => d.prepare(FOREVER).getAsync(undefined, { signal: ac.signal }).then(done, tag));
+const t0 = performance.now();
+ac.abort();
+out.queued = await Promise.all(ps);
+out.queuedMs = performance.now() - t0;
+out.queuedReuse = await Promise.all(dbs.map(async (d) => (await d.prepare(BOUNDED).getAsync())?.n));
+await Promise.all(dbs.map((d) => d.closeAsync()));
+console.log(JSON.stringify(out));
+`,
+    60,
+  );
+  const stats = (xs: number[]) =>
+    `median ${median(xs).toFixed(3)} ms, max ${Math.max(...xs).toFixed(3)} ms over ${xs.length}`;
+  console.log(`immediate abort: ${stats(result.abortMs)}`);
+  console.log(`timeoutMs 0 (binding-reported cancel latency): ${stats(result.deadline0Ms)}`);
+  console.log(`immediate closeAsync: ${stats(result.closeMs)}`);
+  console.log(`16 connections aborted in one tick: all settled in ${result.queuedMs.toFixed(3)} ms`);
+
+  assert.deepEqual(result.aborts, Array(100).fill("SqliteCancelled:aborted"));
+  assert.deepEqual(result.reuse, Array(20).fill(100000));
+  assert.deepEqual(result.deadline0, Array(50).fill("SqliteCancelled:deadline"));
+  assert.deepEqual(result.after, [42, 43, 100000]);
+  assert.deepEqual(result.closes, Array(50).fill("SqliteCancelled:aborted:closed"));
+  assert.deepEqual(result.queued, Array(16).fill("SqliteCancelled:aborted"));
+  assert.deepEqual(result.queuedReuse, Array(16).fill(100000));
+  for (const xs of [result.abortMs, result.deadline0Ms, result.closeMs] as number[][]) {
+    assert.ok(Math.max(...xs) < 2 * MAX_CANCEL_MS, stats(xs));
+    assert.ok(median(xs) < MAX_MEDIAN_CANCEL_MS, stats(xs));
+  }
+  assert.ok(result.queuedMs < 2 * MAX_CANCEL_MS, `16 aborts settled in ${result.queuedMs} ms`);
 });

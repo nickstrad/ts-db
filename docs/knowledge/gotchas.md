@@ -143,3 +143,28 @@ analysis use separate connections from the same `DuckDBInstanceCache` in `platfo
 matching open options. Independent native instances can give analysis stale state after a later ingest;
 `tests/unit/reader_ingest_test.ts` covers ingest → analysis → another ingest → analysis. The standalone logs
 CLI still opens read-only. The writer process must not import the catalog or DuckDB.
+
+## 2026-10-13 — FFI-01 repair: three native-binding traps
+
+Found by the FFI-01 review (`agent-work/items/ffi-binding/review-astra.md` on `review/ffi-01-astra`), fixed in
+`platform/sqlite_ffi/database.ts`:
+
+- **A pending `nonblocking` promise does not mean the native call is running.** `sqlite3_step_nb` returns its
+  promise on _submission_ to Deno's blocking pool. A `sqlite3_interrupt` that lands before a pool thread
+  enters `sqlite3_step` finds no running statement, and SQLite discards it
+  ([docs](https://www.sqlite.org/c3ref/interrupt.html)). One interrupt can therefore be lost and an unbounded
+  query never returns (100 immediate aborts hung). The fix repeats the interrupt every 1 ms until the step
+  promise settles, then clears the timer synchronously in the continuation so nothing leaks into the next
+  statement. Pinned by `race:` in `tests/unit/sqlite_ffi_cancel_test.ts`.
+- **Every caller getter is reentrancy.** Named-parameter getters, array index accessors, proxies and option
+  getters run JavaScript between the lifetime check and the native calls. A getter that called `finalize()` or
+  `close()` made bind/step/reset use a freed pointer (SIGSEGV, exit 139). An execution now reserves its
+  connection before it evaluates any caller code, so nested calls fail `SqliteUsageError("busy")`. Crash
+  probes run in a subprocess under `timeout` with `ulimit -c 0`, so a regression fails the test and the runner
+  keeps going. Pinned by `reentrancy:` in `tests/unit/sqlite_ffi_crud_test.ts`.
+- **`sqlite3_reset` can be where a write fails.** `get` stops at the first row, so for `INSERT ... RETURNING`
+  in autocommit mode the commit happens inside the reset that follows. If that commit fails (`SQLITE_BUSY`
+  against a reader's lock), the insert is rolled back ([docs](https://www.sqlite.org/c3ref/reset.html)).
+  Ignoring reset's result code returned a row that does not exist. The binding now checks it and fails
+  `SqliteError({ op: "reset" })`, but keeps an earlier step or cancellation error when one exists. Pinned by
+  `reset errors:` in the CRUD test.

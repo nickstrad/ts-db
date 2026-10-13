@@ -67,3 +67,34 @@ caps; the statement classifier; lanes. `deno.json` is untouched (item-01 rule): 
 Cancel latency 0.12–0.5 ms (p99 1.7 ms over 20 runs); event loop max gap 3–12 ms during a 150–200 ms
 statement. Point read p50 µs: `node:sqlite` 7.8–8.6, FFI sync 7.5–8.6, FFI nonblocking 46–93 (p99 0.3–1.5 ms).
 Reproduce with `work-scripts/deno/ffi-binding-bench.ts`.
+
+## Repair (2026-10-13)
+
+Astra's review of `acdef43` (`agent-work/items/ffi-binding/review-astra.md` on `review/ffi-01-astra`) returned
+FAIL with three blocking defects. The repair agent was Claude Opus 5.5 (`opus-ffi-01-fix`, worktree
+`/root/Software/tsdb-work/ffi01-fix`). It made these fixes in `platform/sqlite_ffi/database.ts`:
+
+1. **Cancel race in the dispatch-to-entry window.** A cancelled async execution with a step outstanding calls
+   `sqlite3_interrupt` at once and again every 1 ms until that step's promise settles. The timer is cleared
+   synchronously in the continuation, so no interrupt reaches the connection's next execution (the invariant
+   is in the comment on `Execution`). Test: `race:` in `sqlite_ffi_cancel_test.ts`, a subprocess under
+   `timeout` with these cases:
+   - 100 immediate aborts
+   - 50 runs with `timeoutMs: 0`
+   - 50 immediate `closeAsync` calls
+   - 16 connections aborted in one tick
+   - reuse of each connection afterwards
+2. **Reentrant getters.** Sync and async executions reserve the connection (`Connection.active`; sync uses
+   `SYNC_EXECUTION`) before they evaluate caller code: parameter and option getters, array accessors and the
+   signal's methods. Nested `finalize`, `close`, `prepare`, `exec` or execution then fails
+   `SqliteUsageError("busy")`. `exec` and `prepare` encode their SQL before the lifetime check. Tests:
+   `reentrancy:` in `sqlite_ffi_crud_test.ts`. They run the review's two probes plus a 6 × 11 matrix of entry
+   shapes and nested calls, each in a subprocess under `timeout` with `ulimit -c 0`.
+3. **Ignored reset errors.** The result code of `sqlite3_reset` is checked on otherwise successful executions
+   and fails `SqliteError({ op: "reset" })`, with `"reset"` added to `SqliteOp`. An earlier step or
+   cancellation error is kept, and the statement is still reset and the connection released. Test:
+   `reset errors:` (sync and async `get` of `INSERT ... RETURNING` under a reader's lock gives `SQLITE_BUSY`,
+   no lost row, then reuse).
+
+`Database.interrupt()` remains a single unconditional call. Its doc comment now states SQLite's semantics: the
+call can miss a step that is still being dispatched, and it cannot carry over to the next execution.
