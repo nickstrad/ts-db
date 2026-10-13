@@ -511,3 +511,87 @@ console.log(JSON.stringify(out));
   }
   assert.deepEqual(result, expected);
 });
+
+Deno.test("cleanup: signal detachment that closes or reuses the connection sees a finished reset error", async () => {
+  // The re-review's defect 1. An async `get` of INSERT ... RETURNING under a reader's lock fails at
+  // reset (SQLITE_BUSY, extended code 5, "database is locked"). The caller's `removeEventListener`
+  // (an overriding method, or a getter) runs during cleanup and closes the connection, runs a sync
+  // statement (one that fails, overwriting the connection's error state), or starts an async one.
+  // The execution must have read its reset error and released the connection before that hook:
+  // the hook sees `inFlight: false`, its nested call succeeds (or fails on its own terms), and the
+  // outer error is the reset's, not "bad parameter or other API misuse" from a freed handle.
+  const result = await probe(`
+const tagOf = (e) => String(e?._tag) + ":" + String(e?.reason ?? e?.codeName ?? e?.message);
+const hooks = {
+  none: () => {},
+  close: (a) => a.close(),
+  closeAsync: (a) => a.closeAsync(),
+  syncGet: (a) => a.prepare("SELECT count(*) AS n FROM t").get().n,
+  syncError: (a) => a.exec("SELECT * FROM missing"),
+  asyncGet: (a) => a.prepare("SELECT count(*) AS n FROM t").getAsync().then((r) => r.n),
+  sameStatementAsync: (a, st) => st.getAsync([3]),
+};
+const installs = {
+  method: (signal, fn) => { signal.removeEventListener = function () { fn(); }; },
+  getter: (signal, fn) => Object.defineProperty(signal, "removeEventListener", {
+    get() { fn(); return () => {}; },
+  }),
+};
+const out = {};
+for (const [how, install] of Object.entries(installs)) {
+  for (const [name, hook] of Object.entries(hooks)) {
+    const dir = Deno.makeTempDirSync();
+    const a = Database.open(dir + "/t.db");
+    const b = Database.open(dir + "/t.db");
+    a.exec("CREATE TABLE t(x); INSERT INTO t VALUES (1)");
+    b.exec("BEGIN; SELECT * FROM t");
+    const st = a.prepare("INSERT INTO t VALUES (?) RETURNING x");
+    const ac = new AbortController();
+    let seen = { inFlight: "not-called", nested: "not-called" };
+    install(ac.signal, () => {
+      const inFlight = a.inFlight;
+      let nested;
+      try {
+        const r = hook(a, st);
+        nested = r instanceof Promise ? r.then((v) => v ?? "ok", tagOf) : (r ?? "ok");
+      } catch (e) {
+        nested = tagOf(e);
+      }
+      seen = { inFlight, nested };
+    });
+    let outer;
+    try {
+      await st.getAsync([2], { signal: ac.signal });
+      outer = "returned";
+    } catch (e) {
+      outer = [e._tag, e.op, e.code, e.extendedCode, e.codeName, e.sqliteMessage];
+    }
+    const nested = await seen.nested;
+    b.exec("ROLLBACK");
+    const after = a.isOpen ? [st.get([4]).x, a.prepare("SELECT x FROM t ORDER BY x").all().map((r) => r.x)] : "closed";
+    out[how + "/" + name] = [outer, seen.inFlight, nested, after];
+    b.close();
+    await a.closeAsync();
+    Deno.removeSync(dir, { recursive: true });
+  }
+}
+console.log(JSON.stringify(out));
+`);
+  const reset = ["SqliteError", "reset", 5, 5, "SQLITE_BUSY", "database is locked"];
+  // After the reader rolls back: the failed inserts (2, and 3 from the nested execution) were
+  // rolled back with their commits, so a fresh insert of 4 leaves [1, 4].
+  const reused = [4, [1, 4]];
+  const expected: Record<string, unknown[]> = {};
+  for (const how of ["method", "getter"]) {
+    expected[`${how}/none`] = [reset, false, "ok", reused];
+    expected[`${how}/close`] = [reset, false, "ok", "closed"];
+    expected[`${how}/closeAsync`] = [reset, false, "ok", "closed"];
+    // The reader's SHARED lock does not block a read: the row count is 1 (2 was rolled back).
+    expected[`${how}/syncGet`] = [reset, false, 1, reused];
+    expected[`${how}/syncError`] = [reset, false, "SqliteError:SQLITE_ERROR", reused];
+    expected[`${how}/asyncGet`] = [reset, false, 1, reused];
+    // The same statement runs again at once and fails the same way, as its own execution.
+    expected[`${how}/sameStatementAsync`] = [reset, false, "SqliteError:SQLITE_BUSY", reused];
+  }
+  assert.deepEqual(result, expected);
+});

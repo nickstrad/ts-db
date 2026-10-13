@@ -23,7 +23,8 @@
  *    An execution, sync or async, reserves its connection *before* it evaluates any caller-supplied
  *    code (parameter and option getters, array accessors, proxies, the signal's methods), so such
  *    code that finalizes, closes, prepares or executes on the same connection fails `"busy"`
- *    instead of freeing a handle the execution is about to use.
+ *    instead of freeing a handle the execution is about to use. It releases the connection only
+ *    after its last native call, and runs caller code after that (see `Execution`).
  * 2. **Executions run to completion.** Every method steps its statement to the end (or to the first
  *    row for `get`) and resets it before returning, so no statement is left active between calls.
  *    That keeps `sqlite3_interrupt` scoped to the one execution that asked for it: per SQLite's
@@ -209,6 +210,21 @@ export interface ExecOptions {
  * before entry is discarded and repeated, one inside the step stops it, and one that lands after
  * the step returned (statement still active) is cleared by SQLite when the execution's reset brings
  * the running-statement count to zero. None reaches the connection's next execution.
+ *
+ * Cleanup order (every exit path). Caller code can close the connection or start another execution
+ * the moment the connection is released, so everything native happens before that, and caller code
+ * after it:
+ *
+ * 1. reset the statement and, if the outcome is still a success, read the reset's error state into
+ *    the pending error (`sqlite3_extended_errcode` / `sqlite3_errmsg` on the still-owned handle);
+ * 2. clear the deadline timer and SQLite's copies of bound text/blobs;
+ * 3. release the connection (`Connection.active = null`) and settle `settled` (`closeAsync`);
+ * 4. only then detach from the caller's `AbortSignal`. That is caller code (a getter, an
+ *    override), so it may close, execute, or throw; it can no longer touch this execution's native
+ *    state, and an exception from it never replaces the pending error. The pending error is thrown
+ *    (a typed one with the exception as its `cause`; a caller's own exception untouched); after a
+ *    success the exception becomes `SqliteUsageError({ reason: "signal-cleanup" })` (the statement
+ *    ran; its changes stand).
  */
 interface Execution {
   /** True from the submission of a `sqlite3_step_nb` until its promise settles. */
@@ -304,6 +320,18 @@ function sqliteError(c: Connection, op: SqliteOp, rc: number, sql?: string): Sql
 
 function usage(reason: UsageFailure, detail: string, sql?: string): SqliteUsageError {
   return new SqliteUsageError({ reason, detail, ...(sql === undefined ? {} : { sql }) });
+}
+
+/**
+ * Record `cleanupError` as the `cause` of the binding's own pending error, without changing the
+ * error's fields. A caller's own exception (thrown by a parameter getter, say) is left untouched.
+ */
+function attachCause(error: unknown, cleanupError: unknown): void {
+  const ours = error instanceof SqliteError || error instanceof SqliteCancelled ||
+    error instanceof SqliteUsageError || error instanceof SqliteValueError;
+  if (ours && !Object.hasOwn(error, "cause")) {
+    Object.defineProperty(error, "cause", { value: cleanupError, writable: true, configurable: true });
+  }
 }
 
 function assertIdle(c: Connection, what: string, sql?: string): void {
@@ -642,11 +670,17 @@ export class Statement {
       result = this.#result(mode, rows);
     } catch (e) {
       // The original failure wins; a reset that repeats a step error is not reported twice.
-      this.#finish();
+      this.#reset();
+      this.#release();
       throw e;
     }
-    const rc = this.#finish();
-    if (rc !== SQLITE_OK) throw sqliteError(c, "reset", rc, this.sql);
+    // The reset's error is read while the connection is still reserved (see `Execution`).
+    const rc = this.#reset();
+    try {
+      if (rc !== SQLITE_OK) throw sqliteError(c, "reset", rc, this.sql);
+    } finally {
+      this.#release();
+    }
     return result;
   }
 
@@ -661,7 +695,7 @@ export class Statement {
     const stmt = this.#stmt;
     const started = performance.now();
 
-    let release!: () => void;
+    let settle!: () => void;
     let reinterrupt: ReturnType<typeof setInterval> | undefined;
     // See `Execution`: interrupt now and keep interrupting until the outstanding step settles. Only
     // called while `exec` holds the connection, so `db` is open and no other statement can run.
@@ -683,7 +717,7 @@ export class Statement {
         // Between steps the loop sees the flag before submitting the next one.
         if (exec.inStep) interruptUntilStepReturns();
       },
-      settled: new Promise<void>((resolve) => (release = resolve)),
+      settled: new Promise<void>((resolve) => (settle = resolve)),
     };
     // Reserve the connection before evaluating any caller code (option getters, the signal's
     // methods, parameter getters): see rule 1 in the module comment.
@@ -703,17 +737,12 @@ export class Statement {
         ...(timeoutMs === undefined ? {} : { timeoutMs }),
       });
     };
-    // Reset, release the connection, then detach from the signal (caller code, so last: by then
-    // nothing of this execution touches a native handle). Returns `sqlite3_reset`'s result code.
-    const finish = (): number => {
-      if (timer !== undefined) clearTimeout(timer);
-      const rc = this.#finish();
-      release();
-      signal?.removeEventListener("abort", onAbort);
-      return rc;
-    };
 
     let result: RunResult | Row | Row[] | undefined;
+    // The pending outcome: a failure here (step error, cancellation, usage, caller exception) wins
+    // over anything cleanup produces.
+    let failed = false;
+    let failure: unknown;
     try {
       timeoutMs = options.timeoutMs;
       signal = options.signal;
@@ -757,37 +786,69 @@ export class Statement {
       }
       result = this.#result(mode, rows);
     } catch (e) {
-      // The original failure (step error, cancellation, usage) wins over whatever reset repeats.
-      finish();
-      throw e;
+      failed = true;
+      failure = e;
     }
-    const rc = finish();
-    if (rc !== SQLITE_OK) {
-      // A cancel that landed after the last step returned can surface only at reset.
-      if (exec.cancelled !== null && (rc & 0xff) === SQLITE_INTERRUPT) throw cancelledError();
-      throw sqliteError(c, "reset", rc, this.sql);
+
+    // Cleanup, in the order the `Execution` comment gives. Steps 1-3: native work first, while
+    // this execution still owns the open connection, then release it.
+    try {
+      const rc = this.#reset();
+      if (!failed && rc !== SQLITE_OK) {
+        // A cancel that landed after the last step returned can surface only at reset. Otherwise
+        // the reset's error state is read now, before caller code can close or reuse `db`.
+        failed = true;
+        failure = exec.cancelled !== null && (rc & 0xff) === SQLITE_INTERRUPT
+          ? cancelledError()
+          : sqliteError(c, "reset", rc, this.sql);
+      }
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      this.#release();
+      settle();
     }
+    // Step 4: caller code, after which nothing of this execution touches a native handle.
+    if (signal !== undefined) {
+      try {
+        signal.removeEventListener("abort", onAbort);
+      } catch (cleanupError) {
+        if (failed) {
+          attachCause(failure, cleanupError);
+        } else {
+          failed = true;
+          failure = new SqliteUsageError({
+            reason: "signal-cleanup",
+            detail: "detaching from options.signal threw after the statement ran to completion; " +
+              "its changes were not rolled back",
+            sql: this.sql,
+            cause: cleanupError,
+          });
+        }
+      }
+    }
+    if (failed) throw failure;
     return result;
   }
 
   /**
-   * Reset the statement (unless it was finalized, which the connection reservation prevents),
-   * drop SQLite's copies of bound text/blobs, and release the connection. Returns the reset's
-   * result code: the error of the last step, or of the commit that a reset after `get`'s first row
-   * performs for an autocommit write (https://www.sqlite.org/c3ref/reset.html).
+   * Reset the statement (unless it was finalized, which the connection reservation prevents).
+   * Returns the reset's result code: the error of the last step, or of the commit that a reset
+   * after `get`'s first row performs for an autocommit write
+   * (https://www.sqlite.org/c3ref/reset.html). The connection's error state describes that code
+   * until the next call on the connection, so read it (`sqliteError`) before `#release`.
    */
-  #finish(): number {
-    const c = this.#c;
-    let rc = SQLITE_OK;
-    if (!this.#finalized) {
-      rc = c.s.sqlite3_reset(this.#stmt);
-      if (this.#holdsCopies) {
-        c.s.sqlite3_clear_bindings(this.#stmt);
-        this.#holdsCopies = false;
-      }
-    }
-    c.active = null;
-    return rc;
+  #reset(): number {
+    return this.#finalized ? SQLITE_OK : this.#c.s.sqlite3_reset(this.#stmt);
+  }
+
+  /**
+   * The execution's last native call, then the release: drop SQLite's copies of bound text/blobs
+   * and clear the connection's reservation. Caller code may run only after this.
+   */
+  #release(): void {
+    if (this.#holdsCopies && !this.#finalized) this.#c.s.sqlite3_clear_bindings(this.#stmt);
+    this.#holdsCopies = false;
+    this.#c.active = null;
   }
 
   #result(mode: Mode, rows: Row[]): RunResult | Row | Row[] | undefined {

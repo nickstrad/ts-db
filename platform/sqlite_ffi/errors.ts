@@ -49,7 +49,14 @@ export type UsageFailure =
   | "empty-statement"
   | "multiple-statements"
   | "nul-in-sql"
-  | "invalid-option";
+  | "invalid-option"
+  /**
+   * Detaching from `options.signal` (caller code: its `removeEventListener`) threw after an async
+   * execution had otherwise succeeded. The statement ran to completion and its changes stand; the
+   * exception is the error's `cause`. After a failed execution the original error is thrown
+   * instead (a typed one with the exception attached as its `cause`).
+   */
+  | "signal-cleanup";
 
 /** Which value could not cross the boundary. */
 export type ValueFailure = "unsupported-bind-type" | "integer-out-of-range" | "unsafe-integer";
@@ -98,6 +105,8 @@ export class SqliteUsageError extends Data.TaggedError("SqliteUsageError")<{
   readonly reason: UsageFailure;
   readonly detail: string;
   readonly sql?: string;
+  /** For `"signal-cleanup"`: the exception the caller's cleanup threw. */
+  readonly cause?: unknown;
 }> {}
 
 /** A value could not be bound to, or read from, a statement. */

@@ -168,3 +168,11 @@ Found by the FFI-01 review (`agent-work/items/ffi-binding/review-astra.md` on `r
   Ignoring reset's result code returned a row that does not exist. The binding now checks it and fails
   `SqliteError({ op: "reset" })`, but keeps an earlier step or cancellation error when one exists. Pinned by
   `reset errors:` in the CRUD test.
+- **Cleanup has caller code in it too (added 2026-10-13, second repair).** `signal.removeEventListener` is
+  caller code: an override or getter on a real `AbortSignal` can close the connection, run another statement,
+  or throw. Reading the reset's error (`sqlite3_errmsg`) after it hit a closed handle and reported "bad
+  parameter or other API misuse" instead of "database is locked"; a throwing hook replaced the original
+  `SqliteError` or `SqliteCancelled`. Rule for async cleanup: do the native work and build the pending error
+  first, then reset and clear bindings, clear the timer, release the connection and settle waiters. Run caller
+  hooks only after that, inside a `try`/`catch` that cannot replace the pending result. Pinned by the
+  `cleanup:` tests in both FFI unit test files.

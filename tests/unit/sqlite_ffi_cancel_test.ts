@@ -15,7 +15,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Database, SqliteCancelled, SqliteUsageError } from "../../platform/sqlite_ffi/mod.ts";
+import { Database, SqliteCancelled, SqliteError, SqliteUsageError } from "../../platform/sqlite_ffi/mod.ts";
 
 /** Never terminates: an unbounded recursive CTE. */
 const FOREVER = "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c) SELECT count(*) AS n FROM c";
@@ -358,3 +358,145 @@ console.log(JSON.stringify(out));
   }
   assert.ok(result.queuedMs < 2 * MAX_CANCEL_MS, `16 aborts settled in ${result.queuedMs} ms`);
 });
+
+/** Make `signal`'s detachment throw: an overriding method, or a getter that throws on access. */
+const throwingCleanup = {
+  method(signal: AbortSignal) {
+    signal.removeEventListener = () => {
+      throw new Error("cleanup threw");
+    };
+  },
+  getter(signal: AbortSignal) {
+    Object.defineProperty(signal, "removeEventListener", {
+      get() {
+        throw new Error("cleanup threw");
+      },
+    });
+  },
+};
+
+/** The rejection of `p`, which must reject. */
+async function rejection(p: Promise<unknown>): Promise<unknown> {
+  try {
+    await p;
+  } catch (e) {
+    return e;
+  }
+  return assert.fail("the execution resolved; it should have rejected");
+}
+
+const causeMessage = (e: unknown) => ((e as { cause?: unknown }).cause as Error | undefined)?.message;
+
+for (const [how, install] of Object.entries(throwingCleanup)) {
+  Deno.test(`cleanup: a throwing signal detachment (${how}) never replaces the execution's outcome`, async () => {
+    // The re-review's defect 2. Each execution below runs with a signal whose `removeEventListener`
+    // throws during cleanup. The original outcome must win and carry the exception as `cause`;
+    // cleanup still finishes: timers cleared (the test's timer sanitizer fails on a leaked
+    // `timeoutMs` timer), connection released, `closeAsync` waiters resolved, connection reusable.
+    const { dir, cleanup } = scratch();
+    const db = Database.open(join(dir, "t.db"));
+    const signal = () => {
+      const ac = new AbortController();
+      install(ac.signal);
+      return ac;
+    };
+    const reusable = async () => {
+      assert.equal(db.inFlight, false);
+      assert.equal(db.prepare("SELECT 42 AS x").get()?.x, 42);
+      assert.equal((await db.prepare("SELECT 43 AS x").getAsync())?.x, 43);
+    };
+    try {
+      db.exec("CREATE TABLE t(x UNIQUE); INSERT INTO t VALUES (1);");
+      const forever = db.prepare(FOREVER);
+
+      // (a) Cancellation: by deadline, and by the signal itself.
+      let e = await rejection(forever.getAsync(undefined, { signal: signal().signal, timeoutMs: 5 }));
+      assert.ok(e instanceof SqliteCancelled, String(e));
+      assert.equal(e.reason, "deadline");
+      assert.equal(e.timeoutMs, 5);
+      assert.equal(causeMessage(e), "cleanup threw");
+      await reusable();
+      const ac = signal();
+      const aborted = rejection(forever.allAsync(undefined, { signal: ac.signal }));
+      await new Promise((r) => setTimeout(r, 5));
+      ac.abort();
+      e = await aborted;
+      assert.ok(e instanceof SqliteCancelled, String(e));
+      assert.equal(e.reason, "aborted");
+      assert.equal(causeMessage(e), "cleanup threw");
+      await reusable();
+
+      // (b) A reset error: INSERT ... RETURNING under a reader's lock fails its commit at reset.
+      {
+        using reader = Database.open(join(dir, "t.db"));
+        reader.exec("BEGIN; SELECT * FROM t;");
+        const insert = db.prepare("INSERT INTO t VALUES (?) RETURNING x");
+        e = await rejection(insert.getAsync([2], { signal: signal().signal, timeoutMs: 10_000 }));
+        assert.ok(e instanceof SqliteError, String(e));
+        assert.equal(e.op, "reset");
+        assert.equal(e.code, 5);
+        assert.equal(e.extendedCode, 5);
+        assert.equal(e.sqliteMessage, "database is locked");
+        assert.equal(causeMessage(e), "cleanup threw");
+        reader.exec("ROLLBACK");
+      }
+      await reusable();
+
+      // A step error: a duplicate UNIQUE value.
+      e = await rejection(
+        db.prepare("INSERT INTO t VALUES (1)").runAsync(undefined, {
+          signal: signal().signal,
+          timeoutMs: 10_000,
+        }),
+      );
+      assert.ok(e instanceof SqliteError, String(e));
+      assert.equal(e.op, "step");
+      assert.equal(e.extendedCode, 2067);
+      assert.equal(e.codeName, "SQLITE_CONSTRAINT_UNIQUE");
+      assert.equal(e.sqliteMessage, "UNIQUE constraint failed: t.x");
+      assert.equal(causeMessage(e), "cleanup threw");
+      await reusable();
+
+      // A caller's own exception (a parameter getter) is the outcome too, and is left untouched.
+      const own = new Error("getter threw");
+      e = await rejection(
+        db.prepare("SELECT :x AS x").getAsync({
+          get x(): number {
+            throw own;
+          },
+        }, { signal: signal().signal }),
+      );
+      assert.equal(e, own);
+      assert.equal(own.cause, undefined);
+      await reusable();
+
+      // (c) Success: the statement ran, so its changes stand, but the cleanup failure is reported
+      // as a typed usage error rather than lost.
+      e = await rejection(
+        db.prepare("INSERT INTO t VALUES (7)").runAsync(undefined, {
+          signal: signal().signal,
+          timeoutMs: 10_000,
+        }),
+      );
+      assert.ok(e instanceof SqliteUsageError, String(e));
+      assert.equal(e.reason, "signal-cleanup");
+      assert.equal(e.sql, "INSERT INTO t VALUES (7)");
+      assert.equal(causeMessage(e), "cleanup threw");
+      assert.deepEqual(db.prepare("SELECT x FROM t ORDER BY x").all().map((r) => r.x), [1, 7]);
+      await reusable();
+
+      // closeAsync cancels an execution whose cleanup throws, and still resolves and closes.
+      const pending = rejection(forever.getAsync(undefined, { signal: signal().signal }));
+      await new Promise((r) => setTimeout(r, 5));
+      await db.closeAsync();
+      assert.equal(db.isOpen, false);
+      e = await pending;
+      assert.ok(e instanceof SqliteCancelled, String(e));
+      assert.equal(e.reason, "aborted");
+      assert.equal(causeMessage(e), "cleanup threw");
+    } finally {
+      await db.closeAsync();
+      cleanup();
+    }
+  });
+}
