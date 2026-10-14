@@ -94,3 +94,13 @@ fail on close errors` commit (interrupt test,
 probe fails at the 15 s guard, native-disabled interrupt reports and SIGKILLs (137, was SIGSEGV 139), a
 synchronous stall is killed by the watchdog thread after 25 s. `test:prop` 84 passed, `test` 686 passed,
 50-seed interrupt sweep all PASS.
+
+## Arbitration fixup (2026-10-14, `claude-sonnet-ffi-07-fixup2`)
+
+Muse Wonder Full arbitration (NITS) required arming the watchdog across fixture setup and cleanup. Done in
+`tests: arm the interrupt watchdog across fixture setup and cleanup`, confined to
+`tests/property/ffi_interrupt_test.ts`: a beat before `withFixture` (covers `Database.open`), beats inside
+`withFixture` before the seed insert, the baseline reads, `fn` and cleanup, and the header's layer-3 sentence
+amended. The review-2 `fixture-stall.ts` injection now ends with the watchdog FATAL and exit 137 in 31 s
+(before: external timeout, 124). Alone, lint, check, fmt pass; `test:prop` 84 passed; 50-seed interrupt sweep
+50 PASS with no FATAL/HANG.
