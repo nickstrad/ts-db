@@ -8,7 +8,6 @@ const samples: {
   step_ran_ms_before_interrupt: number;
   event_loop_ticks_during_step: number;
   interrupt_latency_ms: number;
-  rc: number;
 }[] = [];
 try {
   const statement = db.prepare(
@@ -38,7 +37,6 @@ try {
         step_ran_ms_before_interrupt: Math.round(tInt - t0),
         event_loop_ticks_during_step: ticksDuringStep,
         interrupt_latency_ms: +(performance.now() - tInt).toFixed(3),
-        rc: 9,
       });
     } finally {
       clearInterval(ticker);
@@ -55,7 +53,10 @@ try {
     samples,
     interrupt_latency_p99_ms: latencies[Math.ceil(0.99 * latencies.length) - 1],
     min_event_loop_ticks: Math.min(...samples.map((s) => s.event_loop_ticks_during_step)),
-    notes: ["rc 9 = SQLITE_INTERRUPT; top-level PoC fields describe the slowest interrupt"],
+    notes: [
+      "no rc field: SqliteCancelled carries no result code, so the typed cancellation settlement is the measurement (the PoC read the raw step rc, 9 = SQLITE_INTERRUPT)",
+      "top-level PoC fields describe the slowest interrupt",
+    ],
   }));
   assert.ok(latencies[49] <= 20, "interrupt p99 <= 20 ms");
   assert.ok(samples.every((s) => s.event_loop_ticks_during_step >= 90), "loop ticks >= 90/100");

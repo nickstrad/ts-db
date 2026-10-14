@@ -261,8 +261,22 @@ fails if a name or parameter is documented here and absent there, or the reverse
 `handler_kind`, `name`, `path` and `deadline_hits`. Joins deadline-tagged `sql_events` to the nearest
 completing request by trace, app and request time window (one match per SQL event, including millisecond
 timestamp rounding at both window boundaries). Parameters: `since`, `until`, `appId` (all optional). Failed
-statements are logged even without `TRACE_SQL`; execution paths in older JSONL are NULL. Ingest adds the
-nullable `path` column to existing v2 event logs.
+statements are logged even without `TRACE_SQL` (`deno task integration` runs a second, short pass with
+`TRACE_SQL=false` to check it); execution paths in older JSONL are NULL. Ingest adds the nullable `path`
+column to existing v2 event logs.
+
+**Upgrade note:** an event log ingested before FFI-06 has no `sql_events.path` column until the next ingest,
+and until then this query (only this one) fails with a DuckDB binder error
+(`Table "s" does not have a column named
+"path"`). Run `deno task logs:ingest` once after upgrading (the
+server's periodic ingest sweep or `POST /admin/logs/ingest` heals it the same way). The query is unchanged
+because no `path`-free form can still report the execution path.
+
+**Attribution limits** (pinned in `tests/unit/analysis_catalog_test.ts`): the match uses only trace, app and
+time. If two requests share a trace and overlap in time, the earliest-completing request gets the hits; if a
+trace id is reused back to back, a deadline event in the 1 ms after the earlier request ends goes to that
+earlier request even when the later one has already started. An event with no matching request (outside the
+window, or in another app) is still counted, with NULL `handler_kind` and `name`.
 
 ### `slowest-sql`
 

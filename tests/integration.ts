@@ -14,6 +14,17 @@
  *              query (item 23) names the handlers
  * ```
  *
+ * Then the FFI-06 deadline scenario (`deadlineScenario`), twice, each on its own scratch server and a
+ * private Postgres database (`npm:postgres`, `DATABASE_URL`) with `STATEMENT_DEADLINE_MS=50`: two
+ * API-key tenants, one with 500,000 JSON games so `winsByMark`'s grouped count outruns the deadline
+ * through the nonblocking binding path (`platform/sqlite_ffi`), the other serving primary-key reads.
+ * Pass 1 (`TRACE_SQL=true`): 20 deadline windows each answer HTTP 504 `StatementDeadlineError` while the
+ * other tenant's point reads, issued sequentially throughout, stay under a flat 50 ms p99 (the load
+ * average is printed beside it, not folded into the budget). Pass 2 (`TRACE_SQL=false`, 3 windows) checks
+ * only the logging claim in docs/observability.md: the failed statements still produce their `sql`
+ * events. After shutdown each pass runs `logs:ingest` and `logs:query deadline-hits-per-handler-hour`
+ * and asserts `path = 'nonblocking'` with the hits summed across hour buckets.
+ *
  * The event-log file is read only after the server exits because the reader child holds it open,
  * and DuckDB's file lock refuses even a `READ_ONLY` open from another process while it does. It is
  * read from a `deno eval` subprocess (`duckdbRows`), so this process never loads `@duckdb/node-api`
@@ -34,6 +45,9 @@ import postgres from "npm:postgres@3.4.9";
 import { Database } from "../platform/sqlite_ffi/mod.ts";
 import { ConfigTest } from "../platform/config.ts";
 import { Analysis, EventSink } from "../platform/services.ts";
+
+/** The plan's flat p99 budget for point reads while another tenant's statement hits its deadline. */
+const POINT_P99_BUDGET_MS = 50;
 
 /** The token every scratch server accepts, for apps and admin alike. */
 export const DEV_TOKEN = "dev-only";
@@ -459,182 +473,210 @@ const program = Effect.gen(function* () {
 
 // FFI-06: real HTTP, two API-key tenants, and the production event-log projection.
 // A private Postgres database avoids mutating the dev tenant registry used by the unit suite.
-const deadlineScenario = Effect.gen(function* () {
-  const root = yield* scratchRoot("ffi06-integration-");
-  const databaseName = "ffi06_" + crypto.randomUUID().replaceAll("-", "");
-  const sourceUrl = Deno.env.get("DATABASE_URL") ?? "postgres://tsdb:tsdb@localhost:5432/tsdb";
-  const admin = yield* Effect.acquireRelease(
-    Effect.sync(() => postgres(sourceUrl, { max: 1, onnotice() {} })),
-    (sql) => Effect.promise(() => sql.end()),
-  );
-  yield* Effect.acquireRelease(
-    Effect.promise(() => admin.unsafe(`CREATE DATABASE "${databaseName}"`)),
-    () => Effect.promise(() => admin.unsafe(`DROP DATABASE "${databaseName}"`)),
-  );
-  const url = new URL(sourceUrl);
-  url.pathname = "/" + databaseName;
-  const migrated = yield* Effect.promise(() =>
-    new Deno.Command(Deno.execPath(), {
-      args: ["run", "-A", "scripts/db/migrate.ts"],
-      env: { DATABASE_URL: url.href },
-      stdout: "piped",
-      stderr: "piped",
-    }).output()
-  );
-  assert.ok(migrated.success, new TextDecoder().decode(migrated.stderr));
-  const server = yield* startScratchServer(root, {
-    TENANCY: "api-key",
-    DATABASE_URL: url.href,
-    TENANTS_DIR: resolve(root, "tenants"),
-    STATEMENT_DEADLINE_MS: "50",
-    READER_CALL_TIMEOUT_MS: "10000",
-    TRACE_SQL: "true",
-  });
-  const request = async (
-    path: string,
-    body: unknown,
-    token = DEV_TOKEN,
-    traceId: string = crypto.randomUUID(),
-  ) => {
-    const response = await fetch(server.base + path, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${token}`,
-        "content-type": "application/json",
-        "x-trace-id": traceId,
-      },
-      body: JSON.stringify(body),
+// `traceSql` sets TRACE_SQL for the server; `measure` runs the point-read competition and its p99 gate.
+interface DeadlinePass {
+  readonly label: string;
+  readonly traceSql: boolean;
+  readonly rounds: number;
+  readonly measure: boolean;
+}
+const deadlineScenario = (pass: DeadlinePass) =>
+  Effect.gen(function* () {
+    const root = yield* scratchRoot("ffi06-integration-");
+    const databaseName = "ffi06_" + crypto.randomUUID().replaceAll("-", "");
+    const sourceUrl = Deno.env.get("DATABASE_URL") ?? "postgres://tsdb:tsdb@localhost:5432/tsdb";
+    const admin = yield* Effect.acquireRelease(
+      Effect.sync(() => postgres(sourceUrl, { max: 1, onnotice() {} })),
+      (sql) => Effect.promise(() => sql.end()),
+    );
+    yield* Effect.acquireRelease(
+      Effect.promise(() => admin.unsafe(`CREATE DATABASE "${databaseName}"`)),
+      () => Effect.promise(() => admin.unsafe(`DROP DATABASE "${databaseName}"`)),
+    );
+    const url = new URL(sourceUrl);
+    url.pathname = "/" + databaseName;
+    const migrated = yield* Effect.promise(() =>
+      new Deno.Command(Deno.execPath(), {
+        args: ["run", "-A", "scripts/db/migrate.ts"],
+        env: { DATABASE_URL: url.href },
+        stdout: "piped",
+        stderr: "piped",
+      }).output()
+    );
+    assert.ok(migrated.success, new TextDecoder().decode(migrated.stderr));
+    const server = yield* startScratchServer(root, {
+      TENANCY: "api-key",
+      DATABASE_URL: url.href,
+      TENANTS_DIR: resolve(root, "tenants"),
+      STATEMENT_DEADLINE_MS: "50",
+      READER_CALL_TIMEOUT_MS: "10000",
+      TRACE_SQL: String(pass.traceSql),
     });
-    return { status: response.status, body: await response.json() };
-  };
-  const tenants = yield* Effect.promise(async () => {
-    const result: { id: string; key: string }[] = [];
-    for (const name of ["big", "small"]) {
-      const created = await request("/admin/tenants", { name, slug: name });
-      assert.equal(created.status, 200, JSON.stringify(created.body));
-      result.push({ id: created.body.result.tenant.id, key: created.body.result.apiKey.plaintext });
-    }
-    return result;
-  });
-  // Initialize each tenant through the real router before seeding its own file through the binding.
-  yield* Effect.promise(async () => {
-    for (const tenant of tenants) {
-      const created = await request("/apps/tic-tac-toe-json/mutation/createGame", {
-        xPlayer: "alice",
-        oPlayer: "bob",
-      }, tenant.key);
-      assert.equal(created.status, 200, JSON.stringify(created.body));
-    }
-    const db = Database.open(resolve(root, "tenants", tenants[0].id + ".db"));
-    try {
-      const doc = JSON.stringify({
-        xPlayer: "alice",
-        oPlayer: "bob",
-        board: Array(9).fill(null),
-        turn: "X",
-        status: "won",
-        winner: "X",
+    const request = async (
+      path: string,
+      body: unknown,
+      token = DEV_TOKEN,
+      traceId: string = crypto.randomUUID(),
+    ) => {
+      const response = await fetch(server.base + path, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          "x-trace-id": traceId,
+        },
+        body: JSON.stringify(body),
       });
-      // countBy traverses every matching JSON doc; ample margin above the 50 ms deadline.
-      db.prepare(`WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i < 499999)
+      return { status: response.status, body: await response.json() };
+    };
+    const tenants = yield* Effect.promise(async () => {
+      const result: { id: string; key: string }[] = [];
+      for (const name of ["big", "small"]) {
+        const created = await request("/admin/tenants", { name, slug: name });
+        assert.equal(created.status, 200, JSON.stringify(created.body));
+        result.push({ id: created.body.result.tenant.id, key: created.body.result.apiKey.plaintext });
+      }
+      return result;
+    });
+    // Initialize each tenant through the real router before seeding its own file through the binding.
+    yield* Effect.promise(async () => {
+      for (const tenant of tenants) {
+        const created = await request("/apps/tic-tac-toe-json/mutation/createGame", {
+          xPlayer: "alice",
+          oPlayer: "bob",
+        }, tenant.key);
+        assert.equal(created.status, 200, JSON.stringify(created.body));
+      }
+      const db = Database.open(resolve(root, "tenants", tenants[0].id + ".db"));
+      try {
+        const doc = JSON.stringify({
+          xPlayer: "alice",
+          oPlayer: "bob",
+          board: Array(9).fill(null),
+          turn: "X",
+          status: "won",
+          winner: "X",
+        });
+        // countBy traverses every matching JSON doc; ample margin above the 50 ms deadline.
+        db.prepare(`WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i < 499999)
         INSERT INTO games (_id, _creationTime, _version, doc)
         SELECT 'seed-' || i, i, 1, ? FROM n`).run([doc]);
-    } finally {
-      db.close();
-    }
-  });
-  const smallGame = yield* Effect.promise(() =>
-    request(
-      "/apps/tic-tac-toe-json/mutation/createGame",
-      { xPlayer: "alice", oPlayer: "bob" },
-      tenants[1].key,
-    )
-  );
-  assert.equal(smallGame.status, 200);
-  const pointBody = { gameId: smallGame.body.result.gameId };
-  // Warm connection/library/JIT/auth-cache paths before measuring.
-  for (let i = 0; i < 5; i++) {
-    const warm = yield* Effect.promise(() =>
-      request("/apps/tic-tac-toe-json/query/getGame", pointBody, tenants[1].key)
-    );
-    assert.equal(warm.status, 200);
-  }
-  const loadavg = Deno.loadavg();
-  const factor = Math.max(1, loadavg[0] / navigator.hardwareConcurrency);
-  const traceIds: string[] = [];
-  const evidence = yield* Effect.promise(async () => {
-    const pointMs: number[] = [];
-    let overlap = 0;
-    // Twenty separate deadline windows produce enough point reads for a meaningful p99.
-    for (let round = 0; round < 20; round++) {
-      const traceId = "ffi06-deadline-" + crypto.randomUUID();
-      traceIds.push(traceId);
-      let finished = false;
-      const slow = request("/apps/tic-tac-toe-json/query/winsByMark", {}, tenants[0].key, traceId)
-        .finally(() => {
-          finished = true;
-        });
-      await new Promise((r) => setTimeout(r, 10));
-      while (!finished) {
-        const t = performance.now();
-        const fast = await request("/apps/tic-tac-toe-json/query/getGame", pointBody, tenants[1].key);
-        const ms = performance.now() - t;
-        assert.equal(fast.status, 200, JSON.stringify(fast.body));
-        assert.equal(fast.body.result._id, pointBody.gameId);
-        // Include every read started during the competing call, even if it finishes after it.
-        pointMs.push(ms);
-        if (!finished) overlap++;
+      } finally {
+        db.close();
       }
-      const response = await slow;
-      assert.equal(response.status, 504, JSON.stringify(response.body));
-      assert.equal(response.body.error.tag, "StatementDeadlineError");
+    });
+    const smallGame = yield* Effect.promise(() =>
+      request(
+        "/apps/tic-tac-toe-json/mutation/createGame",
+        { xPlayer: "alice", oPlayer: "bob" },
+        tenants[1].key,
+      )
+    );
+    assert.equal(smallGame.status, 200);
+    const pointBody = { gameId: smallGame.body.result.gameId };
+    // Warm connection/library/JIT/auth-cache paths before measuring.
+    for (let i = 0; i < 5; i++) {
+      const warm = yield* Effect.promise(() =>
+        request("/apps/tic-tac-toe-json/query/getGame", pointBody, tenants[1].key)
+      );
+      assert.equal(warm.status, 200);
     }
-    assert.ok(overlap >= 50, `only ${overlap} overlapping point reads`);
-    pointMs.sort((a, b) => a - b);
-    const p99 = pointMs[Math.ceil(pointMs.length * 0.99) - 1];
-    assert.ok(p99 < 50 * factor, `point p99 ${p99} ms, budget ${50 * factor}, load ${loadavg}`);
-    return { point_reads: pointMs.length, point_p99_ms: p99, loadavg, budget_ms: 50 * factor };
-  });
-  assert.deepEqual(yield* awaitTraceIdsInLog(server.logDir, traceIds), []);
-  // Ingest after shutdown captures both server and reader logs and exercises the operator CLI.
-  assert.equal((yield* server.stop).code, 0);
-  const ingest = yield* Effect.promise(() =>
-    new Deno.Command(Deno.execPath(), {
-      args: ["task", "logs:ingest"],
-      env: server.env,
-      stdout: "piped",
-      stderr: "piped",
-    }).output()
-  );
-  assert.ok(ingest.success, new TextDecoder().decode(ingest.stderr));
-  const rows = yield* duckdbRows(
-    server.eventLogPath,
-    `SELECT path, error_tag, count(*) AS hits FROM sql_events
+    const loadavg = Deno.loadavg();
+    const traceIds: string[] = [];
+    const evidence = yield* Effect.promise(async () => {
+      const pointMs: number[] = [];
+      let overlap = 0;
+      // Twenty separate deadline windows produce enough point reads for a meaningful p99.
+      for (let round = 0; round < pass.rounds; round++) {
+        const traceId = "ffi06-deadline-" + crypto.randomUUID();
+        traceIds.push(traceId);
+        let finished = false;
+        const slow = request("/apps/tic-tac-toe-json/query/winsByMark", {}, tenants[0].key, traceId)
+          .finally(() => {
+            finished = true;
+          });
+        await new Promise((r) => setTimeout(r, 10));
+        while (pass.measure && !finished) {
+          const t = performance.now();
+          const fast = await request("/apps/tic-tac-toe-json/query/getGame", pointBody, tenants[1].key);
+          const ms = performance.now() - t;
+          assert.equal(fast.status, 200, JSON.stringify(fast.body));
+          assert.equal(fast.body.result._id, pointBody.gameId);
+          // Include every read started during the competing call, even if it finishes after it.
+          pointMs.push(ms);
+          if (!finished) overlap++;
+        }
+        const response = await slow;
+        assert.equal(response.status, 504, JSON.stringify(response.body));
+        assert.equal(response.body.error.tag, "StatementDeadlineError");
+      }
+      if (!pass.measure) return { rounds: pass.rounds, loadavg };
+      assert.ok(overlap >= 50, `only ${overlap} overlapping point reads`);
+      pointMs.sort((a, b) => a - b);
+      const p99 = pointMs[Math.ceil(pointMs.length * 0.99) - 1];
+      // The plan's flat budget; the load average is printed beside it, not folded into it.
+      assert.ok(
+        p99 < POINT_P99_BUDGET_MS,
+        `point p99 ${p99} ms, budget ${POINT_P99_BUDGET_MS}, load ${loadavg}`,
+      );
+      return { point_reads: pointMs.length, point_p99_ms: p99, budget_ms: POINT_P99_BUDGET_MS, loadavg };
+    });
+    assert.deepEqual(yield* awaitTraceIdsInLog(server.logDir, traceIds), []);
+    // Ingest after shutdown captures both server and reader logs and exercises the operator CLI.
+    assert.equal((yield* server.stop).code, 0);
+    const ingest = yield* Effect.promise(() =>
+      new Deno.Command(Deno.execPath(), {
+        args: ["task", "logs:ingest"],
+        env: server.env,
+        stdout: "piped",
+        stderr: "piped",
+      }).output()
+    );
+    assert.ok(ingest.success, new TextDecoder().decode(ingest.stderr));
+    const rows = yield* duckdbRows(
+      server.eventLogPath,
+      `SELECT path, error_tag, count(*) AS hits FROM sql_events
      WHERE trace_id IN (${traceIds.map(sqlString).join(",")}) GROUP BY path, error_tag`,
-  );
-  assert.deepEqual(rows, [{ path: "nonblocking", error_tag: "StatementDeadlineError", hits: "20" }]);
-  const query = yield* Effect.promise(() =>
-    new Deno.Command(Deno.execPath(), {
-      args: ["task", "logs:query", "deadline-hits-per-handler-hour", "--format", "json"],
-      env: server.env,
-      stdout: "piped",
-      stderr: "piped",
-    }).output()
-  );
-  assert.ok(query.success, new TextDecoder().decode(query.stderr));
-  const projected = JSON.parse(new TextDecoder().decode(query.stdout)) as Record<string, unknown>[];
-  assert.ok(
-    projected.some((r) =>
-      r.path === "nonblocking" && r.name === "winsByMark" && Number(r.deadline_hits) === 20
-    ),
-    JSON.stringify(projected),
-  );
-  console.log(`PASS FFI-06 deadline HTTP 504 / two tenants: ${JSON.stringify(evidence)}`);
-  console.log("logs:ingest " + new TextDecoder().decode(ingest.stdout).trim());
-  console.log("logs:query " + JSON.stringify(projected));
-});
+    );
+    // With TRACE_SQL unset these are the only sql events for the traces: failed statements are always logged.
+    assert.deepEqual(rows, [{
+      path: "nonblocking",
+      error_tag: "StatementDeadlineError",
+      hits: String(pass.rounds),
+    }]);
+    const query = yield* Effect.promise(() =>
+      new Deno.Command(Deno.execPath(), {
+        args: ["task", "logs:query", "deadline-hits-per-handler-hour", "--format", "json"],
+        env: server.env,
+        stdout: "piped",
+        stderr: "piped",
+      }).output()
+    );
+    assert.ok(query.success, new TextDecoder().decode(query.stderr));
+    const projected = JSON.parse(new TextDecoder().decode(query.stdout)) as Record<string, unknown>[];
+    // Sum across hour buckets: the rounds may straddle an hour boundary and split the rows.
+    const projectedHits = projected
+      .filter((r) => r.path === "nonblocking" && r.name === "winsByMark" && r.app_id === "tic-tac-toe-json")
+      .reduce((n, r) => n + Number(r.deadline_hits), 0);
+    assert.equal(projectedHits, pass.rounds, JSON.stringify(projected));
+    console.log(`PASS FFI-06 deadline HTTP 504 / two tenants (${pass.label}): ${JSON.stringify(evidence)}`);
+    console.log("logs:ingest " + new TextDecoder().decode(ingest.stdout).trim());
+    console.log("logs:query " + JSON.stringify(projected));
+  });
 
 if (import.meta.main) {
   await Effect.runPromise(Effect.scoped(program));
-  await Effect.runPromise(Effect.scoped(deadlineScenario));
+  await Effect.runPromise(Effect.scoped(deadlineScenario({
+    label: "TRACE_SQL=true, point-read p99 gate",
+    traceSql: true,
+    rounds: 20,
+    measure: true,
+  })));
+  // The documented guarantee that failed statements are logged without TRACE_SQL (platform/document_reader.ts).
+  await Effect.runPromise(Effect.scoped(deadlineScenario({
+    label: "TRACE_SQL=false, failed-statement logging only",
+    traceSql: false,
+    rounds: 3,
+    measure: false,
+  })));
 }
