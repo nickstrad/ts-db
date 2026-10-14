@@ -121,11 +121,20 @@ wrong backend. (2026-10-11)
 
 ## 2026-10-11 — MT-07 tenant reader and preparation boundary
 
-Tenant queries carry a writer-resolved location over private IPC; no path or tenant id is copied from HTTP
-arguments. Do not import `platform/tenants/routing.ts` in the reader: it loads `node:sqlite` and would violate
-the two-native-libraries process boundary. The pure UUID parser lives in `registry.ts`. Tenant readers are
-scoped to one query for now; a bounded, leased tenant reader pool is a performance follow-up, not a reason to
-fall back to the legacy app file.
+> **Superseded 2026-10-14 (FFI-08).** The boundary below is no longer current. Original account (2026-10-11):
+> tenant queries carried a writer-resolved location over private IPC, and `platform/tenants/routing.ts` loaded
+> `node:sqlite`, so it must not be imported in the reader. Current state: `platform/tenants/routing.ts`
+> imports the FFI binding (`platform/sqlite_ffi/`), and no file under `platform/` imports `node:sqlite`
+> (`tests/unit/boundaries_test.ts`). Document queries are intercepted in-process by `DocumentReaderClientLive`
+> (`platform/layers.ts`, `platform/document_reader.ts`): they open a read-only FFI connection per handler in
+> the server process and never cross IPC. Ingest and analysis still go to the reader child over IPC. The
+> location the reader uses is still the writer-resolved tenant file, validated in the reader (absolute path,
+> parseable tenant id); no path or tenant id is taken from HTTP arguments. See ADR 0008 for the current
+> two-copies and threading rules.
+
+Original account, kept for history: no path or tenant id is copied from HTTP arguments. The pure UUID parser
+lives in `registry.ts`. Tenant readers are scoped to one query for now; a bounded, leased tenant reader pool
+is a performance follow-up, not a reason to fall back to the legacy app file.
 
 Writer initialization and query preparation must share the same successful-preparation barrier. Calling
 `router.prepare` again on every query takes `BEGIN IMMEDIATE` on a second connection and can block the writer

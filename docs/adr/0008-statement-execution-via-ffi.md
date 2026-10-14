@@ -102,9 +102,12 @@ copies too, so `SQLITE_LIBRARY` is passed to every open and the binding caches o
 
 ## Measurements
 
-All numbers are from vm-1 (Deno 2.9.5, the system `libsqlite3` the binding's default search order finds).
-Gates are same-run ratios; the recorded load average is the 1/5/15-minute load. Source: `perf/README.md`,
-FFI-06 section.
+All numbers are from vm-1 (Deno 2.9.5, the system `libsqlite3` the binding's default search order finds). The
+parity gate is a same-run relative bound (`blocking p50 ≤ 1.3 × node p50 + 1 µs`). The other gates are fixed
+absolute budgets, not ratios: read 10.2 µs blocking and 100 / 3000 µs nonblocking (`perf/ffi_read_cost.ts`);
+interrupt 20 ms p99 and 90 ticks (`perf/ffi_interrupt.ts`); cap 100 ms (`perf/ffi_cap.ts`); HTTP integration a
+flat 50 ms p99. Host load (1/5/15-minute) is recorded for every run, for both kinds of gate. Source:
+`perf/README.md`, FFI-06 section.
 
 Quiet-host read cost, three runs, 20,000 samples per path each (`deno run -A perf/ffi_read_cost.ts`):
 
@@ -114,9 +117,10 @@ Quiet-host read cost, three runs, 20,000 samples per path each (`deno run -A per
 | 2   | 0.70 / 1.38 / 1.77 | 7.21 / 29.24      | 7.64 / 29.66              | 47.56 / 745.04               | 10.37 (PASS)          |
 | 3   | 0.70 / 1.38 / 1.77 | 7.10 / 29.19      | 7.57 / 31.80              | 47.80 / 480.43               | 10.23 (PASS)          |
 
-The original strict gate (blocking p50 ≤ node p50) fails all three runs by 3.5 to 6 %. The FFI-06 review
-traced the gap to the floor of four FFI crossings per read, against node's single native call. Nonblocking p50
-stays under the 100 µs budget and p99 under 3 ms in all three runs.
+The original strict gate (blocking p50 ≤ node p50) fails all three runs by approximately 6.0 to 6.6 % (6.06,
+5.96 and 6.62 % from the rows above). The FFI-06 review traced the gap to the floor of four FFI crossings per
+read, against node's single native call. Nonblocking p50 stays under the 100 µs budget and p99 under 3 ms in
+all three runs.
 
 Interrupt and cap, quiet host at load 0.58 (review re-run): interrupt p99 4.034 ms with at least 90
 ten-millisecond ticks in each window; 32 concurrent unbounded counts all cancelled with reason `deadline`,
@@ -174,8 +178,9 @@ Accepted, with the risks from the plan's register (`docs/plans/ffi-implementatio
   cancellation reached 108 to 140 ms on 4 vCPUs. That is CPU contention delaying the main thread's timers, not
   pool starvation (the raw binding stayed under about 85 ms). Follow-up: measure at the document-reader or
   HTTP boundary, and revisit the per-tenant sub-cap (plan risk 6).
-- **Timing gates under load (21).** Several timing assertions are fragile on a shared host. Gates are ratios
-  with the load recorded. Making the remaining gates deterministic is a side-quest item.
+- **Timing gates under load (21).** Several timing assertions are fragile on a shared host. Only the parity
+  gate is a same-run ratio; the absolute budgets are fixed. Host load is recorded with each run. Making the
+  load-sensitive gates ratios, or otherwise deterministic, is the follow-up and a side-quest item.
 - **NaN binds as NULL (22).** `sqlite3_bind_double` turns NaN into NULL in both drivers, so the plan's "NaN
   rejected" premise was wrong. FFI-07 pins NULL on both sides.
 - **Unbounded reads can now fail with 504.** A long statement returns `StatementDeadlineError` rather than

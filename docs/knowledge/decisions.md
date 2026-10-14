@@ -16,7 +16,7 @@ they pass it. Point reads and writes stay synchronous and are never interrupted.
 
 Human decision (nickstrad, ~23:03 CDT, 2026-10-13, relayed through the coordinator). The plan's first read
 gate, "blocking p50 ≤ `node:sqlite` p50 in the same run", cannot be met by a per-step native call: four FFI
-crossings per read cost 3.5 to 6 % over node's single call. The gate is now
+crossings per read cost approximately 6.0 to 6.6 % over node's single call. The gate is now
 `blocking p50 ≤ 1.3 × node p50 + 1 µs`, and it passes on the FFI-06 quiet-host runs. Strict parity is recorded
 as not met. The end-to-end HTTP point reads are faster than before the cutover. See ADR 0008 and plan risk 19.
 
