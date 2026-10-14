@@ -31,3 +31,15 @@ path column Body contains load/numbers, golden-line change, ALTER note and logs 
 add FFI-06 brief commit. Push item/ffi-06-evidence only. Log task_completed with validation and SHAs; report
 failures honestly. Reviewer is a fresh Claude Opus 5.5 unit, dispatched by the coordinator. Keep the worktree
 until coordinator inspection.
+
+## Fixup after Opus review
+
+Actor `claude-sonnet-ffi-06-fixup`, commit `11f4e04` on `item/ffi-06-evidence`. The Opus review (300470d) failed
+only the strict same-run `node:sqlite` parity gate (plan amendment pending with the human; thresholds and the
+harness exit status untouched) and listed eight NITS, all addressed: (1) value assertions for the deadline catalog
+query; (2) `rc` dropped from `perf/ffi_interrupt.ts` output; (3) README evidence labels/order; (4) INDEX.md
+branch name and PoC author/date; (5) hour-bucket-safe integration assertion; (6) flat 50 ms p99; (7) module
+header plus a `TRACE_SQL=false` pass; (8) upgrade note in docs/observability.md. Validation: `deno task ci`
+exit 0 (687 unit, 79 property), `deno task integration` exit 0 (157 reads, p99 18.67 ms at load 2.19; second
+pass 3/3 deadline events without TRACE_SQL), `perf/ffi_interrupt.ts` exit 0 on the third run (the first two
+failed only the load-fragile tick gate at min 88 and 50 ticks while other agents were running).
