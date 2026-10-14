@@ -5,12 +5,28 @@
  *
  * Connections are the FFI binding's (`platform/sqlite_ffi/`) on `Config.sqlite.library`, opened with
  * `readBigInts` so every INTEGER reads as `bigint` (`decode` narrows them). Statements come from the
- * connection's cache (`prepareCached`) and run on the blocking path in the same step; the call's
- * deadline is still `Effect.timeoutFail` at `reader.callTimeoutMs`, which cannot stop a running
- * statement (FFI-05 replaces it with an interruptible deadline).
+ * connection's cache (`prepareCached`) and are used in the step that fetched them.
+ *
+ * Each select takes the path its plan's class gives it (`classify`, FFI-05). A primary-key lookup
+ * runs on the blocking path (main thread, microseconds). Anything else (`find`, `count`, `countBy`)
+ * runs `allAsync` on Deno's blocking pool under `Config.sqlite.statementDeadlineMs`: at the deadline
+ * the binding interrupts the statement and the query fails `StatementDeadlineError` (HTTP 504). The
+ * call's `Effect.timeoutFail` at `reader.callTimeoutMs` stays as the last-resort guard; config
+ * validation keeps the statement deadline below it, so the statement's own deadline fires first.
+ * `ConnectionGate` (`platform/sqlite.ts`) keeps one statement at a time on the connection and owns
+ * the interrupt grace period.
  */
-import { Database, isSqliteFfiError, prepareCached } from "./sqlite_ffi/mod.ts";
-import { sqliteFailureMessage } from "./sqlite.ts";
+import { allAsync, Database, isSqliteFfiError, prepareCached, type Row } from "./sqlite_ffi/mod.ts";
+import { classify, pathOf } from "./sqlite_ffi/classify.ts";
+import {
+  ConnectionGate,
+  deadlineKind,
+  POISONED_DETAIL,
+  sqliteFailureMessage,
+  type StatementLimits,
+  STUCK_STATEMENT_PHASE,
+  toDeadlineError,
+} from "./sqlite.ts";
 import { isAbsolute } from "node:path";
 import { Cause, Clock, Effect, Exit, FiberId, FiberRef, HashMap, Layer, Option } from "effect";
 import {
@@ -21,17 +37,20 @@ import {
   QueryWriteAttemptError,
   QueueFullError,
   ReaderError,
+  type StatementDeadlineError,
   UnknownHandlerError,
 } from "../core/errors.ts";
 import {
   type EventEnvelope,
   fromPlatformError,
   type Level,
+  lifecycleEvent,
   sqlEvent,
   txEvent,
   type TxOutcome,
 } from "../core/events.ts";
 import { compileSelect } from "../core/compile/select.ts";
+import type { SQL } from "../core/compile/dialect.ts";
 import { decode } from "../core/compile/decode.ts";
 import type { Schema } from "../core/schema.ts";
 import { Documents, type Execute, type SelectPlan } from "../sdk/db.ts";
@@ -42,7 +61,7 @@ import {
   Config,
   EventSink,
   ReaderClient,
-  type ReaderClientService,
+  type ServerReaderClientService,
 } from "./services.ts";
 import { DEFAULT_READER_CAP } from "./ipc.ts";
 import { currentTraceContext, isTraceToken } from "./http/trace.ts";
@@ -62,6 +81,24 @@ function native<A>(operation: ReaderError["operation"], run: () => A, table?: st
     try: run,
     catch: (cause) => new ReaderError({ operation, table, detail: messageOf(cause, file), cause }),
   });
+}
+
+/**
+ * `native`, but the driver call runs now, in the caller's step, and only its outcome is an Effect:
+ * what `ConnectionGate.blocking` requires, so nothing can claim the connection between the gate's
+ * idle check and the call.
+ */
+function nativeNow<A>(
+  operation: ReaderError["operation"],
+  run: () => A,
+  table?: string,
+  file?: string,
+): Effect.Effect<A, ReaderError> {
+  try {
+    return Effect.succeed(run());
+  } catch (cause) {
+    return Effect.fail(new ReaderError({ operation, table, detail: messageOf(cause, file), cause }));
+  }
 }
 
 interface QueryContext {
@@ -84,10 +121,14 @@ const QUERY_ERROR_TAGS: Record<QueryError["_tag"], true> = {
   QueueFullError: true,
 };
 
-function isQueryError(error: unknown): error is QueryError {
+/** A query handler's failures: the read-path union plus a deadline it let propagate (FFI-05). */
+type DocumentQueryError = QueryError | StatementDeadlineError;
+
+function isQueryError(error: unknown): error is DocumentQueryError {
   if (typeof error !== "object" || error === null) return false;
   const tag = (error as { _tag?: unknown })._tag;
-  return typeof tag === "string" && Object.hasOwn(QUERY_ERROR_TAGS, tag);
+  return typeof tag === "string" &&
+    (Object.hasOwn(QUERY_ERROR_TAGS, tag) || tag === "StatementDeadlineError");
 }
 
 function messageOf(cause: unknown, file?: string): string {
@@ -118,6 +159,11 @@ export function querySqlite(
       ),
       (connection) =>
         Effect.gen(function* () {
+          const gate = new ConnectionGate(connection);
+          const limits: StatementLimits = {
+            deadlineMs: sqlite.statementDeadlineMs,
+            graceMs: sqlite.statementInterruptGraceMs,
+          };
           /** The shared envelope. `traceId` comes from the request's log annotation, as `logger.ts` does. */
           const envelope = (level: Level): Effect.Effect<EventEnvelope> =>
             Effect.gen(function* () {
@@ -142,19 +188,95 @@ export function querySqlite(
               };
             });
 
-          const select = (context: QueryContext, plan: SelectPlan): Effect.Effect<unknown, QueryError> =>
+          const poisoned = (operation: ReaderError["operation"], table?: string) =>
+            new ReaderError({ operation, table, detail: POISONED_DETAIL });
+
+          /** The `error`-level `lifecycle` event of a step that outlived its interrupt (see `ConnectionGate`). */
+          const stuck = (plan: SelectPlan, sqlText: string): Effect.Effect<void> =>
+            Effect.flatMap(envelope("error"), (env) =>
+              sink.emit(lifecycleEvent({
+                ...env,
+                phase: STUCK_STATEMENT_PHASE,
+                detail: {
+                  engine: "sqlite",
+                  role: "document-reader",
+                  file: app.file,
+                  table: plan.table,
+                  statementKind: deadlineKind(plan),
+                  sqlText,
+                  path: "nonblocking",
+                  deadlineMs: limits.deadlineMs,
+                  graceMs: limits.graceMs,
+                },
+              })));
+
+          /**
+           * The admission check of one select, made in the step that starts it, after any wait for the
+           * connection (both gate paths): a handler's forked fiber can pass `executeIn`'s check, queue
+           * behind an in-flight read, and reach the connection only after `COMMIT` expired the context.
+           * Admitted selects count toward the transaction's `operations`; a poisoned connection refuses.
+           */
+          const admit = (
+            context: QueryContext,
+            plan: SelectPlan,
+          ): ContextExpiredError | ReaderError | undefined => {
+            if (!context.active) return new ContextExpiredError({ context: "query" });
+            context.operations += 1;
+            return gate.poisoned ? poisoned("select", plan.table) : undefined;
+          };
+
+          /**
+           * One select on its plan's path. Blocking: admitted, fetched and run in the step that saw the
+           * connection idle. Nonblocking: admitted in the step that claims the connection, then
+           * `allAsync` under the binding's own deadline, mapped to `StatementDeadlineError` when it
+           * fires; every other binding failure is a `ReaderError`.
+           */
+          const runSelect = (context: QueryContext, plan: SelectPlan, sql: SQL) => {
+            const { values } = sql;
+            if (pathOf(classify(plan)) === "blocking") {
+              return gate.blocking((): Effect.Effect<Row[], ReaderError | ContextExpiredError> => {
+                const refused = admit(context, plan);
+                if (refused !== undefined) return Effect.fail(refused);
+                return nativeNow("select", () => prepareCached(connection, sql.text).all(values), plan.table);
+              });
+            }
+            return gate.nonblocking<Row[], ReaderError | ContextExpiredError>({
+              sql: sql.text,
+              guard: () => admit(context, plan),
+              execute: (statement) => allAsync(statement, values, { timeoutMs: limits.deadlineMs }),
+              limits,
+              onStuck: stuck(plan, sql.text),
+            }).pipe(
+              Effect.mapError((failure): ReaderError | ContextExpiredError | StatementDeadlineError =>
+                !isSqliteFfiError(failure)
+                  ? failure
+                  : toDeadlineError(failure, plan.table, deadlineKind(plan), limits.deadlineMs) ??
+                    new ReaderError({
+                      operation: "select",
+                      table: plan.table,
+                      detail: messageOf(failure, app.file),
+                      cause: failure,
+                    })
+              ),
+            );
+          };
+
+          const select = (
+            context: QueryContext,
+            plan: SelectPlan,
+          ): Effect.Effect<unknown, DocumentQueryError> =>
             Effect.gen(function* () {
               const sql = yield* compileSelect(app.schema, plan, "sqlite");
-              context.operations += 1;
+              const path = pathOf(classify(plan));
               const start = yield* Clock.currentTimeNanos;
-              const exit = yield* Effect.exit(
-                native(
-                  "select",
-                  () => prepareCached(connection, sql.text).all(sql.values),
-                  plan.table,
-                ),
-              );
+              const exit = yield* Effect.exit(runSelect(context, plan, sql));
               const durationMs = elapsedMs(start, yield* Clock.currentTimeNanos);
+              // Refused for an expired context: no statement ran, so no `sql` event (as before the
+              // wait, and as on the writer), and none can land after the transaction's `tx` event.
+              const refused = Exit.isFailure(exit) ? Cause.failureOption(exit.cause) : Option.none();
+              if (Option.isSome(refused) && refused.value._tag === "ContextExpiredError") {
+                return yield* refused.value;
+              }
               if (logging.traceSql || Exit.isFailure(exit)) {
                 const failure = Exit.isFailure(exit) ? Cause.failureOption(exit.cause) : Option.none();
                 yield* sink.emit(sqlEvent({
@@ -170,12 +292,16 @@ export function querySqlite(
                   rowCount: Exit.isSuccess(exit) ? exit.value.length : undefined,
                   outcome: Exit.isSuccess(exit) ? "ok" : "error",
                   ...(Option.isSome(failure) ? fromPlatformError(failure.value) : {}),
+                  path,
                 }, { includeBindValues: logging.includeBindValues }));
               }
               return yield* decode(app.schema, plan, yield* exit);
             });
 
-          /** The handler's executor: reads only, and only while its transaction is open. */
+          /**
+           * The handler's executor: reads only, and only while its transaction is open. This check
+           * refuses early; `admit` repeats it where the statement actually starts.
+           */
           const executeIn = (context: QueryContext): Execute => (operation) =>
             Effect.suspend(() => {
               if (!context.active) return Effect.fail(new ContextExpiredError({ context: "query" }));
@@ -190,7 +316,7 @@ export function querySqlite(
           const begin = (queueWaitMs: number): Effect.Effect<QueryContext, ReaderError> =>
             Effect.gen(function* () {
               const startNanos = yield* Clock.currentTimeNanos;
-              yield* native("begin", () => connection.exec("BEGIN TRANSACTION"));
+              yield* gate.blocking(() => nativeNow("begin", () => connection.exec("BEGIN TRANSACTION")));
               return { active: true, operations: 0, startNanos, queueWaitMs };
             });
 
@@ -198,13 +324,19 @@ export function querySqlite(
            * The release half: expire the context, roll back unless `COMMIT` already ran, and record the
            * transaction. Cannot fail: a failing `ROLLBACK` is logged, and the original exit stands.
            */
-          const end = (context: QueryContext, exit: Exit.Exit<unknown, QueryError>): Effect.Effect<void> =>
+          const end = (
+            context: QueryContext,
+            exit: Exit.Exit<unknown, DocumentQueryError>,
+          ): Effect.Effect<void> =>
             Effect.gen(function* () {
               context.active = false;
               let outcome: TxOutcome = "commit";
               if (Exit.isFailure(exit)) {
                 outcome = Exit.isInterrupted(exit) ? "interrupted" : "rollback";
-                yield* native("rollback", () => connection.exec("ROLLBACK")).pipe(
+                // Waits for a forked fiber's in-flight read; a poisoned connection is already closed.
+                yield* gate.blocking(() =>
+                  connection.isOpen ? nativeNow("rollback", () => connection.exec("ROLLBACK")) : Effect.void
+                ).pipe(
                   Effect.catchAll((error) => Effect.logWarning("reader rollback failed", error)),
                 );
               }
@@ -244,7 +376,15 @@ export function querySqlite(
                     cause,
                   }),
               });
-              yield* native("commit", () => connection.exec("COMMIT"));
+              yield* gate.blocking(() => {
+                // Expire in the same step as COMMIT (as the writer does): a forked fiber's read queued
+                // behind an in-flight one must find the context expired when it reaches the connection,
+                // not run after COMMIT, outside the snapshot, or on a connection the release closed.
+                context.active = false;
+                return gate.poisoned
+                  ? Effect.fail(poisoned("commit"))
+                  : nativeNow("commit", () => connection.exec("COMMIT"));
+              });
               return safe;
             });
 
@@ -254,8 +394,14 @@ export function querySqlite(
             end,
           );
         }),
+      // `closeAsync`: cancels and waits for an execution still in flight (a forked fiber's read), and
+      // is a no-op on a connection the gate already closed.
       (connection) =>
-        native("close", () => connection.close()).pipe(
+        Effect.tryPromise({
+          try: () => connection.closeAsync(),
+          catch: (cause) =>
+            new ReaderError({ operation: "close", detail: messageOf(cause, app.file), cause }),
+        }).pipe(
           Effect.catchAll((error) => Effect.logWarning("SQLite reader close failed", error)),
         ),
     );
@@ -263,7 +409,7 @@ export function querySqlite(
 }
 
 /** Decorate only document calls; all other requests reach the original supervised client. */
-export function makeDocumentReaderClient(ipc: ReaderClientService) {
+export function makeDocumentReaderClient(ipc: ServerReaderClientService) {
   return Effect.gen(function* () {
     const config = yield* Config;
     const apps = yield* AppRegistry;
@@ -274,7 +420,7 @@ export function makeDocumentReaderClient(ipc: ReaderClientService) {
     // (QueueFullError{queue:"reader", cap:1000}). Admission guard only;
     // The execution semaphore below bounds admitted document handlers separately.
     const cap = DEFAULT_READER_CAP;
-    const client: ReaderClientService = {
+    const client: ServerReaderClientService = {
       call: (request) => {
         if (request.kind !== "query") return ipc.call(request);
         const query = Effect.gen(function* () {

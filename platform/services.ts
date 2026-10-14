@@ -29,6 +29,7 @@ import type {
   RemoteReaderError,
   SnapshotIntegrityError,
   StartupError,
+  StatementDeadlineError,
   StorageError,
   UnknownAnalysisQuery,
   UnknownAppError,
@@ -341,8 +342,14 @@ export class AppRegistry extends Context.Tag("ts-db/AppRegistry")<AppRegistry, A
 // ===========================================================================
 
 export interface StorageService {
-  /** Run a mutation handler inside one `BEGIN IMMEDIATE` transaction. */
-  mutation(definition: AnyDefinition, args: unknown): Effect.Effect<unknown, MutationError>;
+  /**
+   * Run a mutation handler inside one `BEGIN IMMEDIATE` transaction. An unbounded read inside it can
+   * also fail `StatementDeadlineError` (FFI-05).
+   */
+  mutation(
+    definition: AnyDefinition,
+    args: unknown,
+  ): Effect.Effect<unknown, MutationError | StatementDeadlineError>;
   /** `VACUUM INTO` a standalone, WAL-consistent copy. Serializes with mutations. */
   snapshot(path: string): Effect.Effect<void, StorageError>;
 }
@@ -372,18 +379,30 @@ export class Reader extends Context.Tag("ts-db/Reader")<Reader, ReaderService>()
 // ReaderClient — item 17 (`ReaderClientLive`), item 20 (`ReaderClientTest`)
 // ===========================================================================
 
-export interface ReaderClientService {
-  /**
-   * Send one request to the reader process and await its correlated reply.
-   *
-   * The channel is wider than the plan's abridged `IpcError`: transport failures are `IpcError` /
-   * `ReaderExitedError`, the 1000-call cap is `QueueFullError`, and a `ReaderErrorFrame` rehydrates
-   * into the `RemoteReaderError` the reader actually raised. See ADR 0002.
-   */
-  call(
-    request: ReaderRequest,
-  ): Effect.Effect<unknown, IpcError | ReaderExitedError | QueueFullError | RemoteReaderError>;
+/**
+ * What a call answered by the reader process can fail with. Wider than the plan's abridged
+ * `IpcError`: transport failures are `IpcError` / `ReaderExitedError`, the 1000-call cap is
+ * `QueueFullError`, and a `ReaderErrorFrame` rehydrates into the `RemoteReaderError` the reader
+ * actually raised. See ADR 0002.
+ */
+export type ReaderCallError = IpcError | ReaderExitedError | QueueFullError | RemoteReaderError;
+
+/**
+ * A reader client. `E` defaults to the reader process's channel (`ReaderCallError`), which the IPC
+ * client (`platform/ipc.ts`) implements; the `ReaderClient` service is the wider
+ * `ServerReaderClientService`.
+ */
+export interface ReaderClientService<E = ReaderCallError> {
+  /** Send one request to the reader process and await its correlated reply. */
+  call(request: ReaderRequest): Effect.Effect<unknown, E>;
 }
+
+/**
+ * The `ReaderClient` the server's routes call. Document queries are answered in this process
+ * (`platform/document_reader.ts`), where an unbounded statement can also stop at its deadline:
+ * `StatementDeadlineError` (FFI-05). Every `ReaderClientService` is one.
+ */
+export type ServerReaderClientService = ReaderClientService<ReaderCallError | StatementDeadlineError>;
 
 /**
  * Live: `ReaderClientLive` (scoped child process). Test: `ReaderClientTest` (in-process `Reader`).
@@ -393,7 +412,7 @@ export interface ReaderClientService {
  */
 export class ReaderClient extends Context.Tag("ts-db/ReaderClient")<
   ReaderClient,
-  ReaderClientService
+  ServerReaderClientService
 >() {}
 
 // ===========================================================================

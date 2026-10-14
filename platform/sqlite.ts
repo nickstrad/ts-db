@@ -42,10 +42,26 @@
  * `Clock` and `IdGen` are captured when the layer is built: `_creationTime` comes from Effect's
  * `Clock` (so `TestClock` drives it) and document ids from `IdGen`.
  *
- * Every statement runs on the binding's blocking path (`Statement.run/get/all` on the main thread),
- * through the per-connection statement cache (`prepareCached`), and is used in the same synchronous
- * step that fetched it: a cached statement is only guaranteed valid until the next `prepareCached`
- * call. FFI-05 moves unbounded reads onto the deadline-bounded path; this module does not yet.
+ * Statements take one of two paths (FFI-05), chosen per document operation by `classify`
+ * (`platform/sqlite_ffi/classify.ts`), never from SQL text:
+ *
+ * - **blocking**: writes, primary-key selects, and the writer's own pragmas, DDL, `BEGIN` / `COMMIT`
+ *   / `ROLLBACK` and `VACUUM INTO` run `Statement.run/get/all` on the main thread, as before.
+ * - **nonblocking**: an unbounded read (a handler's `find` / `count` / `countBy` inside a mutation,
+ *   and its U+0000 probe) runs `allAsync` / `getAsync` on Deno's blocking pool under the binding's
+ *   own deadline, `Config.sqlite.statementDeadlineMs`. At the deadline the binding calls
+ *   `sqlite3_interrupt`, the statement stops, and the read fails `StatementDeadlineError` (HTTP
+ *   504); the transaction's release half rolls back as for any failure. Writes never take this
+ *   path: an interrupt that landed after an async write committed would leave the commit standing
+ *   while the caller saw a failure.
+ *
+ * `ConnectionGate` keeps one statement at a time on a connection: while a nonblocking read is in
+ * flight, every other statement on that connection (a forked fiber's, `COMMIT`, the release's
+ * `ROLLBACK`) waits for it to settle instead of failing the binding's `"busy"`. A step that has not
+ * returned `statementInterruptGraceMs` after its interrupt poisons the connection: an `error`-level
+ * `lifecycle` event, no further statements, and the connection closes when the step returns.
+ * Every cached statement is used in the same step that fetched it: it is only guaranteed valid until
+ * the next `prepareCached` call. Every `sql` event carries its `path`.
  *
  * Text containing U+0000 never crosses this boundary (plan item 31,
  * `docs/adr/0005-text-storage-contract.md`). The contract was made because the previous driver
@@ -67,6 +83,7 @@ import {
   Effect,
   Either,
   Exit,
+  Fiber,
   FiberId,
   Function as EffectFunction,
   HashMap,
@@ -77,6 +94,7 @@ import {
 import {
   CompileError,
   ContextExpiredError,
+  type DeadlineStatementKind,
   DecodeError,
   type MutationError,
   NonSerializableResultError,
@@ -84,14 +102,17 @@ import {
   QueueFullError,
   SchemaDriftError,
   SchemaError,
+  StatementDeadlineError,
   StorageError,
 } from "../core/errors.ts";
 import {
   type EventEnvelope,
   fromPlatformError,
   type Level,
+  lifecycleEvent,
   queueEvent,
   sqlEvent,
+  type SqlPath,
   type SqlStatementKind,
   txEvent,
   type TxOutcome,
@@ -108,12 +129,16 @@ import type { AnyDefinition } from "../sdk/functions.ts";
 import { formatSchemaError } from "../sdk/schema.ts";
 import { ConfigTest } from "./config.ts";
 import {
+  allAsync,
   Database,
+  getAsync,
   isSqliteFfiError,
   prepareCached,
+  type Row as FfiRow,
   type SqliteFfiError,
   type Statement,
 } from "./sqlite_ffi/mod.ts";
+import { classify } from "./sqlite_ffi/classify.ts";
 import { Config, EventSink, type EventSinkService, IdGen, Storage, type StorageService } from "./services.ts";
 
 import { TenantContext, type TenantId, TenantStorageRouter } from "./tenants/routing.ts";
@@ -140,6 +165,7 @@ type ExecuteError =
   | DecodeError
   | StorageError
   | ContextExpiredError
+  | StatementDeadlineError
   | MutationError;
 
 /** One open transaction's bookkeeping. `active` is the mutation-context expiry flag. */
@@ -151,7 +177,7 @@ interface Tx {
   readonly queueWaitMs: number;
 }
 
-const MUTATION_ERROR_TAGS: ReadonlySet<string> = new Set<MutationError["_tag"]>([
+const MUTATION_ERROR_TAGS: ReadonlySet<string> = new Set<MutationError["_tag"] | "StatementDeadlineError">([
   "SchemaError",
   "CompileError",
   "DecodeError",
@@ -162,13 +188,15 @@ const MUTATION_ERROR_TAGS: ReadonlySet<string> = new Set<MutationError["_tag"]>(
   "NonSerializableResultError",
   "StorageError",
   "QueueFullError",
+  "StatementDeadlineError",
 ]);
 
 /**
  * Handlers are typed `Effect<unknown, unknown>` once erased into `AnyDefinition`; this narrows the
- * failure back to the contract. Anything else is an app bug and becomes a defect (still rolled back).
+ * failure back to the contract (including a deadline the handler let propagate). Anything else is an
+ * app bug and becomes a defect (still rolled back).
  */
-function isMutationError(e: unknown): e is MutationError {
+function isMutationError(e: unknown): e is MutationError | StatementDeadlineError {
   return e instanceof Error && MUTATION_ERROR_TAGS.has((e as { _tag?: unknown })._tag as string);
 }
 
@@ -196,6 +224,179 @@ export function sqliteFailureMessage(e: SqliteFfiError, file?: string): string {
       return `statement cancelled (${e.reason})`;
     case "SqliteLibraryError":
       return `libsqlite3 ${e.reason}: ${e.detail}`;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Deadline-bounded execution (FFI-05), shared with `platform/document_reader.ts`
+// ---------------------------------------------------------------------------
+
+/** What an unbounded statement runs under: `Config.sqlite`'s deadline and interrupt grace period. */
+export interface StatementLimits {
+  /** `statementDeadlineMs`: the binding interrupts the statement this long after it starts. */
+  readonly deadlineMs: number;
+  /** `statementInterruptGraceMs`: how long after the interrupt the step may take to return. */
+  readonly graceMs: number;
+}
+
+/** The `phase` of the `lifecycle` event a stuck statement emits. */
+export const STUCK_STATEMENT_PHASE = "statement did not return after interrupt";
+
+/** The `detail` of the failure every statement on a poisoned connection gets. */
+export const POISONED_DETAIL =
+  "connection poisoned: a statement did not return after its interrupt; no further statements run on it";
+
+/**
+ * A wall-clock sleep on the same timers as the binding's deadline. Not `Effect.sleep`: a test's
+ * `TestClock` would stop it, or fire it early on `adjust`, and poison a healthy connection.
+ */
+function wallSleep(ms: number): Effect.Effect<void> {
+  return Effect.async<void>((resume) => {
+    const timer = setTimeout(() => resume(Effect.void), ms);
+    return Effect.sync(() => clearTimeout(timer));
+  });
+}
+
+/** The statement kind a deadline names: the plan's aggregate, else a plain select. */
+export function deadlineKind(plan: SelectPlan): DeadlineStatementKind {
+  return plan.aggregate?.kind ?? "select";
+}
+
+/**
+ * The typed deadline failure for a binding failure, or `undefined` when it is anything else. Only
+ * the binding's own deadline (`timeoutMs`) produces `SqliteCancelled({ reason: "deadline" })`; a
+ * fiber interruption reports `"aborted"` and stays an interruption. `failure` comes from the Effect
+ * layer's typed channel, which carries only the binding's own errors (`effect.ts`, "Provenance").
+ */
+export function toDeadlineError(
+  failure: SqliteFfiError,
+  table: string,
+  statementKind: DeadlineStatementKind,
+  deadlineMs: number,
+): StatementDeadlineError | undefined {
+  if (failure._tag !== "SqliteCancelled" || failure.reason !== "deadline") return undefined;
+  return new StatementDeadlineError({
+    deadlineMs,
+    elapsedMs: failure.elapsedMs,
+    table,
+    statementKind,
+    cause: failure,
+  });
+}
+
+/** One nonblocking execution: what `ConnectionGate.nonblocking` runs and how. */
+export interface NonblockingRun<A, E> {
+  /** The SQL text, fetched from the connection's statement cache in the step that starts it. */
+  readonly sql: string;
+  /**
+   * Checked in the step that starts the statement, after any wait: a failure refuses it (an expired
+   * context, a poisoned connection). Never runs a statement.
+   */
+  readonly guard?: () => E | undefined;
+  /** Runs the statement: `allAsync` / `getAsync` with `timeoutMs = limits.deadlineMs`. */
+  readonly execute: (statement: Statement) => Effect.Effect<A, SqliteFfiError>;
+  readonly limits: StatementLimits;
+  /** Emitted, uninterruptibly, when the step has not returned `graceMs` after the interrupt. */
+  readonly onStuck: Effect.Effect<void>;
+}
+
+/**
+ * One FFI connection's statement discipline (FFI-05). The binding runs one execution per
+ * connection and fails every other call `"busy"` while a nonblocking one is in flight; this gate
+ * turns that refusal into a wait, so a handler's forked fiber, `COMMIT` and the release's `ROLLBACK`
+ * queue behind an in-flight read instead of failing. Statements are started by `blocking` or
+ * `nonblocking`, never directly, for as long as the gate is in use.
+ *
+ * It also owns the interrupt grace period. The binding's promise settles only once its step has
+ * returned (`database.ts`, `Execution`), so a nonblocking read still unsettled `limits.graceMs`
+ * after its deadline has a step that did not return after `sqlite3_interrupt`. The watchdog then
+ * marks the connection poisoned and runs `onStuck`; every later statement is refused by the callers'
+ * guard (`poisoned`), and the connection is closed as soon as the step finally returns. Nothing here
+ * can stop such a step: there is no lane to kill in this plan, so the event is the operator's signal.
+ */
+export class ConnectionGate {
+  #busy: Deferred.Deferred<void> | undefined;
+  #poisoned = false;
+
+  constructor(readonly db: Database) {}
+
+  /** True once a step outlived its interrupt by the grace period. Never cleared. */
+  get poisoned(): boolean {
+    return this.#poisoned;
+  }
+
+  /**
+   * Run `start` once no nonblocking execution is in flight. `start` is called in the step that saw
+   * the connection idle and must do its native work synchronously in that call (and return the
+   * outcome as an Effect), so nothing can claim the connection between the check and the statement.
+   */
+  blocking<A, E>(start: () => Effect.Effect<A, E>): Effect.Effect<A, E> {
+    const attempt: Effect.Effect<A, E> = Effect.suspend(() => {
+      const busy = this.#busy;
+      return busy === undefined ? start() : Effect.zipRight(Deferred.await(busy), attempt);
+    });
+    return attempt;
+  }
+
+  /**
+   * Run one statement on the nonblocking path once the connection is idle. The claim, the guard,
+   * the statement fetch and the watchdog fork happen uninterruptibly in the step that saw the
+   * connection idle; only the wait and the execution itself are interruptible (an interrupted
+   * execution is aborted by the Effect layer, which waits for the step to return). The claim is
+   * released, and a poisoned connection closed, after the execution and the watchdog have settled.
+   */
+  nonblocking<A, E>(run: NonblockingRun<A, E>): Effect.Effect<A, E | SqliteFfiError> {
+    const { sql, guard, execute, limits, onStuck } = run;
+    return Effect.uninterruptibleMask((restore) => {
+      const attempt: Effect.Effect<A, E | SqliteFfiError> = Effect.suspend(() => {
+        const busy = this.#busy;
+        if (busy !== undefined) return Effect.zipRight(restore(Deferred.await(busy)), attempt);
+        const refused = guard?.();
+        if (refused !== undefined) return Effect.fail(refused);
+        let statement: Statement;
+        try {
+          statement = prepareCached(this.db, sql);
+        } catch (cause) {
+          return isSqliteFfiError(cause) ? Effect.fail(cause) : Effect.failCause(Cause.die(cause));
+        }
+        // Claimed in the same step: every other statement on this connection now waits for `settled`,
+        // so nothing can evict `statement` from the cache before it runs.
+        const settled = Deferred.unsafeMake<void>(FiberId.none);
+        this.#busy = settled;
+        const watchdog = Effect.interruptible(Effect.zipRight(
+          Effect.zipRight(wallSleep(limits.deadlineMs), wallSleep(limits.graceMs)),
+          Effect.uninterruptible(Effect.suspend(() => {
+            this.#poisoned = true;
+            return onStuck;
+          })),
+        ));
+        return Effect.flatMap(Effect.fork(watchdog), (fiber) =>
+          Effect.ensuring(
+            restore(execute(statement)),
+            Effect.zipRight(Fiber.interrupt(fiber), this.#settle(settled)),
+          ));
+      });
+      return attempt;
+    });
+  }
+
+  /** After a nonblocking execution: close the connection if it was poisoned, then release the claim. */
+  #settle(settled: Deferred.Deferred<void>): Effect.Effect<void> {
+    return Effect.ensuring(
+      Effect.suspend(() =>
+        this.#poisoned && this.db.isOpen
+          ? Effect.tryPromise(() => this.db.closeAsync()).pipe(
+            Effect.catchAll((error) =>
+              Effect.logWarning("closing a poisoned SQLite connection failed", error)
+            ),
+          )
+          : Effect.void
+      ),
+      Effect.suspend(() => {
+        if (this.#busy === settled) this.#busy = undefined;
+        return Deferred.succeed(settled, undefined);
+      }),
+    );
   }
 }
 
@@ -320,12 +521,20 @@ function makeSingleStorage(
           if (db.isOpen) db.close();
         }),
     );
+    const gate = new ConnectionGate(database);
+    const limits: StatementLimits = {
+      deadlineMs: sqlite.statementDeadlineMs,
+      graceMs: sqlite.statementInterruptGraceMs,
+    };
+    const poisoned = (operation: StorageError["operation"], table?: string) =>
+      new StorageError({ operation, table, detail: POISONED_DETAIL });
 
     /**
-     * One prepared statement: run, time, emit a `sql` event, map a driver throw to `StorageError`.
-     * `guard`, when given, is checked in the same synchronous step as the driver call: a fiber can be
-     * switched out between two statements of one operation, so checking once per operation would let
-     * a forked fiber's write land after `COMMIT`.
+     * One prepared statement on the blocking path: run, time, emit a `sql` event, map a driver throw
+     * to `StorageError`. `guard`, when given, is checked in the same synchronous step as the driver
+     * call: a fiber can be switched out between two statements of one operation, so checking once per
+     * operation would let a forked fiber's write land after `COMMIT`. The step waits for an in-flight
+     * nonblocking read first (`ConnectionGate.blocking`).
      */
     const statement = <A, E = never>(
       kind: SqlStatementKind,
@@ -336,9 +545,10 @@ function makeSingleStorage(
       operation: StorageError["operation"] = kind,
       guard?: () => E | undefined,
     ): Effect.Effect<A, StorageError | E> =>
-      Effect.suspend((): Effect.Effect<A, StorageError | E> => {
+      gate.blocking((): Effect.Effect<A, StorageError | E> => {
         const refused = guard?.();
         if (refused !== undefined) return Effect.fail(refused);
+        if (gate.poisoned) return Effect.fail(poisoned(operation, table));
         const started = nanos();
         let result: A;
         try {
@@ -347,22 +557,101 @@ function makeSingleStorage(
         } catch (cause) {
           const failure = new StorageError({ operation, table, detail: messageOf(cause), cause });
           return Effect.zipRight(
-            emitSql("warn", kind, table, sql, msSince(started), undefined, failure),
+            emitSql("warn", kind, table, sql, "blocking", msSince(started), undefined, failure),
             Effect.fail(failure),
           );
         }
         const level: Level = logging.traceSql ? "info" : "debug";
-        return Effect.as(emitSql(level, kind, table, sql, msSince(started), rows(result)), result);
+        return Effect.as(
+          emitSql(level, kind, table, sql, "blocking", msSince(started), rows(result)),
+          result,
+        );
       });
+
+    /**
+     * One unbounded read on the nonblocking path, under `limits.deadlineMs`: the binding interrupts
+     * it at the deadline and it fails `StatementDeadlineError`; any other binding failure is a
+     * `StorageError`, as on the blocking path. Emits the same `sql` event with `path: "nonblocking"`.
+     */
+    const nonblockingRead = <A>(
+      plan: SelectPlan,
+      sql: SQL,
+      execute: (prepared: Statement, timeoutMs: number) => Effect.Effect<A, SqliteFfiError>,
+      rows: (result: A) => number,
+      tx: Tx,
+    ): Effect.Effect<A, StorageError | StatementDeadlineError | ContextExpiredError> =>
+      Effect.suspend(() => {
+        let started: bigint | undefined;
+        return gate.nonblocking<A, ContextExpiredError | StorageError>({
+          sql: sql.text,
+          guard: () => live(tx)() ?? (gate.poisoned ? poisoned("select", plan.table) : undefined),
+          execute: (prepared) =>
+            Effect.suspend(() => {
+              started = nanos();
+              return execute(prepared, limits.deadlineMs);
+            }),
+          limits,
+          onStuck: stuck(plan, sql),
+        }).pipe(
+          Effect.matchEffect({
+            onFailure: (
+              cause,
+            ): Effect.Effect<never, StorageError | StatementDeadlineError | ContextExpiredError> => {
+              // A guard refusal ran no statement: no event, as on the blocking path.
+              if (!isSqliteFfiError(cause)) return Effect.fail(cause);
+              const failure = toDeadlineError(cause, plan.table, deadlineKind(plan), limits.deadlineMs) ??
+                new StorageError({ operation: "select", table: plan.table, detail: messageOf(cause), cause });
+              const durationMs = started === undefined ? 0 : msSince(started);
+              return Effect.zipRight(
+                emitSql("warn", "select", plan.table, sql, "nonblocking", durationMs, undefined, failure),
+                Effect.fail(failure),
+              );
+            },
+            onSuccess: (result) =>
+              Effect.as(
+                emitSql(
+                  logging.traceSql ? "info" : "debug",
+                  "select",
+                  plan.table,
+                  sql,
+                  "nonblocking",
+                  started === undefined ? 0 : msSince(started),
+                  rows(result),
+                ),
+                result,
+              ),
+          }),
+        );
+      });
+
+    /** The `error`-level `lifecycle` event of a step that outlived its interrupt (see `ConnectionGate`). */
+    const stuck = (plan: SelectPlan, sql: SQL): Effect.Effect<void> =>
+      Effect.flatMap(envelope("error"), (env) =>
+        sink.emit(lifecycleEvent({
+          ...env,
+          phase: STUCK_STATEMENT_PHASE,
+          detail: {
+            engine: "sqlite",
+            role: "writer",
+            file,
+            table: plan.table,
+            statementKind: deadlineKind(plan),
+            sqlText: sql.text,
+            path: "nonblocking",
+            deadlineMs: limits.deadlineMs,
+            graceMs: limits.graceMs,
+          },
+        })));
 
     const emitSql = (
       level: Level,
       kind: SqlStatementKind,
       table: string | undefined,
       sql: SQL,
+      path: SqlPath,
       durationMs: number,
       rowCount: number | undefined,
-      failure?: StorageError,
+      failure?: StorageError | StatementDeadlineError,
     ): Effect.Effect<void> =>
       Effect.flatMap(envelope(level), (env) =>
         sink.emit(sqlEvent({
@@ -378,6 +667,7 @@ function makeSingleStorage(
           rowCount,
           outcome: failure ? "error" : "ok",
           ...(failure ? fromPlatformError(failure) : {}),
+          path,
         }, { includeBindValues: logging.includeBindValues })));
 
     const changes = (result: { changes: number | bigint }) => Number(result.changes);
@@ -394,7 +684,8 @@ function makeSingleStorage(
       use: (tx: Tx) => Effect.Effect<A, E>,
     ): Effect.Effect<A, E | StorageError> =>
       Effect.acquireUseRelease(
-        Effect.suspend(() => {
+        gate.blocking(() => {
+          if (gate.poisoned) return Effect.fail(poisoned("begin"));
           const startedNanos = nanos();
           try {
             database.exec("BEGIN IMMEDIATE");
@@ -406,9 +697,11 @@ function makeSingleStorage(
         }),
         (tx) =>
           Effect.flatMap(use(tx), (result) =>
-            Effect.suspend(() => {
+            gate.blocking(() => {
               // Expire in the same step as COMMIT: the release runs later, after a possible yield.
               tx.active = false;
+              // A poisoned connection is closed (or closing): its transaction is already gone.
+              if (gate.poisoned) return Effect.fail(poisoned("commit"));
               try {
                 database.exec("COMMIT");
               } catch (cause) {
@@ -420,7 +713,9 @@ function makeSingleStorage(
               return Effect.succeed(result);
             })),
         (tx, exit) =>
-          Effect.suspend(() => {
+          // Waits for an in-flight nonblocking read (a forked fiber's) before touching the connection.
+          // A poisoned connection was closed when its step returned, which rolled the transaction back.
+          gate.blocking(() => {
             tx.active = false;
             let rollbackFailure: unknown;
             if (!tx.committed && database.inTransaction) {
@@ -502,30 +797,52 @@ function makeSingleStorage(
     const live = (tx: Tx) => (): ContextExpiredError | undefined =>
       tx.active ? undefined : new ContextExpiredError({ context: "mutation" });
 
+    /**
+     * A select and, when it returned rows, its U+0000 probe. Both run on the plan's path (`classify`):
+     * the probe reads the same rows as the select, so an unbounded select's probe is unbounded too
+     * and runs under its own deadline.
+     */
     const select = (plan: SelectPlan, tx: Tx) =>
       Effect.gen(function* () {
         const sql = yield* compileSelect(schema, plan, "sqlite");
         for (const filter of plan.filters) yield* storable(filter.value, filter.field);
-        const rows = yield* statement(
-          "select",
-          plan.table,
-          sql,
-          (s) => s.all(sql.values),
-          (r) => r.length,
-          "select",
-          live(tx),
-        );
-        const probe = rows.length ? yield* nulProbe(schema, plan, sql) : undefined;
-        if (probe) {
-          const hit = yield* statement(
+        const unbounded = classify(plan) === "unbounded";
+        const rows: FfiRow[] = unbounded
+          ? yield* nonblockingRead(
+            plan,
+            sql,
+            (s, timeoutMs) => allAsync(s, sql.values, { timeoutMs }),
+            (r) => r.length,
+            tx,
+          )
+          : yield* statement(
             "select",
             plan.table,
-            probe,
-            (s) => s.get(probe.values),
-            (row) => (row ? 1 : 0),
+            sql,
+            (s) => s.all(sql.values),
+            (r) => r.length,
             "select",
             live(tx),
           );
+        const probe = rows.length ? yield* nulProbe(schema, plan, sql) : undefined;
+        if (probe) {
+          const hit = unbounded
+            ? yield* nonblockingRead(
+              plan,
+              probe,
+              (s, timeoutMs) => getAsync(s, probe.values, { timeoutMs }),
+              (row) => (row ? 1 : 0),
+              tx,
+            )
+            : yield* statement(
+              "select",
+              plan.table,
+              probe,
+              (s) => s.get(probe.values),
+              (row) => (row ? 1 : 0),
+              "select",
+              live(tx),
+            );
           if (hit) {
             return yield* new StorageError({
               operation: "select",

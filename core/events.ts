@@ -109,6 +109,12 @@ export interface HandlerPayload {
   readonly errorDetail?: unknown;
 }
 
+/**
+ * Which step path a SQLite statement ran on (FFI-05): `blocking` on the main thread, `nonblocking`
+ * on Deno's blocking pool under the statement deadline. Absent on DuckDB statements.
+ */
+export type SqlPath = "blocking" | "nonblocking";
+
 export interface SqlPayload {
   readonly engine: SqlEngine;
   readonly dialect: string;
@@ -122,6 +128,12 @@ export interface SqlPayload {
   readonly outcome: Outcome;
   readonly errorTag?: string;
   readonly errorDetail?: unknown;
+  /**
+   * The SQLite step path (FFI-05); set on every event the writer and the document reader emit.
+   * Not yet in the JSONL line: `toJsonLine` writes only the keys `KIND_KEYS` lists, and the
+   * `sql_events` column arrives with FFI-06.
+   */
+  readonly path?: SqlPath;
 }
 
 export interface SqlEventOptions {

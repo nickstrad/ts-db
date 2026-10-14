@@ -13,6 +13,7 @@
  * 3. `toHttpStatus` **rejects** a tagged error that is not in the union (the `@ts-expect-error`).
  * 4. The four union aliases the plan names (`DbError`, `MutationError`, `QueryError`,
  *    `PlatformError`) nest as documented, and the never-served unions stay out of `PlatformError`.
+ *    FFI-05's `StatementDeadlineError` joins at `DbError`, not inside the IPC-facing unions.
  */
 import { Data } from "effect";
 import * as E from "../core/errors.ts";
@@ -67,6 +68,7 @@ const statusByTag: Record<E.PlatformError["_tag"], number> = {
   ReaderExitedError: 502,
   ObjectStoreError: 502,
   QueueFullError: 503,
+  StatementDeadlineError: 504,
 };
 
 /** `statusByTag`'s keys are exactly the union's tags — no extras, none missing. */
@@ -109,7 +111,9 @@ type FrozenPlatformTags =
   | "SnapshotIntegrityError"
   | "IngestError"
   | "AnalysisError"
-  | "UnknownAnalysisQuery";
+  | "UnknownAnalysisQuery"
+  // FFI-05: an unbounded statement stopped at its deadline.
+  | "StatementDeadlineError";
 
 type _TagsAreExactly = Expect<Equals<E.PlatformError["_tag"], FrozenPlatformTags>>;
 
@@ -138,7 +142,9 @@ export function foreignTagsAreRejected() {
 
 // --- 4. the union aliases nest as documented -------------------------------
 
-type _DbIsMutationPlusQuery = Expect<Equals<E.DbError, E.MutationError | E.QueryError>>;
+type _DbIsMutationPlusQueryPlusDeadline = Expect<
+  Equals<E.DbError, E.MutationError | E.QueryError | E.StatementDeadlineError>
+>;
 type _MutationIsADbError = Expect<Extends<E.MutationError, E.DbError>>;
 type _QueryIsADbError = Expect<Extends<E.QueryError, E.DbError>>;
 type _DbIsServed = Expect<Extends<E.DbError, E.PlatformError>>;
@@ -151,6 +157,17 @@ type _WriteOnlyStaysWriteOnly = Expect<
 type _ReadOnlyStaysReadOnly = Expect<
   Equals<Extends<E.QueryWriteAttemptError, E.MutationError>, false>
 >;
+
+/**
+ * The deadline is raised only by the in-process SQLite paths, never by the DuckDB reader process, so
+ * it stays out of the unions that cross the reader IPC (whose tags are listed exhaustively there).
+ */
+type _DeadlineIsNotRemote = Expect<Equals<Extends<E.StatementDeadlineError, E.RemoteReaderError>, false>>;
+type _DeadlineIsNotInQueryError = Expect<Equals<Extends<E.StatementDeadlineError, E.QueryError>, false>>;
+type _DeadlineIsNotInMutationError = Expect<
+  Equals<Extends<E.StatementDeadlineError, E.MutationError>, false>
+>;
+type _DeadlineIsServed = Expect<Extends<E.StatementDeadlineError, E.PlatformError>>;
 
 // --- the payload shapes the plan's own examples rely on --------------------
 
@@ -167,7 +184,14 @@ export function documentedConstructorsCompile() {
   });
   const compile = new E.CompileError({ reason: "unsupported-operator", field: "status" });
   const queueFull = new E.QueueFullError({ queue: "writer", depth: 1000, cap: 1000 });
-  return [notFound, conflict, schema, compile, queueFull].map(E.toHttpStatus);
+  // FFI-05's payload
+  const deadline = new E.StatementDeadlineError({
+    deadlineMs: 5000,
+    elapsedMs: 5000.4,
+    table: "games",
+    statementKind: "count",
+  });
+  return [notFound, conflict, schema, compile, queueFull, deadline].map(E.toHttpStatus);
 }
 
 /** Keeps the type-only assertions from being erased as unused by the compiler. */
@@ -179,13 +203,17 @@ export type Assertions = [
   _ClientIsNotServed,
   _CliIsNotServed,
   _AnyErrorCoversEverything,
-  _DbIsMutationPlusQuery,
+  _DbIsMutationPlusQueryPlusDeadline,
   _MutationIsADbError,
   _QueryIsADbError,
   _DbIsServed,
   _RemoteReaderIsServed,
   _WriteOnlyStaysWriteOnly,
   _ReadOnlyStaysReadOnly,
+  _DeadlineIsNotRemote,
+  _DeadlineIsNotInQueryError,
+  _DeadlineIsNotInMutationError,
+  _DeadlineIsServed,
 ];
 
 export const statuses = statusByTag;

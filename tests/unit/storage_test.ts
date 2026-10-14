@@ -33,6 +33,8 @@ import {
   TestContext,
 } from "effect";
 import type { EventRecord, QueueEventRecord, SqlEventRecord, TxEventRecord } from "../../core/events.ts";
+import { type StatementDeadlineError, toHttpStatus } from "../../core/errors.ts";
+import { compileDDL } from "../../core/compile/ddl.ts";
 import { withStorage } from "../../core/schema.ts";
 import { ConfigTest } from "../../platform/config.ts";
 import {
@@ -43,7 +45,14 @@ import {
   Storage,
   type StorageService,
 } from "../../platform/services.ts";
-import { makeStorage, StorageLive, WRITER_QUEUE_CAP } from "../../platform/sqlite.ts";
+import {
+  ConnectionGate,
+  makeStorage,
+  POISONED_DETAIL,
+  StorageLive,
+  WRITER_QUEUE_CAP,
+} from "../../platform/sqlite.ts";
+import { allAsync, Database, isSqliteFfiError, prepareCached } from "../../platform/sqlite_ffi/mod.ts";
 import { defineFunctions } from "../../sdk/functions.ts";
 import { defineSchema, defineTable, v } from "../../sdk/schema.ts";
 import { schema } from "../../app/schema.ts";
@@ -750,5 +759,327 @@ test("sq-06: 50 concurrent read-modify-write increments commit 50/50 with zero l
     );
   } finally {
     h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// FFI-05: unbounded reads inside a mutation run nonblocking under the statement deadline
+// ---------------------------------------------------------------------------
+
+test("FFI-05: a mutation whose find runs past the deadline rolls back, fails 504, and the next mutation succeeds", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ts-db-ffi05-writer-"));
+  const file = join(dir, "app.sqlite");
+  const jsonSchema = withStorage(schema, "json");
+  try {
+    // 200 000 games, seeded before the writer opens the file. JSON layout: a non-key filter is a
+    // `json_extract` per row, so the scan below takes about 200 ms on vm-1, four deadlines.
+    const fixture = inspectFile(file, { write: true });
+    try {
+      fixture.exec("PRAGMA journal_mode=WAL");
+      const ddl = compileDDL(jsonSchema);
+      assert.ok(ddl._tag === "Right");
+      for (const text of ddl.right) fixture.exec(text);
+      fixture.run(
+        `WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 199999)
+         INSERT INTO "games" ("_id", "_creationTime", "_version", "doc") SELECT 'seed-' || i, i, 1, ? FROM n`,
+        [JSON.stringify({
+          xPlayer: "alice",
+          oPlayer: "bob",
+          board: Array(9).fill(null),
+          turn: "X",
+          status: "playing",
+          winner: null,
+        })],
+      );
+    } finally {
+      fixture.close();
+    }
+
+    const jsonApp = defineFunctions(jsonSchema);
+    const game = (xPlayer: string) => ({
+      xPlayer,
+      oPlayer: "bob",
+      board: Array(9).fill(null),
+      turn: "X" as const,
+      status: "playing" as const,
+      winner: null,
+    });
+    // Writes a row, then reads unboundedly: the read must stop at the deadline and take the
+    // write with it.
+    const writeThenScan = jsonApp.mutation({
+      args: {},
+      handler: ({ db }) =>
+        Effect.gen(function* () {
+          yield* db.insert("games", game("marker"));
+          return yield* db.find("games", { xPlayer: "alice", oPlayer: "nobody" }).collect();
+        }),
+    });
+    const create = jsonApp.mutation({
+      args: {},
+      handler: ({ db }) => db.insert("games", game("after")),
+    });
+    // A bounded read inside a mutation stays on the blocking path.
+    const byId = jsonApp.mutation({
+      args: { id: v.string() },
+      handler: ({ db }, { id }) => db.get("games", id),
+    });
+
+    const events: EventRecord[] = [];
+    let id = 0;
+    const deadlineMs = 50;
+    const deps = Layer.mergeAll(
+      Layer.succeed(EventSink, { emit: (event) => Effect.sync(() => void events.push(event)) }),
+      Layer.succeed(IdGen, { next: Effect.sync(() => `id-${++id}`) }),
+      ConfigTest({ sqlite: { statementDeadlineMs: deadlineMs } }),
+    );
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const storage = yield* Storage;
+        events.length = 0;
+        const started = performance.now();
+        const failed = yield* Effect.flip(storage.mutation(writeThenScan, {}));
+        const wallMs = performance.now() - started;
+        assert.equal(failed._tag, "StatementDeadlineError");
+        const deadline = failed as StatementDeadlineError;
+        assert.equal(deadline.statementKind, "select");
+        assert.equal(deadline.table, "games");
+        assert.equal(deadline.deadlineMs, deadlineMs);
+        assert.equal(toHttpStatus(deadline), 504);
+        console.log(
+          `FFI-05 writer deadline: statement ${deadline.elapsedMs.toFixed(1)} ms, mutation ${
+            wallMs.toFixed(1)
+          } ms; load1 ${Deno.loadavg()[0].toFixed(2)}`,
+        );
+
+        const sql = ofKind(events, "sql") as SqlEventRecord[];
+        assert.deepEqual(
+          sql.map((e) => [e.statementKind, e.path, e.outcome, e.errorTag ?? null]),
+          [
+            ["insert", "blocking", "ok", null],
+            ["select", "nonblocking", "error", "StatementDeadlineError"],
+          ],
+        );
+        const tx = ofKind(events, "tx") as TxEventRecord[];
+        assert.equal(tx.length, 1);
+        assert.equal(tx[0].outcome, "rollback");
+        assert.equal(tx[0].errorTag, "StatementDeadlineError");
+        assert.equal(ofKind(events, "lifecycle").length, 0, "no stuck-statement event");
+
+        // The same connection takes the next mutation, and a get-by-id inside one is blocking.
+        events.length = 0;
+        const created = (yield* storage.mutation(create, {})) as string;
+        assert.equal(created, "id-2");
+        const found = (yield* storage.mutation(byId, { id: created })) as { xPlayer: string };
+        assert.equal(found.xPlayer, "after");
+        assert.deepEqual(
+          (ofKind(events, "sql") as SqlEventRecord[]).map((e) => [e.statementKind, e.path, e.outcome]),
+          // The get and its U+0000 probe: both bounded, both blocking.
+          [["insert", "blocking", "ok"], ["select", "blocking", "ok"], ["select", "blocking", "ok"]],
+        );
+        assert.deepEqual((ofKind(events, "tx") as TxEventRecord[]).map((e) => e.outcome), [
+          "commit",
+          "commit",
+        ]);
+      }).pipe(
+        Effect.provide(
+          StorageLive({ file, schema: jsonSchema, appId: "test-app" }).pipe(Layer.provide(deps)),
+        ),
+      ),
+    );
+
+    // Nothing of the failed mutation was committed; the next one was.
+    const after = inspectFile(file);
+    try {
+      assert.equal(
+        after.get(`SELECT count(*) AS n FROM "games" WHERE json_extract("doc", '$.xPlayer') = 'marker'`)?.n,
+        0,
+      );
+      assert.equal(after.get(`SELECT count(*) AS n FROM "games" WHERE "_id" = 'id-2'`)?.n, 1);
+      assert.equal(after.get(`SELECT count(*) AS n FROM "games"`)?.n, 200_001);
+    } finally {
+      after.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("FFI-05: a concurrent statement waits for an in-flight nonblocking read instead of failing busy", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ts-db-ffi05-gate-"));
+  const db = Database.open(join(dir, "gate.sqlite"));
+  try {
+    db.exec("CREATE TABLE t (x INTEGER)");
+    db.exec("INSERT INTO t VALUES (1)");
+    const gate = new ConnectionGate(db);
+    // A read of about 100 ms on the pool (a recursive CTE that counts to 3e5; well under the 5 s deadline).
+    const slow =
+      "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 300000) SELECT count(*) AS c FROM n";
+    const order: string[] = [];
+    await Effect.runPromise(Effect.gen(function* () {
+      const read = yield* Effect.fork(
+        gate.nonblocking({
+          sql: slow,
+          execute: (statement) => allAsync(statement, [], { timeoutMs: 5000 }),
+          limits: { deadlineMs: 5000, graceMs: 1000 },
+          onStuck: Effect.void,
+        }).pipe(Effect.tap(() => Effect.sync(() => void order.push("read")))),
+      );
+      yield* Effect.sleep("2 millis");
+      assert.ok(db.inFlight, "the read is on the pool");
+      // Without the gate this would throw SqliteUsageError("busy") from the main thread. The native
+      // call runs inside `start`, and only its result is returned as an Effect (the gate's contract).
+      const value = yield* gate.blocking(() => {
+        order.push("blocking");
+        return Effect.succeed(db.prepare("SELECT x FROM t").get()?.x);
+      });
+      assert.equal(value, 1);
+      assert.equal((yield* Fiber.join(read))[0]?.c, 300001);
+      assert.deepEqual(order, ["read", "blocking"]);
+    }));
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("FFI-05: a blocking start does its native work before returning, so a competing nonblocking claim cannot take the connection first", async () => {
+  // The gate's contract (`ConnectionGate.blocking`): once `start` returns, nothing holds the
+  // connection for it, so a nonblocking claimant may take it before the returned Effect runs. A start
+  // that defers its native call into the Effect (`Effect.sync(() => nativeCall())`) then finds the
+  // connection busy. `handOff` is that window made deterministic: it lets the competitor claim the
+  // connection and waits until it has, standing in for any yield between `start` and its Effect.
+  const dir = mkdtempSync(join(tmpdir(), "ts-db-ffi05-claim-"));
+  const db = Database.open(join(dir, "claim.sqlite"));
+  try {
+    db.exec("CREATE TABLE t (x INTEGER)");
+    db.exec("INSERT INTO t VALUES (1)");
+    const gate = new ConnectionGate(db);
+    const slow =
+      "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 300000) SELECT count(*) AS c FROM n";
+    const race = (start: (handOff: Effect.Effect<void>) => Effect.Effect<unknown, unknown>) =>
+      Effect.gen(function* () {
+        const go = yield* Deferred.make<void>();
+        const claimed = yield* Deferred.make<void>();
+        const competitor = yield* Effect.fork(Effect.zipRight(
+          Deferred.await(go),
+          gate.nonblocking({
+            sql: slow,
+            // Called in the claiming step, after the claim: `claimed` means the connection is taken.
+            execute: (statement) =>
+              Effect.zipRight(
+                Deferred.succeed(claimed, undefined),
+                allAsync(statement, [], { timeoutMs: 5000 }),
+              ),
+            limits: { deadlineMs: 5000, graceMs: 1000 },
+            onStuck: Effect.void,
+          }),
+        ));
+        const handOff = Effect.zipRight(Deferred.succeed(go, undefined), Deferred.await(claimed));
+        const outcome = yield* Effect.exit(gate.blocking(() => start(handOff)));
+        const read = yield* Fiber.join(competitor);
+        return { outcome, inFlightAfter: db.inFlight, count: read[0]?.c };
+      });
+
+    // Contract-following start: the native call has returned before `start` does.
+    const immediate = await Effect.runPromise(race((handOff) => {
+      const x = db.prepare("SELECT x FROM t").get()?.x;
+      return Effect.as(handOff, x);
+    }));
+    assert.ok(Exit.isSuccess(immediate.outcome), String(immediate.outcome));
+    assert.equal(immediate.outcome.value, 1);
+    assert.equal(immediate.count, 300001);
+    assert.equal(immediate.inFlightAfter, false);
+
+    // The deferred pattern the contract forbids: the competitor claims first and the native call,
+    // made later, is refused busy. This is what the fixtures above must never do.
+    const deferred = await Effect.runPromise(race((handOff) =>
+      Effect.zipRight(
+        handOff,
+        Effect.try({ try: () => db.prepare("SELECT x FROM t").get()?.x, catch: (cause) => cause }),
+      )
+    ));
+    assert.ok(Exit.isFailure(deferred.outcome), "a deferred native call lost the connection to the claim");
+    const failure = Cause.squash(deferred.outcome.cause);
+    assert.ok(isSqliteFfiError(failure), String(failure));
+    assert.equal(failure._tag, "SqliteUsageError");
+    assert.equal((failure as { reason?: string }).reason, "busy");
+    assert.equal(deferred.count, 300001);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("FFI-05 grace period: a step that outlives its interrupt poisons the connection, which closes when the step returns", async () => {
+  // `sqlite3_interrupt` cannot cut a busy-handler wait (measured on vm-1's 3.45.1: a step blocked on
+  // another connection's EXCLUSIVE lock returned SQLITE_BUSY only when its busy timeout ran out), so
+  // a read queued behind a lock is a real step that does not return after its interrupt.
+  const dir = mkdtempSync(join(tmpdir(), "ts-db-ffi05-grace-"));
+  const file = join(dir, "grace.sqlite"); // rollback journal: readers wait for an EXCLUSIVE writer
+  const holder = Database.open(file);
+  const victim = Database.open(file, { busyTimeoutMs: 600 });
+  try {
+    holder.exec("CREATE TABLE t (x INTEGER)");
+    const sql = "SELECT count(*) AS n FROM t";
+    const gate = new ConnectionGate(victim);
+    // Prepare (and cache) while unlocked: preparing reads the schema, which would wait on the main thread.
+    assert.equal(
+      Effect.runSync(gate.blocking(() => Effect.succeed(prepareCached(victim, sql).all())))[0]?.n,
+      0,
+    );
+    holder.exec("BEGIN EXCLUSIVE");
+    holder.exec("INSERT INTO t VALUES (1)");
+
+    const limits = { deadlineMs: 30, graceMs: 100 };
+    const started = performance.now();
+    let stuckAt: number | undefined;
+    const refused: string[] = [];
+    const exit = await Effect.runPromise(Effect.gen(function* () {
+      const read = yield* Effect.fork(Effect.exit(gate.nonblocking<unknown, string>({
+        sql,
+        guard: () => gate.poisoned ? "poisoned" : undefined,
+        execute: (statement) => allAsync(statement, [], { timeoutMs: limits.deadlineMs }),
+        limits,
+        onStuck: Effect.sync(() => void (stuckAt = performance.now() - started)),
+      })));
+      // Queued behind the stuck read: it runs only after the step returns, and then refuses.
+      yield* Effect.sleep("60 millis");
+      const queued = yield* Effect.fork(gate.blocking(() => {
+        if (gate.poisoned) refused.push(victim.isOpen ? "open" : "closed");
+        else prepareCached(victim, sql).all();
+        return Effect.void;
+      }));
+      const result = yield* Fiber.join(read);
+      yield* Fiber.join(queued);
+      return result;
+    }));
+    const returnedMs = performance.now() - started;
+    console.log(
+      `FFI-05 grace: deadline ${limits.deadlineMs} ms + grace ${limits.graceMs} ms, stuck event at ${
+        stuckAt?.toFixed(1)
+      } ms, step returned at ${returnedMs.toFixed(1)} ms (busy timeout 600 ms); load1 ${
+        Deno.loadavg()[0].toFixed(2)
+      }`,
+    );
+    assert.ok(stuckAt !== undefined, "onStuck ran");
+    assert.ok(stuckAt >= limits.deadlineMs + limits.graceMs, `stuck event at ${stuckAt} ms`);
+    assert.ok(stuckAt < 600, "before the step returned");
+    assert.ok(returnedMs >= 600, `the step returned at ${returnedMs} ms`);
+    assert.ok(gate.poisoned);
+    // The step's own outcome: it was cancelled at the deadline but returned SQLITE_BUSY, which the
+    // binding reports as the step's error.
+    assert.ok(Exit.isFailure(exit));
+    const failure = Cause.squash(exit.cause);
+    assert.ok(isSqliteFfiError(failure), String(failure));
+    assert.equal(failure._tag, "SqliteError");
+    // Closed by the gate as soon as the step returned; the queued statement saw that and refused.
+    assert.equal(victim.isOpen, false);
+    assert.deepEqual(refused, ["closed"]);
+    assert.match(POISONED_DETAIL, /poisoned/);
+  } finally {
+    if (holder.inTransaction) holder.exec("ROLLBACK");
+    holder.close();
+    await victim.closeAsync();
+    rmSync(dir, { recursive: true, force: true });
   }
 });

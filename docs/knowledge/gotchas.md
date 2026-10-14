@@ -228,3 +228,65 @@ SQL, which is why the test suite stays green, but they differ:
   booleans. The binding binds integral safe numbers as INTEGER and booleans as 0/1. STRICT INTEGER/REAL
   columns and numeric comparisons do not see the difference. A TEXT-affinity comparison would (`'1'` against
   `'1.0'`), which the schema validator rules out by typing filter values.
+
+## 2026-10-14 — FFI-05: deadlines, stuck steps and where a new error tag can live
+
+Found while building the statement deadline (`item/ffi-05-deadline`; `platform/sqlite.ts` `ConnectionGate`,
+`platform/sqlite_ffi/classify.ts`):
+
+- **`sqlite3_interrupt` does not cut a busy-handler wait.** Measured on vm-1's 3.45.1: a nonblocking read
+  queued behind another connection's `BEGIN EXCLUSIVE` (rollback journal, `busyTimeoutMs: 3000`, deadline 50
+  ms) returned only after the full busy timeout, at 3047 ms, and with `SqliteError` `SQLITE_BUSY`, not
+  `SqliteCancelled`. So a deadline bounds CPU-bound statements, not lock waits; keep busy timeouts on
+  deadline-bounded connections short (the document reader's are 0). This is also the reproducible "step did
+  not return after interrupt" fixture for the grace period (`tests/unit/storage_test.ts`, "FFI-05 grace
+  period").
+- **The grace period needs no binding change.** The binding's async promise settles only after its step has
+  returned (`database.ts`, `Execution`), so "still unsettled `graceMs` after the deadline" is exactly "the
+  step outlived its interrupt". A wall-clock watchdog beside the execution observes it; use real timers, not
+  `Effect.sleep`, or a test's `TestClock` can fire it on `adjust` and poison a healthy connection.
+- **One statement per connection, also inside one transaction.** While a nonblocking read is in flight the
+  binding fails every other call on the connection `"busy"`, including `inTransaction`, `COMMIT` and the
+  release's `ROLLBACK`. A handler that forks two reads, or a release that runs while a forked fiber's read is
+  in flight, must wait. `ConnectionGate.blocking` does the wait, and its `start` must make the driver call
+  synchronously: an `Effect.try` returned from it runs one op later, after a possible fiber switch.
+- **A new error tag cannot join `QueryError` / `MutationError` / `RemoteReaderError` lightly.** Those unions
+  are listed exhaustively in `platform/duckdb.ts`, `platform/ipc.ts` (`REMOTE_ERRORS`) and the test layers
+  (`tests/layers/*`). A tag that only the in-process SQLite paths raise (`StatementDeadlineError`) joins at
+  `DbError`. Likewise `ReaderClientService` is the IPC client's own type (`ReaderConnection extends` it), so
+  widening its channel breaks `tests/unit/ipc_test.ts`; the `ReaderClient` tag uses the wider
+  `ServerReaderClientService` instead.
+- **A document query costs about 3 ms before it reads anything.** `querySqlite` for one point read took 2.8 ms
+  p50 on vm-1 at load ~1 both before and after FFI-05 (open + `BEGIN` + `COMMIT` + close is 0.25 ms; the rest
+  is the Effect pipeline, compile, decode and events). Wall-clock gates of a few ms on a whole call (FFI-05's
+  "< 5 ms point read") sit close to that floor; measure several calls and gate the median.
+- **Seeding big fixtures.** A recursive CTE (`WITH RECURSIVE n(i) AS (...) INSERT ... SELECT ... FROM n`)
+  seeds 200 000 rows in about 1.3 s; one compiled insert per row took 6–10 s. In the `json` layout every
+  non-key filter is a `json_extract` per row, which makes a filtered `count` over 200 000 rows take about 100
+  ms per extracted field: a reliable "past the deadline" statement.
+
+## 2026-10-14 — FFI-05 repair: a check made before a connection wait is stale after it
+
+Found by the Astra review of FFI-05 (defect 1) and fixed in `item/ffi-05-deadline`
+(`platform/document_reader.ts` `admit` and `COMMIT`; regression in `tests/unit/document_reader_test.ts`, "a
+forked read queued behind an in-flight read"):
+
+- **Repeat validity checks where the native call starts, after any wait for the connection.** Once a
+  connection can be busy (a nonblocking read in flight), every caller may wait at `ConnectionGate`, and
+  anything checked before that wait (the query context, poisoning) can change during it. The reader checked
+  its context in `executeIn`, before the wait: a handler that forked a long count and a delayed point read,
+  then returned, let the point read pass the check, queue behind `COMMIT`, and run after it: outside the
+  snapshot, with a `sql` event after the `tx` event, or against the connection the release had closed
+  (`ReaderError` "prepare on a closed connection"). Put the check inside the gate's start step: the `start`
+  callback of `blocking`, the `guard` of `nonblocking`. An early check before the wait is fine as a fast path,
+  never as the only one.
+- **Expire the context in the transaction-ending synchronous step.** `context.active = false` belongs in the
+  same gate callback as `COMMIT` (the writer's `transaction` already did this), not in the release that runs
+  later: between the two there is a yield (an event sink, `closeAsync`), and a waiter woken by the in-flight
+  read's settle can take the connection in it. A refusal for an expired context ran no statement, so it emits
+  no `sql` event and does not count as an operation.
+- **Gate fixtures must follow the gate's contract too.** `gate.blocking(() => Effect.sync(() => native()))`
+  passes until something competes for the connection between `start` returning and its Effect running; then
+  the native call fails `SqliteUsageError` `"busy"`. Call the driver inside `start` and return
+  `Effect.succeed(result)`; `tests/unit/storage_test.ts` ("a blocking start does its native work before
+  returning") makes that window deterministic with a hand-off to a competing `nonblocking` claim.
