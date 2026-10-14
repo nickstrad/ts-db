@@ -1,0 +1,57 @@
+--- a/docs/observability.md
++++ b/docs/observability.md
+@@ -96,6 +96,7 @@
+ | `row_count`      | BIGINT    | Rows returned or changed.                                                                                                |
+ | `outcome`        | VARCHAR   | `ok` or `error`.                                                                                                         |
+ | `error_tag`      | VARCHAR   | Failure tag when `outcome = 'error'`.                                                                                    |
++| `path` | VARCHAR | SQLite execution path: `blocking` or `nonblocking`; NULL in older logs. |
+ 
+ ### `tx_events`
+ 
+@@ -254,6 +255,16 @@
+ fails if a name or parameter is documented here and absent there, or the reverse. Every entry is a single
+ `SELECT`/`WITH`, also asserted by that test.
+ 
++### `deadline-hits-per-handler-hour`
++
++**Question:** how many statements hit their deadline per app, handler and UTC hour?
++Returns `hour`, `app_id`, `handler_kind`, `name`, `path` and `deadline_hits`.
++Joins deadline-tagged `sql_events` to the nearest completing request by trace, app
++and request time window (one match per SQL event, including millisecond timestamp rounding).
++Parameters: `since`, `until`, `appId` (all optional). Failed statements are logged even
++without `TRACE_SQL`; execution paths in older JSONL are NULL. Ingest adds the nullable
++`path` column to existing v2 event logs.
++
+ ### `slowest-sql`
+ 
+ **Question:** what are the p50/p95/p99 `duration_ms` by engine, statement kind and table? Ordered by p95,
+--- a/tests/unit/analysis_catalog_test.ts
++++ b/tests/unit/analysis_catalog_test.ts
+@@ -64,6 +64,7 @@
+   assert.deepEqual([...ANALYSIS_QUERY_NAMES], Object.keys(CATALOG));
+   assert.deepEqual([...ANALYSIS_QUERY_NAMES].sort(), [
+     "backup-history",
++    "deadline-hits-per-handler-hour",
+     "error-rate-by-handler",
+     "handler-throughput",
+     "k6-vs-platform",
+@@ -222,7 +223,8 @@
+     ('p-reader', '2026-10-10 12:00:06', 'info', 'reader', 2, '${TRACE}', 's4', 's2', 'app1', 'handler', 'query', 'get', 'ok', NULL, 1.0, NULL),
+     ('p-other', '2026-10-10 12:00:07', 'info', 'server', 1, 'other', 's5', NULL, 'app1', 'handler', 'query', 'get', 'ok', NULL, 1.0, NULL),
+     ('p-slow', '2026-10-10 12:00:30', 'info', 'server', 1, 't2', 's6', NULL, 'app1', 'handler', 'mutation', 'play', 'error', 'MutationError', 30.0, NULL)`);
+-  await sql(`INSERT INTO sql_events VALUES
++  await sql(`INSERT INTO sql_events (event_id, ts, trace_id, app_id, engine, dialect, statement_kind,
++    table_name, sql_text, bind_count, duration_ms, row_count, outcome, error_tag) VALUES
+     ('p-sql', '2026-10-10 12:00:05', '${TRACE}', 'app1', 'sqlite', 'sqlite', 'insert', 'games', 'INSERT INTO games VALUES (?)', 1, 1.0, 1, 'ok', NULL),
+     ('s-b', '2026-10-10 12:00:10', 't9', 'app1', 'sqlite', 'sqlite', 'insert', 'games', 'INSERT INTO games VALUES (?)', 1, 3.0, 1, 'ok', NULL),
+     ('s-c', '2026-10-10 12:00:11', 't9', 'app1', 'duckdb', 'duckdb', 'select', 'games', 'SELECT * FROM games', 0, 7.0, 4, 'ok', NULL)`);
+--- a/docs.md
++++ b/docs.md
+@@ -322,6 +322,7 @@
+ 
+ The named analysis queries are:
+ 
++- `deadline-hits-per-handler-hour`: statement deadline hits by app, handler, UTC hour and execution path.
+ - `slowest-sql`: SQL p50/p95/p99 by engine, statement kind and collection.
+ - `plan-shapes`: compiled SQL texts, frequency and latency for investigating plans and indexes.
+ - `error-rate-by-handler`: request counts, error rates and error tags by app and handler.

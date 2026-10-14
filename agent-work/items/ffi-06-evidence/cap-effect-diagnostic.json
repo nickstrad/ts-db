@@ -1,0 +1,173 @@
+{
+  "runtime": "deno 2.9.5",
+  "loadavg": [
+    1.35302734375,
+    1.3466796875,
+    1.38525390625
+  ],
+  "readers": 32,
+  "deadline_ms": 50,
+  "samples": [
+    {
+      "reader": 0,
+      "elapsed_ms": 128.57,
+      "cancel_latency_ms": 26.18936500000001
+    },
+    {
+      "reader": 1,
+      "elapsed_ms": 139.701,
+      "cancel_latency_ms": 26.30840299999994
+    },
+    {
+      "reader": 2,
+      "elapsed_ms": 125.852,
+      "cancel_latency_ms": 25.956415999999933
+    },
+    {
+      "reader": 3,
+      "elapsed_ms": 109.89,
+      "cancel_latency_ms": 13.184307999999987
+    },
+    {
+      "reader": 4,
+      "elapsed_ms": 139.159,
+      "cancel_latency_ms": 26.581797999999992
+    },
+    {
+      "reader": 5,
+      "elapsed_ms": 137.768,
+      "cancel_latency_ms": 26.137819000000036
+    },
+    {
+      "reader": 6,
+      "elapsed_ms": 137.81,
+      "cancel_latency_ms": 26.271394000000043
+    },
+    {
+      "reader": 7,
+      "elapsed_ms": 139.781,
+      "cancel_latency_ms": 73.11428800000004
+    },
+    {
+      "reader": 8,
+      "elapsed_ms": 137.196,
+      "cancel_latency_ms": 26.504849000000036
+    },
+    {
+      "reader": 9,
+      "elapsed_ms": 135.135,
+      "cancel_latency_ms": 25.91613700000005
+    },
+    {
+      "reader": 10,
+      "elapsed_ms": 122.358,
+      "cancel_latency_ms": 25.79068899999993
+    },
+    {
+      "reader": 11,
+      "elapsed_ms": 137.932,
+      "cancel_latency_ms": 73.21058799999997
+    },
+    {
+      "reader": 12,
+      "elapsed_ms": 138.19,
+      "cancel_latency_ms": 73.26146400000005
+    },
+    {
+      "reader": 13,
+      "elapsed_ms": 134.079,
+      "cancel_latency_ms": 25.876034000000004
+    },
+    {
+      "reader": 14,
+      "elapsed_ms": 134.779,
+      "cancel_latency_ms": 26.17687600000005
+    },
+    {
+      "reader": 15,
+      "elapsed_ms": 137.555,
+      "cancel_latency_ms": 61.031093
+    },
+    {
+      "reader": 16,
+      "elapsed_ms": 137.458,
+      "cancel_latency_ms": 61.03578399999998
+    },
+    {
+      "reader": 17,
+      "elapsed_ms": 137.126,
+      "cancel_latency_ms": 60.98019300000004
+    },
+    {
+      "reader": 18,
+      "elapsed_ms": 139.85,
+      "cancel_latency_ms": 3.755679999999984
+    },
+    {
+      "reader": 19,
+      "elapsed_ms": 117.821,
+      "cancel_latency_ms": 3.4359060000000454
+    },
+    {
+      "reader": 20,
+      "elapsed_ms": 119.331,
+      "cancel_latency_ms": 3.833863000000065
+    },
+    {
+      "reader": 21,
+      "elapsed_ms": 118.628,
+      "cancel_latency_ms": 3.6677170000000388
+    },
+    {
+      "reader": 22,
+      "elapsed_ms": 118.607,
+      "cancel_latency_ms": 3.6907919999999876
+    },
+    {
+      "reader": 23,
+      "elapsed_ms": 115.161,
+      "cancel_latency_ms": 0.8798909999999296
+    },
+    {
+      "reader": 24,
+      "elapsed_ms": 118.541,
+      "cancel_latency_ms": 3.8172180000000253
+    },
+    {
+      "reader": 25,
+      "elapsed_ms": 112.939,
+      "cancel_latency_ms": 0.8742240000000265
+    },
+    {
+      "reader": 26,
+      "elapsed_ms": 98.081,
+      "cancel_latency_ms": 3.397470999999996
+    },
+    {
+      "reader": 27,
+      "elapsed_ms": 98.2,
+      "cancel_latency_ms": 3.577658999999926
+    },
+    {
+      "reader": 28,
+      "elapsed_ms": 97.965,
+      "cancel_latency_ms": 3.627508999999918
+    },
+    {
+      "reader": 29,
+      "elapsed_ms": 97.045,
+      "cancel_latency_ms": 3.4311069999999972
+    },
+    {
+      "reader": 30,
+      "elapsed_ms": 94.581,
+      "cancel_latency_ms": 0.8313810000000785
+    },
+    {
+      "reader": 31,
+      "elapsed_ms": 79.946,
+      "cancel_latency_ms": 3.669625999999994
+    }
+  ],
+  "max_elapsed_ms": 139.85
+}

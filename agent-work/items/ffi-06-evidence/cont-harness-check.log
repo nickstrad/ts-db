@@ -1,0 +1,4 @@
+Check perf/ffi_read_cost.ts
+Check perf/ffi_interrupt.ts
+Check perf/ffi_cap.ts
+Check agent-work/items/ffi-06-evidence/migration-probe.ts

@@ -1,0 +1,19 @@
+Check agent-work/items/ffi-06-evidence/candidate-catalog-test.ts
+running 14 tests from ./agent-work/items/ffi-06-evidence/candidate-catalog-test.ts
+catalog: every entry is one SELECT/WITH statement with no write or DDL keyword ... ok (32ms)
+catalog: placeholders and declared parameters match exactly ... ok (1ms)
+catalog: names are derived from the record ... ok (513µs)
+doc: the named queries section lists exactly the catalog names ... ok (1ms)
+doc: every parameter of every catalog entry is documented under its query ... ok (729µs)
+doc: every column of every event-log table is documented ... ok (304ms)
+resolveParams: defaults, coercion, required, unknown, and bad values ... ok (14ms)
+AnalysisLive: every catalog query runs against an empty file and against the fixture ... ok (2s)
+AnalysisLive: query results ... ok (1s)
+AnalysisLive: trace is the ordered cross-process timeline without double-listing typed events ... ok (643ms)
+AnalysisLive: typed failures ... ok (486ms)
+logs: argument parsing ... ok (2ms)
+logs: table, json and csv output ... ok (1ms)
+logs: list, query and exit codes ... ok (8ms)
+
+ok | 14 passed | 0 failed (5s)
+

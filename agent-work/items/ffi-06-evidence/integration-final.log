@@ -1,0 +1,12 @@
+Task integration deno run -A tests/integration.ts
+PASS: both layouts, DuckDB read-after-write, aggregation, app isolation, backup, restore, HTTP auth, X-Trace-Id in JSONL (32 ids), logs-ingest populates DuckDB (125 lines), error-rate-by-handler handlers
+PASS FFI-06 deadline HTTP 504 / two tenants: {"point_reads":153,"point_p99_ms":22.097451999999976,"loadavg":[1.7939453125,2.09130859375,2.8076171875],"budget_ms":50}
+logs:ingest {
+  "filesScanned": 2,
+  "filesIngested": 2,
+  "bytesIngested": 391324,
+  "linesIngested": 762,
+  "linesRejected": 0,
+  "durationMs": 378.516802
+}
+logs:query [{"hour":"2026-10-14 01:00:00","app_id":"tic-tac-toe-json","handler_kind":"query","name":"winsByMark","path":"nonblocking","deadline_hits":20}]

@@ -1,0 +1,11 @@
+{
+  "runtime": "deno 2.9.5",
+  "loadavg": [0.7001953125, 1.37744140625, 1.76904296875],
+  "node_sqlite_sync_us": { "p50_us": 7.21, "p99_us": 29.24, "n": 20000 },
+  "ffi_blocking_us": { "p50_us": 7.64, "p99_us": 29.66, "n": 20000 },
+  "ffi_nonblocking_us": { "p50_us": 47.56, "p99_us": 745.04, "n": 20000 },
+  "notes": [
+    "1000-row WAL files, reused production Statement; microseconds including JS overhead",
+    "Reused bind arrays, identical one-column decode, 2000 warm-ups per path excluded; alternating blocking batches"
+  ]
+}
