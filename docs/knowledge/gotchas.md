@@ -264,3 +264,29 @@ Found while building the statement deadline (`item/ffi-05-deadline`; `platform/s
   seeds 200 000 rows in about 1.3 s; one compiled insert per row took 6–10 s. In the `json` layout every
   non-key filter is a `json_extract` per row, which makes a filtered `count` over 200 000 rows take about 100
   ms per extracted field: a reliable "past the deadline" statement.
+
+## 2026-10-14 — FFI-05 repair: a check made before a connection wait is stale after it
+
+Found by the Astra review of FFI-05 (defect 1) and fixed in `item/ffi-05-deadline`
+(`platform/document_reader.ts` `admit` and `COMMIT`; regression in `tests/unit/document_reader_test.ts`, "a
+forked read queued behind an in-flight read"):
+
+- **Repeat validity checks where the native call starts, after any wait for the connection.** Once a
+  connection can be busy (a nonblocking read in flight), every caller may wait at `ConnectionGate`, and
+  anything checked before that wait (the query context, poisoning) can change during it. The reader checked
+  its context in `executeIn`, before the wait: a handler that forked a long count and a delayed point read,
+  then returned, let the point read pass the check, queue behind `COMMIT`, and run after it: outside the
+  snapshot, with a `sql` event after the `tx` event, or against the connection the release had closed
+  (`ReaderError` "prepare on a closed connection"). Put the check inside the gate's start step: the `start`
+  callback of `blocking`, the `guard` of `nonblocking`. An early check before the wait is fine as a fast path,
+  never as the only one.
+- **Expire the context in the transaction-ending synchronous step.** `context.active = false` belongs in the
+  same gate callback as `COMMIT` (the writer's `transaction` already did this), not in the release that runs
+  later: between the two there is a yield (an event sink, `closeAsync`), and a waiter woken by the in-flight
+  read's settle can take the connection in it. A refusal for an expired context ran no statement, so it emits
+  no `sql` event and does not count as an operation.
+- **Gate fixtures must follow the gate's contract too.** `gate.blocking(() => Effect.sync(() => native()))`
+  passes until something competes for the connection between `start` returning and its Effect running; then
+  the native call fails `SqliteUsageError` `"busy"`. Call the driver inside `start` and return
+  `Effect.succeed(result)`; `tests/unit/storage_test.ts` ("a blocking start does its native work before
+  returning") makes that window deterministic with a hand-off to a competing `nonblocking` claim.
