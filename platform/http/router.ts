@@ -207,9 +207,15 @@ function fieldsOf(error: PlatformError): string {
 
 /**
  * The human message for a failure. 4xx messages say what was wrong with the request; 5xx messages
- * say only which tag failed and where to look, since their detail is about this server.
+ * say only which tag failed and where to look, since their detail is about this server. The one
+ * exception is the 504 for a statement deadline (FFI-05): it names the deadline, because the fix
+ * (a narrower query, or an index) is on the caller's side.
  */
 export function errorMessage(error: PlatformError, status: number, traceId: string): string {
+  if (error._tag === "StatementDeadlineError") {
+    return `Statement deadline exceeded: ${error.statementKind} on ${error.table} was stopped after ` +
+      `${error.deadlineMs} ms; see the server log for trace ${traceId}`;
+  }
   if (status >= 500) return `${error._tag}; see the server log for trace ${traceId}`;
   switch (error._tag) {
     case "AuthError":

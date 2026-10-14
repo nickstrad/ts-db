@@ -135,12 +135,13 @@ matching the plan's §1.4 example verbatim.
 
 ### Write path (`Storage`, SQLite)
 
-| Tag                          | Payload                                  | Status       |
-| ---------------------------- | ---------------------------------------- | ------------ |
-| `StorageError`               | `{ operation; table?; detail?; cause? }` | 500          |
-| `SchemaDriftError`           | `{ file; detail? }`                      | never served |
-| `ContextExpiredError`        | `{ context: "mutation" \| "query" }`     | 500          |
-| `NonSerializableResultError` | `{ appId?; name?; detail? }`             | 500          |
+| Tag                          | Payload                                                   | Status       |
+| ---------------------------- | --------------------------------------------------------- | ------------ |
+| `StorageError`               | `{ operation; table?; detail?; cause? }`                  | 500          |
+| `SchemaDriftError`           | `{ file; detail? }`                                       | never served |
+| `ContextExpiredError`        | `{ context: "mutation" \| "query" }`                      | 500          |
+| `NonSerializableResultError` | `{ appId?; name?; detail? }`                              | 500          |
+| `StatementDeadlineError`     | `{ deadlineMs; elapsedMs; table; statementKind; cause? }` | 504          |
 
 `StorageError.operation` is one of `open`, `ddl`, `select`, `insert`, `update`, `delete`, `begin`, `commit`,
 `rollback`, `snapshot`, `close`, `pragma` — enough to tell a failed `COMMIT` from a failed `VACUUM INTO` in an

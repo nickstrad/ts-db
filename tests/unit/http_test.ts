@@ -18,6 +18,8 @@ import {
   IngestError,
   IpcError,
   ReaderExitedError,
+  StatementDeadlineError,
+  toHttpStatus,
   UnknownAnalysisQuery,
   UnknownAppError,
   UnknownHandlerError,
@@ -25,7 +27,7 @@ import {
 import type { HttpEventRecord } from "../../core/events.ts";
 import { BackupsLive } from "../../platform/backup.ts";
 import { ConfigTest } from "../../platform/config.ts";
-import { handle, matchRoute, type RouterRequirements } from "../../platform/http/router.ts";
+import { errorMessage, handle, matchRoute, type RouterRequirements } from "../../platform/http/router.ts";
 import type { CallError } from "../../platform/ipc.ts";
 import { LoggingLive } from "../../platform/logging/logger.ts";
 import {
@@ -499,6 +501,23 @@ httpTest(
     assert.equal(event.level, "error");
   }),
 );
+
+test("FFI-05: a statement deadline → 504 with a message naming the deadline; the reader call timeout stays 502", () => {
+  const deadline = new StatementDeadlineError({
+    deadlineMs: 5000,
+    elapsedMs: 5000.6,
+    table: "games",
+    statementKind: "count",
+  });
+  assert.equal(toHttpStatus(deadline), 504);
+  assert.equal(
+    errorMessage(deadline, 504, "t-504"),
+    "Statement deadline exceeded: count on games was stopped after 5000 ms; see the server log for trace t-504",
+  );
+  const callTimeout = new IpcError({ reason: "timeout", detail: "Document query deadline exceeded" });
+  assert.equal(toHttpStatus(callTimeout), 502);
+  assert.equal(errorMessage(callTimeout, 502, "t-502"), "IpcError; see the server log for trace t-502");
+});
 
 httpTest(
   "a reader that exited, timed out or broke the protocol → 502 per call; the writer is unaffected",

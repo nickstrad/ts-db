@@ -249,6 +249,31 @@ export class NonSerializableResultError extends Data.TaggedError("NonSerializabl
 }> {}
 
 // ---------------------------------------------------------------------------
+// Statement deadline (both SQLite paths, FFI-05)
+// ---------------------------------------------------------------------------
+
+/** The unbounded statement kinds a deadline can stop: a plain select, `count` or `countBy`. */
+export type DeadlineStatementKind = "select" | "count" | "countBy";
+
+/**
+ * An unbounded statement (any select that is not a primary-key lookup, `count`, `countBy`) ran past
+ * `Config.sqlite.statementDeadlineMs`. It was stopped by `sqlite3_interrupt`, not abandoned: when
+ * this error exists the statement is no longer running. Raised by the writer (`Storage`) and the
+ * in-process document reader; the DuckDB reader process never raises it, so it stays out of
+ * `QueryError` and `RemoteReaderError` and joins the unions at `DbError`. HTTP 504.
+ */
+export class StatementDeadlineError extends Data.TaggedError("StatementDeadlineError")<{
+  /** The deadline the statement ran under, in ms. */
+  readonly deadlineMs: number;
+  /** Wall time from the statement's start to its interrupted return, in ms. */
+  readonly elapsedMs: number;
+  readonly table: string;
+  readonly statementKind: DeadlineStatementKind;
+  /** The binding's own cancellation record (`SqliteCancelled`). */
+  readonly cause?: unknown;
+}> {}
+
+// ---------------------------------------------------------------------------
 // Read path (`Reader`, DuckDB)
 // ---------------------------------------------------------------------------
 
@@ -425,8 +450,9 @@ export class RemoteError extends Data.TaggedError("RemoteError")<{
 // ---------------------------------------------------------------------------
 
 /**
- * The write path: `Storage.mutation`'s error channel, and the `Execute` channel inside a mutation.
- * Excludes `SchemaDriftError`, which fails layer construction rather than a request.
+ * The write path: `Storage.mutation`'s error channel, and the `Execute` channel inside a mutation,
+ * together with `StatementDeadlineError` (see `DbError`). Excludes `SchemaDriftError`, which fails
+ * layer construction rather than a request.
  */
 export type MutationError =
   | SchemaError
@@ -441,8 +467,9 @@ export type MutationError =
   | QueueFullError;
 
 /**
- * The read path: `Reader.query`'s error channel, and the `Execute` channel inside a query.
- * The 500-level engine failure inside this union is `ReaderError`, not `QueryError`.
+ * The read path: `Reader.query`'s error channel, and the `Execute` channel inside a query (the
+ * in-process document reader adds `StatementDeadlineError`, see `DbError`). The 500-level engine
+ * failure inside this union is `ReaderError`, not `QueryError`.
  */
 export type QueryError =
   | SchemaError
@@ -455,8 +482,13 @@ export type QueryError =
   | ReaderError
   | QueueFullError;
 
-/** The SDK seam: `Execute = (operation) => Effect<unknown, DbError>` (plan §1.4). */
-export type DbError = MutationError | QueryError;
+/**
+ * The SDK seam: `Execute = (operation) => Effect<unknown, DbError>` (plan §1.4). Both SQLite paths
+ * can also stop an unbounded statement at its deadline (`StatementDeadlineError`, FFI-05). That tag
+ * joins here rather than in `MutationError` / `QueryError`, whose members cross the reader IPC and
+ * are listed exhaustively by the DuckDB reader and the test doubles, none of which can raise it.
+ */
+export type DbError = MutationError | QueryError | StatementDeadlineError;
 
 /**
  * What the reader process can send back inside a `ReaderReply` error frame. The parent rehydrates
@@ -516,7 +548,8 @@ export type AnyError = PlatformError | StartupError | CliError | ClientError;
  *
  * Used by item 22 and tested there; two mappings are deliberate behaviour changes against today's
  * blanket 400 — `ConflictError` → 409 and `QueueFullError` → 503 — plus `BackupAlreadyRunning` →
- * 409 and `RequestTooLarge` → 413. ADR 0002 records all four.
+ * 409 and `RequestTooLarge` → 413. ADR 0002 records all four, and FFI-05's
+ * `StatementDeadlineError` → 504.
  */
 export function toHttpStatus(error: PlatformError): number {
   switch (error._tag) {
@@ -576,6 +609,10 @@ export function toHttpStatus(error: PlatformError): number {
     // 503 — load shedding; the caller may retry.
     case "QueueFullError":
       return 503;
+
+    // 504 — a statement ran past its deadline and was interrupted (FFI-05).
+    case "StatementDeadlineError":
+      return 504;
 
     default:
       return EffectFunction.absurd<number>(error);

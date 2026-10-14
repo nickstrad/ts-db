@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { Deferred, Effect, Either, Fiber, Option } from "effect";
+import { Deferred, Effect, Either, Exit, Fiber, Option } from "effect";
+import { type StatementDeadlineError, toHttpStatus } from "../../core/errors.ts";
+import type { EventRecord, SqlEventRecord, TxEventRecord } from "../../core/events.ts";
 import { compileDDL } from "../../core/compile/ddl.ts";
 import { compileInsert } from "../../core/compile/write.ts";
 import { schema } from "../../app/schema.ts";
@@ -14,7 +16,7 @@ import {
   makeDocumentReaderClient,
   querySqlite,
 } from "../../platform/document_reader.ts";
-import { type App, EventSink, type ReaderRequest } from "../../platform/services.ts";
+import { type App, type Config, EventSink, type ReaderRequest } from "../../platform/services.ts";
 import { defineFunctions } from "../../sdk/functions.ts";
 import { inspect } from "../helpers/sqlite_inspect.ts";
 
@@ -336,6 +338,195 @@ test("document deadline expires the context, closes the reader, and releases adm
     );
   } finally {
     writer.close();
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// FFI-05: unbounded selects run nonblocking under the statement deadline
+// ---------------------------------------------------------------------------
+
+/**
+ * Seed `rows` games with one recursive-CTE statement (seconds faster than one insert per row). The
+ * JSON layout makes every non-key filter a `json_extract` per row, so a filtered `count` scans and
+ * decodes the whole table: about 200 ms for 200 000 rows on vm-1 at load 0.2, four times the
+ * deadline below.
+ */
+function seedGames(file: string, rows: number): void {
+  const json = withStorage(schema, "json");
+  const fixture = inspect(file, { write: true });
+  try {
+    fixture.exec("PRAGMA journal_mode=WAL");
+    for (const ddl of right(compileDDL(json))) fixture.exec(ddl);
+    const doc = JSON.stringify(game);
+    fixture.run(
+      `WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
+       INSERT INTO "games" ("_id", "_creationTime", "_version", "doc") SELECT 'game-' || i, i, 1, ? FROM n`,
+      [rows - 1, doc],
+    );
+  } finally {
+    fixture.close();
+  }
+}
+
+/**
+ * The slack a wall-clock bound gets on a loaded host: 1 up to one runnable task per CPU, then the
+ * one-minute load per CPU (plan risk 11: the shared VM's load distorts latency gates, so a gate
+ * scales with the load it ran under, which the test prints).
+ */
+function loadFactor(): { load1: number; cpus: number; factor: number } {
+  const load1 = Deno.loadavg()[0];
+  const cpus = navigator.hardwareConcurrency;
+  return { load1, cpus, factor: Math.max(1, load1 / cpus) };
+}
+
+test("FFI-05: an unbounded count stops at the statement deadline (504) while a point read on another file stays blocking and fast", async () => {
+  const root = await Deno.makeTempDir({ prefix: "ffi05-deadline-" });
+  const big = join(root, "big.sqlite");
+  const small = join(root, "small.sqlite");
+  try {
+    const seedStart = performance.now();
+    seedGames(big, 200_000);
+    seedGames(small, 3);
+    const seedMs = performance.now() - seedStart;
+    const appSchema = withStorage(schema, "json");
+    const slow = defineFunctions(appSchema).query({
+      args: {},
+      // Both filters match no index; every row's doc is decoded twice (`xPlayer` matches them all).
+      handler: ({ db }) => db.find("games", { xPlayer: "alice", oPlayer: "nobody" }).count(),
+    });
+    const bigApp = { id: "big", file: big, schema: appSchema };
+    const smallApp = { id: "small", file: small, schema: appSchema };
+    const events: EventRecord[] = [];
+    const deadlineMs = 50;
+    const services = <A, E>(effect: Effect.Effect<A, E, Config | EventSink>) =>
+      effect.pipe(
+        Effect.provide(
+          ConfigTest({ sqlite: { statementDeadlineMs: deadlineMs }, logging: { traceSql: true } }),
+        ),
+        Effect.provideService(EventSink, { emit: (event) => Effect.sync(() => void events.push(event)) }),
+      );
+    const timed = async <A, E>(effect: Effect.Effect<A, E>) => {
+      const started = performance.now();
+      const exit = await Effect.runPromiseExit(effect);
+      return { exit, ms: performance.now() - started };
+    };
+
+    // Warm-up, both paths: library load, first prepare, the blocking pool's first thread, JIT.
+    await Effect.runPromise(services(querySqlite(smallApp, functions.getGame, { gameId: "game-0" })));
+    await Effect.runPromise(services(querySqlite(smallApp, functions.listGames, { status: "won" })));
+    events.length = 0;
+    const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
+
+    // 1. The count stops at its deadline with the typed error, not the call timeout's IpcError.
+    //    Three runs. The 20 ms budget bounds each run's statement (`elapsedMs`, the binding's own
+    //    clock: deadline timer, interrupt, step return) and the median of the whole call's wall
+    //    clock, which also pays the call's fixed cost (open, BEGIN, compile, events, ROLLBACK,
+    //    close: about 7 ms on vm-1, 3 ms of it the same on a point read before this item).
+    const { load1, cpus, factor } = loadFactor();
+    const slack = 20 * factor;
+    const walls: number[] = [];
+    const elapsed: number[] = [];
+    for (let run = 0; run < 3; run++) {
+      events.length = 0;
+      const { exit, ms } = await timed(services(Effect.flip(querySqlite(bigApp, slow, {}))));
+      assert.ok(Exit.isSuccess(exit), `the count must fail with a typed error: ${String(exit)}`);
+      assert.equal(exit.value._tag, "StatementDeadlineError");
+      const failure = exit.value as StatementDeadlineError;
+      assert.equal(failure.deadlineMs, deadlineMs);
+      assert.equal(failure.table, "games");
+      assert.equal(failure.statementKind, "count");
+      assert.ok(failure.elapsedMs >= deadlineMs, `elapsedMs ${failure.elapsedMs}`);
+      assert.ok(
+        failure.elapsedMs <= deadlineMs + slack,
+        `statement stopped after ${failure.elapsedMs.toFixed(1)} ms, bound ${deadlineMs + slack}`,
+      );
+      assert.equal(toHttpStatus(failure), 504);
+      walls.push(ms);
+      elapsed.push(failure.elapsedMs);
+
+      const sql = events.filter((e): e is SqlEventRecord => e.kind === "sql");
+      assert.equal(sql.length, 1, JSON.stringify(sql));
+      assert.equal(sql[0].path, "nonblocking");
+      assert.equal(sql[0].outcome, "error");
+      assert.equal(sql[0].errorTag, "StatementDeadlineError");
+      assert.equal(sql[0].level, "error");
+      const tx = events.filter((e): e is TxEventRecord => e.kind === "tx");
+      assert.equal(tx.length, 1);
+      assert.equal(tx[0].outcome, "rollback");
+      assert.equal(tx[0].errorTag, "StatementDeadlineError");
+      assert.equal(events.filter((e) => e.kind === "lifecycle").length, 0, "no stuck-statement event");
+    }
+    console.log(
+      `FFI-05 deadline ${deadlineMs} ms: call wall ${walls.map((w) => w.toFixed(1)).join(", ")} ms ` +
+        `(median ${median(walls).toFixed(1)}), statement elapsed ${
+          elapsed.map((e) => e.toFixed(1)).join(", ")
+        } ms, ` +
+        `bound ${(deadlineMs + slack).toFixed(1)} ms; load1 ${load1.toFixed(2)} on ${cpus} CPUs; seed ${
+          seedMs.toFixed(0)
+        } ms`,
+    );
+    assert.ok(
+      median(walls) <= deadlineMs + slack,
+      `median call wall ${median(walls).toFixed(1)} ms, bound ${deadlineMs + slack}`,
+    );
+
+    // 2. Point reads on another file complete while a long statement runs on the pool: five in a
+    //    row, all finished before the count hit its deadline (event order), median under 5 ms.
+    events.length = 0;
+    const longRun = Effect.runPromiseExit(services(querySqlite(bigApp, slow, {})));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const points: number[] = [];
+    for (let i = 0; i < 5; i++) {
+      const point = await timed(services(querySqlite(smallApp, functions.getGame, { gameId: "game-1" })));
+      assert.ok(Exit.isSuccess(point.exit), String(point.exit));
+      assert.equal((point.exit.value as { _id?: string })?._id, "game-1");
+      points.push(point.ms);
+    }
+    const longExit = await longRun;
+    const pointBound = 5 * factor;
+    console.log(
+      `FFI-05 point reads during the long count: ${points.map((p) => p.toFixed(2)).join(", ")} ms ` +
+        `(median ${median(points).toFixed(2)}), bound ${pointBound.toFixed(1)} ms; load1 ${load1.toFixed(2)}`,
+    );
+    assert.ok(Exit.isFailure(longExit), "the long count must still have hit its deadline");
+    const order = events.filter((e): e is SqlEventRecord => e.kind === "sql");
+    assert.deepEqual(
+      order.map((e) => [e.path, e.outcome]),
+      [...Array(5).fill(["blocking", "ok"]), ["nonblocking", "error"]],
+      "every point read finished first, on the blocking path",
+    );
+    assert.ok(
+      median(points) < pointBound,
+      `point read median ${median(points).toFixed(2)} ms, bound ${pointBound}`,
+    );
+
+    // 3. Through the client, the deadline (not IpcError) reaches the caller, and the next call works.
+    const app: App = {
+      id: "big",
+      file: big,
+      schema: appSchema,
+      functions: { slow, getGame: functions.getGame },
+      token: "",
+    };
+    await Effect.runPromise(services(
+      Effect.gen(function* () {
+        const client = yield* makeDocumentReaderClient({ call: () => Effect.die("unexpected IPC") });
+        const failed = yield* Effect.either(
+          client.call({ kind: "query", appId: "big", name: "slow", args: {} }),
+        );
+        assert.ok(Either.isLeft(failed));
+        assert.equal(failed.left._tag, "StatementDeadlineError");
+        const after = yield* client.call({
+          kind: "query",
+          appId: "big",
+          name: "getGame",
+          args: { gameId: "game-7" },
+        });
+        assert.equal((after as { _id?: string } | null)?._id, "game-7");
+      }).pipe(Effect.provide(AppRegistryTest([app]))),
+    ));
+  } finally {
     await Deno.remove(root, { recursive: true });
   }
 });
