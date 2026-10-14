@@ -1,8 +1,8 @@
 # Component — server process
 
 Audited against landed main `643b706` on 2026-10-11 (item 27); updated for FFI-01 to FFI-05 at `f2bf1c9` on
-2026-10-14. Both formats are generated from `diagrams/c4-component-server.py`; numbered relationships are
-identical. All boxes describe landed code.
+2026-10-14; FFI-06 at `5c2a499` changes only the runtime note on `path`. Both formats are generated from
+`diagrams/c4-component-server.py`; numbered relationships are identical. All boxes describe landed code.
 
 <!-- c4-render: diagrams/c4-component-server.py -->
 
@@ -206,5 +206,6 @@ keeps one statement at a time on a connection: while an async read is in flight,
 forked fiber's, COMMIT, the release's ROLLBACK) waits instead of failing the binding's busy refusal. A step
 that has not returned Config.sqlite.statementInterruptGraceMs after its interrupt poisons the connection: an
 error-level lifecycle event (phase "statement did not return after interrupt"), no further statements, and the
-connection closes when the step returns. Every sql event carries path (blocking or nonblocking) in memory; the
-JSONL key list and the DuckDB sql_events column arrive with FFI-06, so the event-log containers are unchanged.
+connection closes when the step returns. Every sql event carries path (blocking or nonblocking); since FFI-06
+it is written to the JSONL line and to the nullable sql_events.path column (see the observability container
+diagram).
