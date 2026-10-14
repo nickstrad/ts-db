@@ -1,0 +1,60 @@
+perf: port the FFI harnesses, add the deadline integration scenario and the sql path column
+
+vm-1, Deno 2.9.5, 2026-10-14. Strict same-run node parity: FAILING.
+Fair production Statement.get harness: identical 1000-row WAL files,
+one reused prepared statement per driver, identical one-column decode,
+reused bind arrays, 2000 excluded warm-ups per path, alternating batches,
+20000 timed calls per path. No threshold or binding code changed.
+
+Quiet-host continuation reads (p50/p99 us; load1 < 1.5 before every run):
+- Run 1, load 0.50/1.35/1.76: FFI 7.35/29.97, node 6.93/28.00,
+  nonblocking 43.85/322.94; parity FAIL; absolute/NB budgets PASS.
+- Run 2, load 0.70/1.38/1.77: FFI 7.64/29.66, node 7.21/29.24,
+  nonblocking 47.56/745.04; parity FAIL; absolute/NB budgets PASS.
+- Run 3, load 0.70/1.38/1.77: FFI 7.57/31.80, node 7.10/29.19,
+  nonblocking 47.80/480.43; parity FAIL; absolute/NB budgets PASS.
+Historical reads: load 1.38/1.35/1.39 FFI 7.60/24.01, node 6.84/22.48,
+NB 42.60/208.36 us; load 1.84/2.08/2.78 FFI 8.96/37.18, node 8.28/34.65,
+NB 49.52/419.00 us. Strict parity FAIL in both; absolute/NB budgets PASS.
+Research JSON: FFI 6.35/27.77, node 8.66/34.18, NB 44.31/241.36 us,
+recorded research load 3.30 to 4.93. Production hardened Statement
+micro-cost differs from raw-symbol PoC; no acceptance gate is relaxed.
+
+Unchanged inherited harness evidence:
+- Interrupt 50 iterations: p99 6.114 ms, min ticks 92; load 2.09/2.13/2.79,
+  PASS (20 ms / 90 ticks). PoC one observation 0.408 ms /95 ticks is not
+  a 50-sample tail. Loaded earlier run min61ticks FAIL retained.
+- Cap 32/32 deadline SqliteCancelled: 50.836-71.050 ms,
+  load 2.09/2.13/2.79, PASS (100 ms each). Effect-wrapped 139.85 ms
+  diagnostic retained; not a native-pool or HTTP-latency measurement.
+- Previous integration: 20 HTTP504,153 competing reads p99 22.10 ms,
+  load 1.79/2.09/2.81,budget50 ms,ingest762/0,query nonblocking20.
+
+Continuation integration: PASS,20 HTTP504,181 competing reads p99 16.44 ms,
+load 2.13/2.38/2.13,budget50 ms,ingest874/0 rejects. Initial continuation
+attempt failed query attribution19matched/1unmatched: SQL timestamp1ms
+past HTTP completion. Catalog now tolerates1ms at both request-window
+boundaries with LIMIT1 per event. Retained database and fresh run PASS.
+logs:query deadline-hits-per-handler-hour --format json:
+{"hour":"2026-10-14 02:00:00","app_id":"tic-tac-toe-json","handler_kind":"query","name":"winsByMark","path":"nonblocking","deadline_hits":20}
+
+KIND_KEYS.sql persists path in JSONL; only the affected golden line in
+tests/unit/events_test.ts changes, adding path:null for the old payload.
+sql_events.path is nullable VARCHAR; ALTER TABLE sql_events ADD COLUMN
+IF NOT EXISTS path VARCHAR runs after version guards/table creation.
+Old-v2 migration applied twice:165 rows preserved with NULL paths.
+Companion docs/name assertion/explicit-column fixture are included under
+coordinator extended Owns. The authorized local deadline fixture row is included only in the
+all-catalog test setup, preserving shared fixture counts.
+
+Final validation: regression1/0; lint/check/fmt PASS; test:prop79/0;
+integration PASS (20 HTTP504,152 point reads p99 20.06 ms,load
+5.63/5.62/4.13,budget70.41 ms,ingest758/0,query nonblocking20).
+Standalone unit685/1/1ignored: retention sustained-write size-cap coverage
+assertion failed. CI rerun PASS,unit686/0/1ignored,property79/0;
+the retention case passes without a source edit. Both logs retained.
+All requested gates executed. Strict node parity still FAIL; absolute
+read budgets PASS. Reviewer must rule against the plan as written.
+Catalog correlation: trace/app/bounded request window, symmetric1ms
+tolerance, LIMIT1 per SQL event, preserve unmatched NULL handler fields.
+Durable lessons and ownership-safe knowledge handoff are in report.md.

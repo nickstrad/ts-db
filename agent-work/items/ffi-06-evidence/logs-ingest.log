@@ -1,0 +1,9 @@
+Task logs:ingest deno run -A scripts/logs.ts ingest
+{
+  "filesScanned": 2,
+  "filesIngested": 2,
+  "bytesIngested": 328618,
+  "linesIngested": 626,
+  "linesRejected": 0,
+  "durationMs": 435.45762
+}

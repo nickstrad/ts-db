@@ -1,0 +1,321 @@
+{
+  "runtime": "deno 2.9.5",
+  "libsqlite3": "3.45.1",
+  "loadavg": [
+    2.0947265625,
+    2.126953125,
+    2.78955078125
+  ],
+  "step_ran_ms_before_interrupt": 1003,
+  "event_loop_ticks_during_step": 94,
+  "interrupt_latency_ms": 6.114,
+  "rc": 9,
+  "iterations": 50,
+  "samples": [
+    {
+      "step_ran_ms_before_interrupt": 1003,
+      "event_loop_ticks_during_step": 94,
+      "interrupt_latency_ms": 6.114,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 96,
+      "interrupt_latency_ms": 0.566,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 94,
+      "interrupt_latency_ms": 0.664,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1002,
+      "event_loop_ticks_during_step": 95,
+      "interrupt_latency_ms": 0.518,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1002,
+      "event_loop_ticks_during_step": 93,
+      "interrupt_latency_ms": 0.869,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 94,
+      "interrupt_latency_ms": 0.553,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1003,
+      "event_loop_ticks_during_step": 94,
+      "interrupt_latency_ms": 0.432,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1000,
+      "event_loop_ticks_during_step": 94,
+      "interrupt_latency_ms": 0.982,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 95,
+      "interrupt_latency_ms": 0.558,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 95,
+      "interrupt_latency_ms": 0.621,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 94,
+      "interrupt_latency_ms": 0.482,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 95,
+      "interrupt_latency_ms": 0.552,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 94,
+      "interrupt_latency_ms": 0.35,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 94,
+      "interrupt_latency_ms": 0.522,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 94,
+      "interrupt_latency_ms": 0.326,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1000,
+      "event_loop_ticks_during_step": 92,
+      "interrupt_latency_ms": 0.326,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 94,
+      "interrupt_latency_ms": 0.464,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 94,
+      "interrupt_latency_ms": 0.414,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 95,
+      "interrupt_latency_ms": 0.336,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 92,
+      "interrupt_latency_ms": 0.316,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 94,
+      "interrupt_latency_ms": 0.475,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 94,
+      "interrupt_latency_ms": 0.31,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 96,
+      "interrupt_latency_ms": 0.34,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 95,
+      "interrupt_latency_ms": 0.543,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1003,
+      "event_loop_ticks_during_step": 94,
+      "interrupt_latency_ms": 0.708,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 95,
+      "interrupt_latency_ms": 0.526,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 95,
+      "interrupt_latency_ms": 0.299,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 94,
+      "interrupt_latency_ms": 0.394,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1002,
+      "event_loop_ticks_during_step": 94,
+      "interrupt_latency_ms": 0.316,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1002,
+      "event_loop_ticks_during_step": 94,
+      "interrupt_latency_ms": 0.329,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 95,
+      "interrupt_latency_ms": 0.496,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1004,
+      "event_loop_ticks_during_step": 95,
+      "interrupt_latency_ms": 0.334,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 94,
+      "interrupt_latency_ms": 0.514,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 95,
+      "interrupt_latency_ms": 0.376,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 96,
+      "interrupt_latency_ms": 0.324,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1002,
+      "event_loop_ticks_during_step": 96,
+      "interrupt_latency_ms": 0.43,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 95,
+      "interrupt_latency_ms": 0.42,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 96,
+      "interrupt_latency_ms": 0.483,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 96,
+      "interrupt_latency_ms": 0.599,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 94,
+      "interrupt_latency_ms": 0.442,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 96,
+      "interrupt_latency_ms": 0.408,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 97,
+      "interrupt_latency_ms": 0.352,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 96,
+      "interrupt_latency_ms": 0.511,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 95,
+      "interrupt_latency_ms": 0.378,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1000,
+      "event_loop_ticks_during_step": 96,
+      "interrupt_latency_ms": 0.424,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1000,
+      "event_loop_ticks_during_step": 96,
+      "interrupt_latency_ms": 0.417,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 95,
+      "interrupt_latency_ms": 0.486,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 96,
+      "interrupt_latency_ms": 0.452,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1001,
+      "event_loop_ticks_during_step": 95,
+      "interrupt_latency_ms": 0.463,
+      "rc": 9
+    },
+    {
+      "step_ran_ms_before_interrupt": 1000,
+      "event_loop_ticks_during_step": 95,
+      "interrupt_latency_ms": 0.483,
+      "rc": 9
+    }
+  ],
+  "interrupt_latency_p99_ms": 6.114,
+  "min_event_loop_ticks": 92,
+  "notes": [
+    "rc 9 = SQLITE_INTERRUPT; top-level PoC fields describe the slowest interrupt"
+  ]
+}

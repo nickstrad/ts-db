@@ -1,0 +1,16 @@
+--- a/tests/unit/analysis_catalog_test.ts
++++ b/tests/unit/analysis_catalog_test.ts
+@@ -254,7 +254,12 @@
+       assert.deepEqual(await runQuery(dbPath, (a) => a.run(name, params)), [], `${name} on an empty file`);
+     }
+   });
+-  await withFixture(fixture, async (dbPath) => {
++  await withFixture(async (sql) => {
++    await fixture(sql);
++    // This query only returns deadline events; the shared fixture has none.
++    await sql(`INSERT INTO sql_events (event_id, ts, trace_id, app_id, error_tag, path) VALUES
++      ('s-deadline', '2026-10-10 12:00:19.990', 't2', 'app1', 'StatementDeadlineError', 'nonblocking')`);
++  }, async (dbPath) => {
+     for (const name of ANALYSIS_QUERY_NAMES) {
+       const params = name === "trace" ? { traceId: TRACE } : {};
+       const rows = await runQuery(dbPath, (a) => a.run(name, params));

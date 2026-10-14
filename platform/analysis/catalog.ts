@@ -80,6 +80,27 @@ const window = (column: string) =>
     AND (CAST($until AS TIMESTAMP) IS NULL OR ${column} < CAST($until AS TIMESTAMP))`;
 
 export const CATALOG = {
+  "deadline-hits-per-handler-hour": {
+    description: "statement deadline hits per app, handler and UTC hour, with execution path",
+    params: { since: SINCE, until: UNTIL, appId: APP_ID },
+    sql: `SELECT date_trunc('hour', s.ts) AS hour, s.app_id, h.handler_kind, h.name,
+  s.path, count(*) AS deadline_hits
+FROM sql_events s
+LEFT JOIN LATERAL (
+  SELECT handler_kind, name FROM http_events request
+  WHERE request.trace_id = s.trace_id AND request.app_id = s.app_id
+    AND s.ts <= request.ts + INTERVAL '1 millisecond'
+    AND s.ts >= request.ts - (request.duration_ms + 1) * INTERVAL '1 millisecond'
+  ORDER BY request.ts, request.event_id
+  LIMIT 1
+) h ON TRUE
+WHERE s.error_tag = 'StatementDeadlineError'
+  AND ${window("s.ts")}
+  AND (CAST($appId AS VARCHAR) IS NULL OR s.app_id = $appId)
+GROUP BY 1, 2, 3, 4, 5
+ORDER BY hour, s.app_id, h.name, s.path`,
+  },
+
   "slowest-sql": {
     description: "p50/p95/p99 duration_ms by engine, statement kind and table",
     params: { since: SINCE, until: UNTIL, appId: APP_ID, limit: limit(100) },

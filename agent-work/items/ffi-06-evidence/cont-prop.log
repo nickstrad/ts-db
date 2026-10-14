@@ -1,0 +1,110 @@
+Task test:prop deno test --v8-flags=--expose-gc -A tests/property/**/*.ts
+running 0 tests from ./tests/property/arbitraries.ts
+running 0 tests from ./tests/property/compiler_arbitraries.ts
+running 9 tests from ./tests/property/compiler_test.ts
+compiler: bind parity — select placeholders equal values; $pN is exactly 1..n [seed=20261010] ... ok (158ms)
+compiler: bind parity — insert/replace/delete placeholders equal values [seed=20261010] ... ok (69ms)
+compiler: no value leakage — adversarial filter values are bound, never in the text [seed=20261010] ... ok (544ms)
+compiler: identifier safety — every emitted token is a quoted identifier or a known keyword [seed=20261010] ... ok (235ms)
+compiler: identifier safety — a non-identifier name fails to compile rather than being emitted [seed=20261010] ... ok (171ms)
+compiler: totality — junk schemas and plans yield Either, never a raise [seed=20261010] ... ok (1s)
+compiler: dialect agreement — same values and same filter/order/limit skeleton [seed=20261010] ... ok (69ms)
+compiler: storage agreement — columns and json layouts bind the same values [seed=20261010] ... ok (66ms)
+compiler: limit semantics — count never LIMITs, countBy and rows always do; aggregates drop order [seed=20261010] ... ok (93ms)
+running 4 tests from ./tests/property/decode_test.ts
+decode: decode(insert(doc)) round-trips in both layouts, whatever the driver forms [seed=20261010] ... ok (157ms)
+decode: count and countBy decode driver integers and booleans to plain values [seed=20261010] ... ok (22ms)
+decode: safeNumber is exact or fails — it never rounds [seed=20261010] ... ok (35ms)
+decode: an integer outside the safe range fails to decode, never truncates [seed=20261010] ... ok (139ms)
+running 5 tests from ./tests/property/framing_test.ts
+generators: splits include empty chunks, mid-message cuts and blank messages [seed=20261010] ... ok (27ms)
+chunk-split invariance: any split of the concatenation yields exactly the non-empty messages [seed=20261010] ... ok (26ms)
+push and finish never throw, whatever the chunks, cap or call order [seed=20261010] ... ok (12ms)
+an unterminated run longer than the cap always yields MessageTooLarge, before any truncation error [seed=20261010] ... ok (33ms)
+oversize oracle: too-large iff some push leaves a residue over the cap; lines before it still arrive [seed=20261010] ... ok (11ms)
+running 3 tests from ./tests/property/json_number_test.ts
+json numbers: eq, gt, ordering, count and countBy match doubles in both layouts [seed=20261010] ... ok (755ms)
+json numbers: the boundary generator reaches 2^53, its neighbours and the reported value [seed=20261010] ... ok (24ms)
+json numbers: the reported regressions, pinned in both layouts [seed=20261010] ... ok (10ms)
+running 5 tests from ./tests/property/offsets_test.ts
+exactly-once ingestion across adversarial append/truncate/rewrite/remove/ingest interleavings [seed=20261010] ...
+------- post-test output -------
+offsets adversarial coverage: {"truncated":586,"prefix-mismatch":263,"deduplicated":832,"stickyDeduplicated":39,"frankenlines":358}
+----- post-test output end -----
+exactly-once ingestion across adversarial append/truncate/rewrite/remove/ingest interleavings [seed=20261010] ... ok (403ms)
+append-only histories: every complete line is consumed exactly once and no rewrite is reported [seed=20261010] ... ok (420ms)
+chunk-split invariance: ingesting after every chunk consumes the same lines as one read [seed=20261010] ... ok (15ms)
+ingest transaction: a failed or interrupted batch commits nothing — no partial rows, offsets unmoved [seed=20261010] ...
+------- post-test output -------
+ingest fault coverage: {"fail":19,"interrupt":19,"multiBatchPartial":11}
+----- post-test output end -----
+ingest transaction: a failed or interrupted batch commits nothing — no partial rows, offsets unmoved [seed=20261010] ... ok (28s)
+ingest transaction: concurrent runs interleaved with appends neither duplicate nor lose events [seed=20261010] ... ok (19s)
+running 5 tests from ./tests/property/plan_test.ts
+plan: normalise accepts exactly the whole-number limits 1..1000 [seed=20261010] ... ok (268ms)
+plan: normalise drops the ordering of aggregates and touches nothing else [seed=20261010] ... ok (39ms)
+plan: compileSelect rejects a limit exactly when normalise does (one copy of the rule) [seed=20261010] ... ok (59ms)
+plan: generated valid plans compile in every dialect and layout [seed=20261010] ... ok (51ms)
+plan: a plan with one defect fails with that defect's reason in every dialect and layout [seed=20261010] ... ok (224ms)
+running 1 test from ./tests/property/retention_ingest_test.ts
+retention follows committed ingest: exactly once, nothing un-ingested lost, across crash interleavings [seed=20261010] ...
+------- post-test output -------
+retention/ingest outcomes over 20 cases + race anchor: {"gzipped":5,"deleted":76,"sealed":9,"skipped":3,"commitFailures":16,"interrupted":4,"blocked":{"unread-tail":6}}
+----- post-test output end -----
+retention follows committed ingest: exactly once, nothing un-ingested lost, across crash interleavings [seed=20261010] ... ok (28s)
+running 8 tests from ./tests/property/rotation_test.ts
+generators: today's dir, the open file, stale dirs, .gz files and cap pressure all occur [seed=20261010] ... ok (98ms)
+invariant 1: today's directory is never gzipped or deleted [seed=20261010] ... ok (39ms)
+invariant 2: the currently open file is never in gzip or delete [seed=20261010] ... ok (25ms)
+invariant 3: gzip and delete are disjoint [seed=20261010] ... ok (27ms)
+invariant 4: gzip + delete + keep is exactly the input set, each path once [seed=20261010] ... ok (27ms)
+invariant 5: over the byte cap, whole oldest directories are pruned first and no more than needed [seed=20261010] ... ok (38ms)
+age rules hold when the cap does not bite: old -> delete, aged -> gzip unless .gz, else keep [seed=20261010] ... ok (50ms)
+plan is idempotent: applying it and planning again changes nothing [seed=20261010] ... ok (46ms)
+running 8 tests from ./tests/property/rules_test.ts
+a full-board draw is reachable by legal moves ... ok (2ms)
+generators: reachable states cover playing and won, arbitrary boards cover lines [seed=20261010] ... ok (29ms)
+a legal move fills exactly one empty cell with the mover's mark and nothing else changes [seed=20261010] ... ok (20ms)
+illegal moves are rejected and the input game is untouched [seed=20261010] ... ok (29ms)
+a won game stays won: every further move is rejected as game-over [seed=20261010] ... ok (101ms)
+winner is non-null iff some line is uniform and non-null (any board) [seed=20261010] ... ok (2ms)
+status agrees with the board: won iff a line is held, a full board is never playing [seed=20261010] ... ok (4ms)
+replaying the same move sequence is deterministic [seed=20261010] ... ok (24ms)
+running 12 tests from ./tests/property/schema_test.ts
+generators: depth bound, kinds and nullability are all exercised [seed=20261010] ... ok (60ms)
+a value generated to match a node always validates, and comes back unchanged [seed=20261010] ... ok (12ms)
+a value generated not to match always fails with a SchemaError at the offending path [seed=20261010] ... ok (24ms)
+a null is accepted exactly when the node is nullable [seed=20261010] ... ok (6ms)
+parseObject is total: Left or Right for arbitrary input, never a throw [seed=20261010] ... ok (98ms)
+parseObject accepts a complete valid object and returns it unchanged [seed=20261010] ... ok (15ms)
+partial mode accepts exactly the subsets of a valid object [seed=20261010] ... ok (32ms)
+partial mode still rejects unknown keys and bad values at the offending path [seed=20261010] ... ok (106ms)
+validation is idempotent: validating the output yields the same output [seed=20261010] ... ok (16ms)
+identifier accepts exactly valid names and rejects every spliced or injection-shaped one [seed=20261010] ... ok (6ms)
+defineTable / defineSchema accept generated declarations and reject bad or reserved names [seed=20261010] ... ok (69ms)
+addIndex rejects unknown fields, array fields, empty lists and duplicate names [seed=20261010] ... ok (26ms)
+running 5 tests from ./tests/property/sqlite_oracle_test.ts
+oracle: compiled selects on real SQLite return what the plan means [seed=20261010] ... ok (129ms)
+oracle regression 1a: json layout, eq on a number field holding an integral double >= 2^53 ... ok (1ms)
+oracle regression 1b: json layout, countBy over a number field holding 2^53 ... ok (762µs)
+oracle regression 2: U+0000 text is rejected before commit, never read back truncated (columns) ... ok (281ms)
+oracle regression 2: U+0000 text is rejected before commit, never read back truncated (json) ... ok (62ms)
+running 7 tests from ./tests/property/storage_commit_test.ts
+atomicity [StorageTest]: a batch with an injected failure or interruption leaves no trace; else all of it lands [seed=20261010] ... ok (1s)
+atomicity [StorageLive]: a batch with an injected failure or interruption leaves no trace; else all of it lands [seed=20261010] ... ok (3s)
+no lost updates [StorageTest]: N racing read-modify-write increments all count, and only committed ones [seed=20261010] ... ok (946ms)
+no lost updates [StorageLive]: N racing read-modify-write increments all count, and only committed ones [seed=20261010] ... ok (3s)
+single-writer serialization [StorageTest]: handlers never overlap; versions are 2..S+1, gapless and unique [seed=20261010] ... ok (920ms)
+single-writer serialization [StorageLive]: handlers never overlap; versions are 2..S+1, gapless and unique [seed=20261010] ... ok (3s)
+commit ordering [StorageLive]: one tx event per writer, commits in the order versions were assigned [seed=20261010] ... ok (2s)
+running 7 tests from ./tests/property/tenant_routing_props.ts
+tenant routing generators: malformed categories, registry states and operations occur [runs=200] [seed=20261010] ... ok (14ms)
+tenant routing: canonical UUIDs parse unchanged and malformed forms are typed failures [runs=200] [seed=20261010] ... ok (180ms)
+tenant routing: repeated resolution yields deep-equal locations [runs=200] [seed=20261010] ... ok (13ms)
+tenant routing: distinct parsed ids have distinct files [runs=200] [seed=20261010] ... ok (35ms)
+tenant routing: arbitrary strings fail typed or remain strictly inside the normalized root [runs=200] [seed=20261010] ... ok (32ms)
+tenant routing: authorize -> resolve -> prepare gates each registry state before I/O [runs=200] [seed=20261010] ... ok (5s)
+tenant routing: concurrent tenant operations isolate reads, retain updates and persist to the right file [runs=200] [seed=20261010] ... ok (36s)
+
+ok | 79 passed | 0 failed (2m41s)
+

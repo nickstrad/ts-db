@@ -322,6 +322,7 @@ can exceed the JSONL cap. The derived DuckDB file is never pruned and grows inde
 
 The named analysis queries are:
 
+- `deadline-hits-per-handler-hour`: statement deadline hits by app, handler, UTC hour and execution path.
 - `slowest-sql`: SQL p50/p95/p99 by engine, statement kind and collection.
 - `plan-shapes`: compiled SQL texts, frequency and latency for investigating plans and indexes.
 - `error-rate-by-handler`: request counts, error rates and error tags by app and handler.

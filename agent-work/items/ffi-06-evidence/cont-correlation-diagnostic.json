@@ -1,0 +1,162 @@
+[
+  {
+    "traceId": "ffi06-deadline-6b8d449c-3a02-4d6b-9f31-b741805b400b",
+    "sqlTs": "2026-10-14T02:20:14.496Z",
+    "httpTs": "2026-10-14T02:20:14.503Z",
+    "httpDurationMs": 77.724032,
+    "httpMinusSqlMs": 7.0,
+    "match": true
+  },
+  {
+    "traceId": "ffi06-deadline-1e87cb67-bd46-41ad-b296-49e1d43bc739",
+    "sqlTs": "2026-10-14T02:20:14.576Z",
+    "httpTs": "2026-10-14T02:20:14.577Z",
+    "httpDurationMs": 71.046131,
+    "httpMinusSqlMs": 1.0,
+    "match": true
+  },
+  {
+    "traceId": "ffi06-deadline-3111ddc1-76cd-45e1-a1aa-b146298b4fe7",
+    "sqlTs": "2026-10-14T02:20:14.662Z",
+    "httpTs": "2026-10-14T02:20:14.663Z",
+    "httpDurationMs": 70.771548,
+    "httpMinusSqlMs": 1.0,
+    "match": true
+  },
+  {
+    "traceId": "ffi06-deadline-c1f99cea-c2f6-4ac7-b267-d1338c7f041d",
+    "sqlTs": "2026-10-14T02:20:14.742Z",
+    "httpTs": "2026-10-14T02:20:14.744Z",
+    "httpDurationMs": 63.651261,
+    "httpMinusSqlMs": 2.0,
+    "match": true
+  },
+  {
+    "traceId": "ffi06-deadline-8362d406-a52a-4380-999e-55b9a82caf31",
+    "sqlTs": "2026-10-14T02:20:14.824Z",
+    "httpTs": "2026-10-14T02:20:14.824Z",
+    "httpDurationMs": 68.080234,
+    "httpMinusSqlMs": 0.0,
+    "match": true
+  },
+  {
+    "traceId": "ffi06-deadline-fa4febaf-c3fb-46f5-840f-f14e1f5895bc",
+    "sqlTs": "2026-10-14T02:20:14.905Z",
+    "httpTs": "2026-10-14T02:20:14.905Z",
+    "httpDurationMs": 61.84802,
+    "httpMinusSqlMs": 0.0,
+    "match": true
+  },
+  {
+    "traceId": "ffi06-deadline-b2dc3fcb-3cd3-4b16-af42-6a817dd88d37",
+    "sqlTs": "2026-10-14T02:20:14.976Z",
+    "httpTs": "2026-10-14T02:20:14.976Z",
+    "httpDurationMs": 63.827727,
+    "httpMinusSqlMs": 0.0,
+    "match": true
+  },
+  {
+    "traceId": "ffi06-deadline-ecf31760-3465-4d22-8ef7-4d81bbfa4716",
+    "sqlTs": "2026-10-14T02:20:15.053Z",
+    "httpTs": "2026-10-14T02:20:15.057Z",
+    "httpDurationMs": 74.774068,
+    "httpMinusSqlMs": 4.0,
+    "match": true
+  },
+  {
+    "traceId": "ffi06-deadline-f4764562-bce2-4012-a1b2-ffab6ba30d59",
+    "sqlTs": "2026-10-14T02:20:15.131Z",
+    "httpTs": "2026-10-14T02:20:15.131Z",
+    "httpDurationMs": 65.090329,
+    "httpMinusSqlMs": 0.0,
+    "match": true
+  },
+  {
+    "traceId": "ffi06-deadline-a421d997-369d-4106-bb6a-a9fac4192c7a",
+    "sqlTs": "2026-10-14T02:20:15.201Z",
+    "httpTs": "2026-10-14T02:20:15.202Z",
+    "httpDurationMs": 63.493831,
+    "httpMinusSqlMs": 1.0,
+    "match": true
+  },
+  {
+    "traceId": "ffi06-deadline-558a4bc7-61e7-4ef5-a3ca-70f64f785c3b",
+    "sqlTs": "2026-10-14T02:20:15.294Z",
+    "httpTs": "2026-10-14T02:20:15.295Z",
+    "httpDurationMs": 82.391158,
+    "httpMinusSqlMs": 1.0,
+    "match": true
+  },
+  {
+    "traceId": "ffi06-deadline-01a8e9c4-eecf-46db-acb8-864d652298f1",
+    "sqlTs": "2026-10-14T02:20:15.400Z",
+    "httpTs": "2026-10-14T02:20:15.400Z",
+    "httpDurationMs": 73.748996,
+    "httpMinusSqlMs": 0.0,
+    "match": true
+  },
+  {
+    "traceId": "ffi06-deadline-6ffe597f-0a0d-4555-9426-354f41e65510",
+    "sqlTs": "2026-10-14T02:20:15.467Z",
+    "httpTs": "2026-10-14T02:20:15.468Z",
+    "httpDurationMs": 60.852227,
+    "httpMinusSqlMs": 1.0,
+    "match": true
+  },
+  {
+    "traceId": "ffi06-deadline-c492d712-8e1c-47b9-abb4-bcaeed7e406b",
+    "sqlTs": "2026-10-14T02:20:15.533Z",
+    "httpTs": "2026-10-14T02:20:15.534Z",
+    "httpDurationMs": 59.488276,
+    "httpMinusSqlMs": 1.0,
+    "match": true
+  },
+  {
+    "traceId": "ffi06-deadline-74bf7d30-ef1c-4dd9-a548-ce9e6f182245",
+    "sqlTs": "2026-10-14T02:20:15.615Z",
+    "httpTs": "2026-10-14T02:20:15.616Z",
+    "httpDurationMs": 76.979796,
+    "httpMinusSqlMs": 1.0,
+    "match": true
+  },
+  {
+    "traceId": "ffi06-deadline-70f42206-4533-4527-80fb-b8f8619bb66b",
+    "sqlTs": "2026-10-14T02:20:15.683Z",
+    "httpTs": "2026-10-14T02:20:15.684Z",
+    "httpDurationMs": 60.392594,
+    "httpMinusSqlMs": 1.0,
+    "match": true
+  },
+  {
+    "traceId": "ffi06-deadline-bb33e53a-4f29-4f86-b885-d4c9cfcf80ae",
+    "sqlTs": "2026-10-14T02:20:15.760Z",
+    "httpTs": "2026-10-14T02:20:15.761Z",
+    "httpDurationMs": 60.157851,
+    "httpMinusSqlMs": 1.0,
+    "match": true
+  },
+  {
+    "traceId": "ffi06-deadline-d100a057-4fd2-450d-bbc2-e85627201ff4",
+    "sqlTs": "2026-10-14T02:20:15.835Z",
+    "httpTs": "2026-10-14T02:20:15.836Z",
+    "httpDurationMs": 66.563456,
+    "httpMinusSqlMs": 1.0,
+    "match": true
+  },
+  {
+    "traceId": "ffi06-deadline-6fd9181b-d7f3-4ebd-b367-dc25c6230fd9",
+    "sqlTs": "2026-10-14T02:20:15.920Z",
+    "httpTs": "2026-10-14T02:20:15.921Z",
+    "httpDurationMs": 64.821155,
+    "httpMinusSqlMs": 1.0,
+    "match": true
+  },
+  {
+    "traceId": "ffi06-deadline-36494306-6ff3-4190-b3d6-fd6ee7178afe",
+    "sqlTs": "2026-10-14T02:20:15.985Z",
+    "httpTs": "2026-10-14T02:20:15.984Z",
+    "httpDurationMs": 57.957793,
+    "httpMinusSqlMs": -1.0,
+    "match": false
+  }
+]

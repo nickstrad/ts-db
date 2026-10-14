@@ -1,0 +1,70 @@
+Task test deno test --v8-flags=--expose-gc -A tests/unit/**/*.ts tests/core_test.ts '--filter' '/^(catalog: names|doc: |AnalysisLive:|guide: analysis query)/'
+Check tests/unit/admin_tenants_test.ts
+Check tests/unit/analysis_catalog_test.ts
+Check tests/unit/backup_test.ts
+Check tests/unit/boundaries_test.ts
+Check tests/unit/compile_test.ts
+Check tests/unit/config_test.ts
+Check tests/unit/docs_guide_test.ts
+Check tests/unit/document_reader_test.ts
+Check tests/unit/eventlog_test.ts
+Check tests/unit/events_test.ts
+Check tests/unit/ffi_classify_test.ts
+Check tests/unit/framing_test.ts
+Check tests/unit/http_test.ts
+Check tests/unit/ipc_test.ts
+Check tests/unit/logger_test.ts
+Check tests/unit/nul_contract_test.ts
+Check tests/unit/number_dialects_test.ts
+Check tests/unit/object_store_test.ts
+Check tests/unit/reader_context_test.ts
+Check tests/unit/reader_ingest_test.ts
+Check tests/unit/reader_test.ts
+Check tests/unit/retention_ingest_test.ts
+Check tests/unit/retention_test.ts
+Check tests/unit/rotation_test.ts
+Check tests/unit/rules_test.ts
+Check tests/unit/schema_test.ts
+Check tests/unit/server_process_test.ts
+Check tests/unit/server_scope_test.ts
+Check tests/unit/sqlite_ffi_cancel_test.ts
+Check tests/unit/sqlite_ffi_crud_test.ts
+Check tests/unit/sqlite_ffi_effect_test.ts
+Check tests/unit/sqlite_ffi_perf_test.ts
+Check tests/unit/storage_test.ts
+Check tests/unit/tenant_auth_test.ts
+Check tests/unit/tenant_http_test.ts
+Check tests/unit/tenant_routing_test.ts
+Check tests/unit/tenants_test.ts
+Check tests/unit/trace_e2e_test.ts
+Check tests/unit/trace_test.ts
+Check tests/core_test.ts
+running 8 tests from ./tests/unit/analysis_catalog_test.ts
+catalog: names are derived from the record ... ok (28ms)
+doc: the named queries section lists exactly the catalog names ... ok (800µs)
+doc: every parameter of every catalog entry is documented under its query ... ok (791µs)
+doc: every column of every event-log table is documented ... ok (278ms)
+AnalysisLive: every catalog query runs against an empty file and against the fixture ... FAILED (2s)
+AnalysisLive: query results ... ok (965ms)
+AnalysisLive: trace is the ordered cross-process timeline without double-listing typed events ... ok (507ms)
+AnalysisLive: typed failures ... ok (435ms)
+running 1 test from ./tests/unit/docs_guide_test.ts
+guide: analysis query names belong to the landed catalog ... ok (30ms)
+
+ ERRORS 
+
+AnalysisLive: every catalog query runs against an empty file and against the fixture => ./tests/unit/analysis_catalog_test.ts:250:1
+error: AssertionError: deadline-hits-per-handler-hour returns rows over the fixture
+      assert.ok(rows.length > 0, `${name} returns rows over the fixture`);
+             ^
+    at file:///root/Software/tsdb-work/ffi06/tests/unit/analysis_catalog_test.ts:261:14
+    at async withFixture (file:///root/Software/tsdb-work/ffi06/tests/unit/analysis_catalog_test.ts:194:12)
+    at async NodeTestContext.<anonymous> (file:///root/Software/tsdb-work/ffi06/tests/unit/analysis_catalog_test.ts:257:3)
+
+ FAILURES 
+
+AnalysisLive: every catalog query runs against an empty file and against the fixture => ./tests/unit/analysis_catalog_test.ts:250:1
+
+FAILED | 8 passed | 1 failed | 678 filtered out (36s)
+
+error: Test failed

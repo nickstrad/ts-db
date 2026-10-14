@@ -1,0 +1,46 @@
+Task test deno test --v8-flags=--expose-gc -A tests/unit/**/*.ts tests/core_test.ts '--filter' 'AnalysisLive: every catalog query'
+Check tests/unit/admin_tenants_test.ts
+Check tests/unit/analysis_catalog_test.ts
+Check tests/unit/backup_test.ts
+Check tests/unit/boundaries_test.ts
+Check tests/unit/compile_test.ts
+Check tests/unit/config_test.ts
+Check tests/unit/docs_guide_test.ts
+Check tests/unit/document_reader_test.ts
+Check tests/unit/eventlog_test.ts
+Check tests/unit/events_test.ts
+Check tests/unit/ffi_classify_test.ts
+Check tests/unit/framing_test.ts
+Check tests/unit/http_test.ts
+Check tests/unit/ipc_test.ts
+Check tests/unit/logger_test.ts
+Check tests/unit/nul_contract_test.ts
+Check tests/unit/number_dialects_test.ts
+Check tests/unit/object_store_test.ts
+Check tests/unit/reader_context_test.ts
+Check tests/unit/reader_ingest_test.ts
+Check tests/unit/reader_test.ts
+Check tests/unit/retention_ingest_test.ts
+Check tests/unit/retention_test.ts
+Check tests/unit/rotation_test.ts
+Check tests/unit/rules_test.ts
+Check tests/unit/schema_test.ts
+Check tests/unit/server_process_test.ts
+Check tests/unit/server_scope_test.ts
+Check tests/unit/sqlite_ffi_cancel_test.ts
+Check tests/unit/sqlite_ffi_crud_test.ts
+Check tests/unit/sqlite_ffi_effect_test.ts
+Check tests/unit/sqlite_ffi_perf_test.ts
+Check tests/unit/storage_test.ts
+Check tests/unit/tenant_auth_test.ts
+Check tests/unit/tenant_http_test.ts
+Check tests/unit/tenant_routing_test.ts
+Check tests/unit/tenants_test.ts
+Check tests/unit/trace_e2e_test.ts
+Check tests/unit/trace_test.ts
+Check tests/core_test.ts
+running 1 test from ./tests/unit/analysis_catalog_test.ts
+AnalysisLive: every catalog query runs against an empty file and against the fixture ... ok (1s)
+
+ok | 1 passed | 0 failed | 686 filtered out (36s)
+

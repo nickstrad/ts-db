@@ -64,6 +64,7 @@ test("catalog: names are derived from the record", () => {
   assert.deepEqual([...ANALYSIS_QUERY_NAMES], Object.keys(CATALOG));
   assert.deepEqual([...ANALYSIS_QUERY_NAMES].sort(), [
     "backup-history",
+    "deadline-hits-per-handler-hour",
     "error-rate-by-handler",
     "handler-throughput",
     "k6-vs-platform",
@@ -222,7 +223,8 @@ async function fixture(sql: (text: string) => Promise<unknown>): Promise<void> {
     ('p-reader', '2026-10-10 12:00:06', 'info', 'reader', 2, '${TRACE}', 's4', 's2', 'app1', 'handler', 'query', 'get', 'ok', NULL, 1.0, NULL),
     ('p-other', '2026-10-10 12:00:07', 'info', 'server', 1, 'other', 's5', NULL, 'app1', 'handler', 'query', 'get', 'ok', NULL, 1.0, NULL),
     ('p-slow', '2026-10-10 12:00:30', 'info', 'server', 1, 't2', 's6', NULL, 'app1', 'handler', 'mutation', 'play', 'error', 'MutationError', 30.0, NULL)`);
-  await sql(`INSERT INTO sql_events VALUES
+  await sql(`INSERT INTO sql_events (event_id, ts, trace_id, app_id, engine, dialect, statement_kind,
+    table_name, sql_text, bind_count, duration_ms, row_count, outcome, error_tag) VALUES
     ('p-sql', '2026-10-10 12:00:05', '${TRACE}', 'app1', 'sqlite', 'sqlite', 'insert', 'games', 'INSERT INTO games VALUES (?)', 1, 1.0, 1, 'ok', NULL),
     ('s-b', '2026-10-10 12:00:10', 't9', 'app1', 'sqlite', 'sqlite', 'insert', 'games', 'INSERT INTO games VALUES (?)', 1, 3.0, 1, 'ok', NULL),
     ('s-c', '2026-10-10 12:00:11', 't9', 'app1', 'duckdb', 'duckdb', 'select', 'games', 'SELECT * FROM games', 0, 7.0, 4, 'ok', NULL)`);
@@ -252,7 +254,12 @@ test("AnalysisLive: every catalog query runs against an empty file and against t
       assert.deepEqual(await runQuery(dbPath, (a) => a.run(name, params)), [], `${name} on an empty file`);
     }
   });
-  await withFixture(fixture, async (dbPath) => {
+  await withFixture(async (sql) => {
+    await fixture(sql);
+    // This query only returns deadline events; the shared fixture has none.
+    await sql(`INSERT INTO sql_events (event_id, ts, trace_id, app_id, error_tag, path) VALUES
+      ('s-deadline', '2026-10-10 12:00:19.990', 't2', 'app1', 'StatementDeadlineError', 'nonblocking')`);
+  }, async (dbPath) => {
     for (const name of ANALYSIS_QUERY_NAMES) {
       const params = name === "trace" ? { traceId: TRACE } : {};
       const rows = await runQuery(dbPath, (a) => a.run(name, params));
@@ -322,6 +329,93 @@ test("AnalysisLive: query results", async () => {
     assert.equal(since.reduce((n, r) => n + Number(r.calls), 0), 2, "since is inclusive");
     const limited = await q("slowest-sql", { limit: 1 });
     assert.equal(limited.length, 1);
+  });
+});
+
+test("AnalysisLive: deadline-hits-per-handler-hour pins its counting, attribution and bucketing rules", async () => {
+  // `http_events.ts` is the request's completion time; the request spans [ts - duration_ms, ts]. A deadline
+  // event matches a request of the same trace and app when it falls in that span widened by 1 ms on each
+  // side. Ties go to the earliest-completing request.
+  const http = (id: string, ts: string, trace: string, kind: string, name: string, ms: number) =>
+    `('${id}', '${ts}', '${trace}', 'POST', '/rpc/${name}', 'app1', '${kind}', '${name}', 504, ${ms}, 10, 20, 'StatementDeadlineError')`;
+  const deadline = (id: string, ts: string, trace: string, app: string, path: string | null) =>
+    `('${id}', '${ts}', '${trace}', '${app}', 'StatementDeadlineError', ${
+      path === null ? "NULL" : `'${path}'`
+    })`;
+  await withFixture(async (sql) => {
+    await sql(`INSERT INTO http_events VALUES
+      ${http("r-play", "2026-10-11 12:00:05", "dl-a", "mutation", "play", 10)},
+      ${http("r-edge", "2026-10-11 12:59:59.999", "dl-h", "query", "edge", 5)},
+      ${http("r-x1", "2026-10-11 14:00:10.000", "dl-s", "mutation", "x1", 5)},
+      ${http("r-y1", "2026-10-11 14:00:10.050", "dl-s", "query", "y1", 55)},
+      ${http("r-a1", "2026-10-11 15:00:00.020", "dl-b", "mutation", "a1", 10)},
+      ${http("r-b1", "2026-10-11 15:00:00.030", "dl-b", "query", "b1", 9)},
+      ${http("r-w1", "2026-10-11 16:00:10.000", "dl-w", "mutation", "w1", 100)}`);
+    await sql(`INSERT INTO sql_events (event_id, ts, trace_id, app_id, error_tag, path) VALUES
+      ${deadline("d1", "2026-10-11 12:00:04.995", "dl-a", "app1", "nonblocking")},
+      ${deadline("d2", "2026-10-11 12:00:04.995", "dl-a", "app1", "nonblocking")},
+      ${deadline("d3", "2026-10-11 12:00:05.001", "dl-a", "app1", "blocking")},
+      ${deadline("d4", "2026-10-11 12:00:05.002", "dl-a", "app1", "nonblocking")},
+      ${deadline("d5", "2026-10-11 12:00:04.995", "dl-a", "app2", "nonblocking")},
+      ${deadline("d6", "2026-10-11 12:00:05.000", "dl-a", "app1", null)},
+      ${deadline("d7", "2026-10-11 13:00:00.000", "dl-h", "app1", "blocking")},
+      ${deadline("d8", "2026-10-11 14:00:10.000", "dl-s", "app1", "nonblocking")},
+      ${deadline("d9", "2026-10-11 15:00:00.021", "dl-b", "app1", "nonblocking")},
+      ${deadline("d10", "2026-10-11 15:00:00.025", "dl-b", "app1", "nonblocking")},
+      ${deadline("d11", "2026-10-11 15:00:00.015", "dl-b", "app1", "nonblocking")},
+      ${deadline("d12", "2026-10-11 16:00:09.899", "dl-w", "app1", "nonblocking")},
+      ${deadline("d13", "2026-10-11 16:00:09.898", "dl-w", "app1", "blocking")},
+      ${deadline("d14", "2026-10-11 16:00:09.950", "dl-other", "app1", null)},
+      ('not-deadline', '2026-10-11 12:00:05.000', 'dl-a', 'app1', 'SqliteError', 'nonblocking'),
+      ('no-error', '2026-10-11 12:00:05.000', 'dl-a', 'app1', NULL, 'nonblocking')`);
+  }, async (dbPath) => {
+    const rows = await runQuery(dbPath, (a) => a.run("deadline-hits-per-handler-hour", {}));
+    const hits = (app: string, name: string | null, path: string | null) =>
+      rows.filter((r) => r.app_id === app && r.name === name && r.path === path)
+        .reduce((n, r) => n + Number(r.deadline_hits), 0);
+
+    // One hit per deadline-tagged sql event: 14 events, no double count, other error tags excluded.
+    assert.equal(rows.reduce((n, r) => n + Number(r.deadline_hits), 0), 14);
+    assert.equal(typeof rows[0]!.deadline_hits, "number", "counts are numbers, not strings");
+
+    // Attribution to the completing request by trace and app, with the path column carried through.
+    assert.equal(hits("app1", "play", "nonblocking"), 2, "d1 and d2 share a timestamp and both count once");
+    assert.equal(hits("app1", "play", "blocking"), 1, "d3 sits exactly on the +1 ms upper tolerance");
+    assert.equal(hits("app1", "play", null), 1, "a pre-FFI-06 row has a NULL path and still counts");
+    const play = rows.filter((r) => r.name === "play");
+    assert.ok(play.every((r) => r.handler_kind === "mutation"));
+    assert.ok(play.every((r) => String(r.hour).startsWith("2026-10-11 12:00:00")));
+
+    // Outside the window (d4, +2 ms) and in another app (d5): unattributed rows, still counted.
+    assert.equal(hits("app1", null, "nonblocking"), 1, "d4 is 2 ms past the request");
+    assert.equal(hits("app2", null, "nonblocking"), 1, "same trace id in another app never matches");
+
+    // The hour bucket comes from the sql event, not the request: d7 is in 13:00 though its request ended 12:59.
+    const edge = rows.filter((r) => r.name === "edge");
+    assert.equal(edge.length, 1);
+    assert.equal(edge[0]!.handler_kind, "query");
+    assert.ok(String(edge[0]!.hour).startsWith("2026-10-11 13:00:00"));
+
+    // Documented limit: simultaneous requests sharing a trace -> the earliest-completing request wins.
+    assert.equal(hits("app1", "x1", "nonblocking"), 1);
+    assert.equal(hits("app1", "y1", "nonblocking"), 0);
+
+    // Documented limit: back-to-back trace reuse -> the 1 ms after the earlier request ends (d9) goes to it
+    // even though the later request has already started; later events fall to the later request.
+    assert.equal(hits("app1", "a1", "nonblocking"), 2, "d11 plus the d9 tail");
+    assert.equal(hits("app1", "b1", "nonblocking"), 1, "d10 only");
+
+    // Trace and time vary independently. r-w1 completes at 16:00:10.000 after 100 ms, so it started at
+    // 16:00:09.900 and its widened start is 09.899. d12 is exactly 1 ms before the start: still attributed.
+    // d13 is 2 ms before it: below the lower bound, even though the trace matches. d14 sits inside the
+    // request's span in the same app but carries another trace: never attributed by time alone.
+    const hour16 = rows.filter((r) => String(r.hour).startsWith("2026-10-11 16:00:00"))
+      .map((r) => `${r.app_id}/${r.name ?? "unattributed"}/${r.path}=${r.deadline_hits}`).sort();
+    assert.deepEqual(hour16, [
+      "app1/unattributed/blocking=1",
+      "app1/unattributed/null=1",
+      "app1/w1/nonblocking=1",
+    ]);
   });
 });
 

@@ -1,0 +1,1006 @@
+Task test deno test --v8-flags=--expose-gc -A tests/unit/**/*.ts tests/core_test.ts
+Check tests/unit/admin_tenants_test.ts
+Check tests/unit/analysis_catalog_test.ts
+Check tests/unit/backup_test.ts
+Check tests/unit/boundaries_test.ts
+Check tests/unit/compile_test.ts
+Check tests/unit/config_test.ts
+Check tests/unit/docs_guide_test.ts
+Check tests/unit/document_reader_test.ts
+Check tests/unit/eventlog_test.ts
+Check tests/unit/events_test.ts
+Check tests/unit/ffi_classify_test.ts
+Check tests/unit/framing_test.ts
+Check tests/unit/http_test.ts
+Check tests/unit/ipc_test.ts
+Check tests/unit/logger_test.ts
+Check tests/unit/nul_contract_test.ts
+Check tests/unit/number_dialects_test.ts
+Check tests/unit/object_store_test.ts
+Check tests/unit/reader_context_test.ts
+Check tests/unit/reader_ingest_test.ts
+Check tests/unit/reader_test.ts
+Check tests/unit/retention_ingest_test.ts
+Check tests/unit/retention_test.ts
+Check tests/unit/rotation_test.ts
+Check tests/unit/rules_test.ts
+Check tests/unit/schema_test.ts
+Check tests/unit/server_process_test.ts
+Check tests/unit/server_scope_test.ts
+Check tests/unit/sqlite_ffi_cancel_test.ts
+Check tests/unit/sqlite_ffi_crud_test.ts
+Check tests/unit/sqlite_ffi_effect_test.ts
+Check tests/unit/sqlite_ffi_perf_test.ts
+Check tests/unit/storage_test.ts
+Check tests/unit/tenant_auth_test.ts
+Check tests/unit/tenant_http_test.ts
+Check tests/unit/tenant_routing_test.ts
+Check tests/unit/tenants_test.ts
+Check tests/unit/trace_e2e_test.ts
+Check tests/unit/trace_test.ts
+Check tests/core_test.ts
+running 1 test from ./tests/unit/admin_tenants_test.ts
+admin tenant HTTP: CRUD, one-time keys, authentication, validation and isolation ... ok (717ms)
+running 14 tests from ./tests/unit/analysis_catalog_test.ts
+catalog: every entry is one SELECT/WITH statement with no write or DDL keyword ... ok (30ms)
+catalog: placeholders and declared parameters match exactly ... ok (2ms)
+catalog: names are derived from the record ... FAILED (4ms)
+doc: the named queries section lists exactly the catalog names ... FAILED (2ms)
+doc: every parameter of every catalog entry is documented under its query ... FAILED (1ms)
+doc: every column of every event-log table is documented ... FAILED (191ms)
+resolveParams: defaults, coercion, required, unknown, and bad values ... ok (6ms)
+AnalysisLive: every catalog query runs against an empty file and against the fixture ... FAILED (962ms)
+AnalysisLive: query results ... FAILED (202ms)
+AnalysisLive: trace is the ordered cross-process timeline without double-listing typed events ... FAILED (196ms)
+AnalysisLive: typed failures ... FAILED (165ms)
+logs: argument parsing ... ok (2ms)
+logs: table, json and csv output ... ok (1ms)
+logs: list, query and exit codes ... ok (6ms)
+running 19 tests from ./tests/unit/backup_test.ts
+BackupsLive over real Storage + local ObjectStore: ordered puts, restorable object, one event per phase ... ok (162ms)
+take keeps a caller's traceId instead of minting one ... ok (32ms)
+the temp directory is removed after a successful run ... ok (31ms)
+a put failure on the snapshot object leaves latest.json unchanged ... ok (66ms)
+a put failure on the manifest leaves latest.json unchanged and records put-manifest ... ok (28ms)
+a publish-latest failure is reported at that phase ... ok (32ms)
+a corrupt snapshot fails verify with SnapshotIntegrityError, unwrapped, and uploads nothing ... ok (8ms)
+a Storage failure becomes BackupError at phase snapshot ... ok (7ms)
+a temp-directory failure fails take at phase snapshot and still emits a snapshot event ... ok (38ms)
+a defect in Storage still releases the guard and removes the temp directory ... ok (26ms)
+interrupting take mid-upload releases the per-app guard and removes the temp directory ... ok (60ms)
+interrupted upload over the real ObjectStoreLocal records the phase and one interrupted transfer ... ok (43ms)
+interrupting take during the snapshot releases the guard, removes the temp dir, records the phase ... ok (29ms)
+two concurrent takes for the same app produce exactly one BackupAlreadyRunning ... ok (26ms)
+concurrent takes for different apps both run ... ok (43ms)
+the guard is a race-free claim: N simultaneous takes while one is in flight admit exactly one ... ok (57ms)
+ingested, two backups under one caller trace with a retried upload count as 2 runs, 12 phases, 6 transfers, 1 retry ... ok (830ms)
+verifySnapshot accepts a healthy file and rejects a non-database as SnapshotIntegrityError ... ok (32ms)
+real S3: backup round trip over ObjectStoreS3 publishes latest.json last and restores ... ignored (0ms)
+running 8 tests from ./tests/unit/boundaries_test.ts
+boundaries: core/ imports nothing from platform/, sdk/, node:* or npm:* and never references Deno. ... ok (23ms)
+boundaries: no console.* in the shipped library outside platform/logging/ ... ok (52ms)
+boundaries: no Deno.env in the shipped library outside platform/config.ts ... ok (37ms)
+boundaries: nothing under platform/ mentions node:sqlite, except the binding's prose ... ok (8ms)
+boundaries: nothing under tests/ mentions node:sqlite, except the exact-path allow-list ... ok (60ms)
+boundaries: neither process's runtime module graph reaches node:sqlite ... ok (124ms)
+boundaries: the SQLite side never mentions @duckdb/node-api ... ok (452µs)
+boundaries: no `throw new Error` in core/ or platform/ — errors go through the tagged channel ... ok (40ms)
+running 48 tests from ./tests/unit/compile_test.ts
+quote accepts identifiers and rejects everything else ... ok (2ms)
+literal doubles embedded single quotes ... ok (221µs)
+placeholder numbers binds per dialect ... ok (126µs)
+tableFor finds declared collections and names the missing one ... ok (324µs)
+fieldNode covers metadata columns, declared fields and neither ... ok (1ms)
+scalar refuses array fields ... ok (568µs)
+expression reads a column directly in the columns layout, in both dialects ... ok (1ms)
+expression reads metadata columns directly even in the json layout ... ok (366µs)
+expression uses json_extract on sqlite, casting only number fields to REAL ... ok (342µs)
+a json number field uses one REAL expression for filters, ordering, countBy and indexes ... ok (2ms)
+expression casts json_extract_string per node kind on duckdb ... ok (278µs)
+expression refuses arrays and unknown fields in every layout and dialect ... ok (961µs)
+expression rejects a field name that is not an identifier ... ok (497µs)
+encode maps document values onto bind values ... ok (187µs)
+columnType maps node kinds onto STRICT column types ... ok (165µs)
+compileSelect emits the id tie-breaker and a bound limit by default ... ok (273µs)
+compileSelect binds filter values positionally, before the limit ... ok (573µs)
+compileSelect encodes booleans and compares null with IS NULL ... ok (442µs)
+compileSelect orders with NULLS FIRST ascending and NULLS LAST descending ... ok (324µs)
+compileSelect counts every match, with no ORDER BY and no LIMIT ... ok (200µs)
+compileSelect groups countBy on the extracted key and limits the groups ... ok (319µs)
+compileSelect drops a caller's sort on an aggregate plan ... ok (262µs)
+compileSelect reports every CompileError reason ... ok (1ms)
+compileSelect propagates a filter value that does not match its node ... ok (589µs)
+normalise accepts the limit range and rejects everything outside it ... ok (468µs)
+normalise drops the order of an aggregate plan and leaves other plans alone ... ok (196µs)
+compileDDL emits STRICT tables with the metadata columns and declared CHECKs ... ok (452µs)
+compileDDL stores the json layout as one checked doc column, and indexes the extraction ... ok (161µs)
+compileDDL emits one statement per table, in declaration order ... ok (326µs)
+compileDDL rejects an index over a missing or array field ... ok (834µs)
+compileDDL rejects names that are not identifiers ... ok (362µs)
+compileDDL refuses an enum with zero values instead of emitting an unconstrained column ... ok (400µs)
+compileDDL omits the CHECK when an enum node has no values at all ... ok (157µs)
+compileInsert writes one column per field in the columns layout ... ok (725µs)
+compileInsert writes the whole body as doc in the json layout ... ok (246µs)
+compileReplace sets every column, bumps the version in SQL, and binds the id last ... ok (557µs)
+compileDelete binds the id and still checks the collection exists ... ok (380µs)
+the write path rejects unknown collections and bodies that do not validate ... ok (1ms)
+safeNumber narrows driver integers and refuses to lose precision ... ok (481µs)
+decodeValue reverses encode for every node kind ... ok (740µs)
+decode returns documents with safe numbers in either layout ... ok (871µs)
+decode reads a count out of the single aggregate row ... ok (871µs)
+decode decodes countBy groups through the grouped field's node ... ok (397µs)
+decode fails with a value, not a raised SyntaxError, on a corrupt row ... ok (646µs)
+decode reports a missing column explicitly instead of coercing it downstream ... ok (295µs)
+core/plan.ts's SelectPlan mirrors sdk/db.ts's exactly ... ok (78µs)
+the legacy renderers reproduce the pre-port messages verbatim ... ok (1ms)
+the Either compiler API produces SQL, and the renderers carry the tagged error as the cause ... ok (674µs)
+running 37 tests from ./tests/unit/config_test.ts
+defaults: every option's documented default produces the matching ConfigService ... ok (17ms)
+empty-string env values are treated as unset, same as absent ... ok (3ms)
+BACKUP_INTERVAL_MS=500 fails with ConfigError(out-of-range) ... ok (6ms)
+BACKUP_INTERVAL_MS=1000 (the boundary) succeeds ... ok (3ms)
+BACKUP_INTERVAL_MS=0 (disabled) succeeds ... ok (3ms)
+BACKUP_INTERVAL_MS=not-a-number fails with ConfigError(malformed) ... ok (5ms)
+S3_BASE_URL set without credentials fails with ConfigError(inconsistent) ... ok (2ms)
+S3_BASE_URL set with both credentials succeeds ... ok (3ms)
+a non-numeric PORT fails with ConfigError(malformed) ... ok (3ms)
+an unrecognized LOG_LEVEL fails with ConfigError(malformed) ... ok (4ms)
+a LOG_INCLUDE_BIND_VALUES outside true/false/1/0/yes/no fails with ConfigError(malformed) ... ok (2ms)
+booleans accept 1/0 and yes/no alongside true/false (TRACE_SQL=1 stays valid) ... ok (4ms)
+DATA_DIR and EVENTLOG_DUCKDB are resolved to absolute paths; EVENTLOG_DUCKDB defaults under DATA_DIR ... ok (2ms)
+an explicit EVENTLOG_DUCKDB overrides the DATA_DIR-relative default ... ok (2ms)
+ConfigTest() with no overrides matches ConfigLive's documented defaults ... ok (3ms)
+ConfigTest(overrides) merges over defaults and ignores the environment ... ok (1ms)
+every option is declared exactly once, by env var ... ok (9ms)
+README 'Configuration' section matches the options table exactly ... ok (4ms)
+TENANCY=bogus fails with ConfigError(malformed) ... ok (4ms)
+TENANCY=better-auth without BETTER_AUTH_SECRET fails with ConfigError(inconsistent) ... ok (2ms)
+TENANCY=better-auth with BETTER_AUTH_SECRET succeeds ... ok (2ms)
+TENANCY=api-key does not require BETTER_AUTH_SECRET ... ok (3ms)
+tenantsDir defaults inside DATA_DIR ... ok (1ms)
+an explicit TENANTS_DIR is resolved to an absolute path ... ok (1ms)
+TENANT_ROUTER=bogus fails with ConfigError(malformed) ... ok (2ms)
+TENANT_ROUTER=control-plane succeeds ... ok (2ms)
+sqlite defaults: library unset, statementDeadlineMs 5000, statementInterruptGraceMs 1000 ... ok (1ms)
+SQLITE_LIBRARY decodes to the given path ... ok (1ms)
+STATEMENT_DEADLINE_MS=0 fails with ConfigError(out-of-range) ... ok (1ms)
+STATEMENT_DEADLINE_MS negative fails with ConfigError(out-of-range) ... ok (1ms)
+STATEMENT_DEADLINE_MS=NaN fails with ConfigError(out-of-range) ... ok (1ms)
+STATEMENT_DEADLINE_MS=Infinity fails with ConfigError(out-of-range) ... ok (1ms)
+STATEMENT_INTERRUPT_GRACE_MS=Infinity fails with ConfigError(out-of-range) ... ok (1ms)
+STATEMENT_DEADLINE_MS non-numeric fails with ConfigError(malformed) ... ok (1ms)
+STATEMENT_DEADLINE_MS >= READER_CALL_TIMEOUT_MS fails with ConfigError(inconsistent) ... ok (3ms)
+STATEMENT_DEADLINE_MS just under READER_CALL_TIMEOUT_MS succeeds ... ok (2ms)
+STATEMENT_INTERRUPT_GRACE_MS=0 fails with ConfigError(out-of-range) ... ok (1ms)
+running 6 tests from ./tests/unit/docs_guide_test.ts
+guide: every environment-shaped token is a declared option ... ok (30ms)
+guide: stated defaults match OPTIONS exactly ... ok (830µs)
+guide: analysis query names belong to the landed catalog ... FAILED (5ms)
+guide: every deno task exists ... ok (663µs)
+guide: config links to README without duplicating its options table ... ok (834µs)
+guide: the eight H2 headings are present in order, with no extras ... ok (828µs)
+running 9 tests from ./tests/unit/document_reader_test.ts
+document execution is capped, queued reads are interruptible, and health pings stay responsive ... ok (1s)
+document reads match DuckDB: off/columns; query never calls IPC ... ok (1s)
+document reads match DuckDB: off/json; query never calls IPC ... ok (1s)
+document reads match DuckDB: api-key/columns; query never calls IPC ... ok (1s)
+document reads match DuckDB: api-key/json; query never calls IPC ... ok (1s)
+document read-only open does not create a missing database ... ok (6ms)
+document deadline expires the context, closes the reader, and releases admission ... ok (150ms)
+FFI-05: an unbounded count stops at the statement deadline (504) while a point read on another file stays blocking and fast ...
+------- post-test output -------
+FFI-05 deadline 50 ms: call wall 58.1, 57.2, 59.8 ms (median 58.1), statement elapsed 51.9, 51.3, 53.1 ms, bound 70.0 ms; load1 2.45 on 4 CPUs; seed 1533 ms
+FFI-05 point reads during the long count: 3.85, 3.28, 2.17, 2.59, 2.22 ms (median 2.59), bound 5.0 ms; load1 2.45
+----- post-test output end -----
+FFI-05: an unbounded count stops at the statement deadline (504) while a point read on another file stays blocking and fast ... ok (1s)
+FFI-05: a forked read queued behind an in-flight read fails ContextExpiredError once COMMIT ran, on both paths, with no late sql event ...
+------- post-test output -------
+FFI-05 escaped read blocking/immediate: late read began at 15.6 ms, count settled at 195.1 ms; load1 2.42
+FFI-05 escaped read blocking/yielding: late read began at 14.1 ms, count settled at 187.8 ms; load1 2.42
+FFI-05 escaped read nonblocking/immediate: late read began at 13.5 ms, count settled at 192.9 ms; load1 2.42
+FFI-05 escaped read nonblocking/yielding: late read began at 13.6 ms, count settled at 187.7 ms; load1 2.42
+----- post-test output end -----
+FFI-05: a forked read queued behind an in-flight read fails ContextExpiredError once COMMIT ran, on both paths, with no late sql event ... ok (2s)
+running 29 tests from ./tests/unit/eventlog_test.ts
+ingest of a fixture directory fills each table; a second run inserts nothing and leaves _ingest_state unchanged ... ok (1s)
+columns follow the documented mapping from event records ... ok (851ms)
+appending to an ingested file ingests only the new complete lines; a partial line waits for its newline ... ok (2s)
+malformed lines are quarantined beside their source with an ingest event; the rest of the batch lands ... ok (799ms)
+a rewritten file is re-read from byte 0, deduplicated on eventId, and reported ... ok (1s)
+a torn terminator restored later does not insert the old line twice (sticky dedupe) ... ok (1s)
+records the platform's serializer writes always parse: lone surrogates, non-finite numbers, bare ts ... ok (644ms)
+repairLoneSurrogates fixes only unpaired surrogate escapes ... ok (722µs)
+two copies of one event in a rewritten file land once ... ok (918ms)
+only a batch with a rewritten file anti-joins against platform_events ... ok (1s)
+a failed ROLLBACK leaves the service usable: the next run reconnects and ingests exactly once ...
+------- post-test output -------
+timestamp=2026-10-14T01:37:22.010Z level=WARN fiber=#969 message="event-log rollback failed; reconnecting before the next run" message="{
+  \"phase\": \"commit\",
+  \"detail\": \"injected ROLLBACK failure\",
+  \"cause\": {},
+  \"_tag\": \"IngestError\"
+}"
+----- post-test output end -----
+a failed ROLLBACK leaves the service usable: the next run reconnects and ingests exactly once ... ok (1s)
+a failed commit rolls back rows and offsets together; the next run ingests everything exactly once ... ok (1s)
+small batches commit separately and produce the same tables as one batch ... ok (1s)
+integers are exact or NULL, never silently rounded; timestamp offsets are honoured ... ok (507ms)
+every typed row joins exactly one canonical row on event_id; ts and trace_id are not join keys ... ok (2s)
+a record of an unknown kind, or with no kind, lands in platform_events raw with no typed row ... ok (1s)
+event_kind and handler_kind are separate columns, mapped explicitly; rollback and error outcomes survive ... ok (988ms)
+mixed pre-item-35 and current backup records: emitter is explicit or inferred, and one run counts once ... ok (1s)
+ingest refuses a pre-change (v1) database before touching it, rather than reuse v1 tables ... ok (615ms)
+upgrade refuses when the retained JSONL cannot rebuild every v1 event; the v1 file and offsets stay as they were ... ok (2s)
+a rebuild that fails part-way leaves the v1 file untouched and nothing beside it ... ok (922ms)
+upgrade rebuilds v1 through the real ingest, proves it complete, switches, and keeps the original ... ok (2s)
+an upgrade killed before its switch leaves no timestamped orphan; the next attempt clears its scratch ... ok (1s)
+a fresh file is stamped v2 once, a missing one is absent, and a file of another version is refused ... ok (1s)
+decide: new, append, skip, truncated and prefix-mismatch ... ok (866µs)
+completeLines stops at the last newline and strips CR ... ok (678µs)
+parseSourceFile accepts only event-log sources ... ok (278µs)
+ingest.ts and tables.ts change no existing row outside _ingest_state and the temp tables ... ok (3ms)
+core/eventlog is pure and the event log never loads node:sqlite ... ok (2ms)
+running 26 tests from ./tests/unit/events_test.ts
+http event: golden fixture ... ok (3ms)
+handler event: golden fixture ... ok (430µs)
+sql event: golden fixture (bind values withheld by default) ... ok (449µs)
+tx event: golden fixture ... ok (526µs)
+queue event: golden fixture ... ok (350µs)
+backup event: golden fixture (an object-store transfer record) ... ok (304µs)
+backup event: golden fixture (a Backups phase record) ... ok (230µs)
+lifecycle event: golden fixture ... ok (397µs)
+ingest event: golden fixture ... ok (371µs)
+constructors return narrow per-kind variants (fields typecheck without narrowing) ... ok (320µs)
+sql redaction: bind values withheld unless includeBindValues is true ... ok (567µs)
+toJsonLine withholds bindValues from hand-built records (defense in depth) ... ok (504µs)
+redacts Bearer tokens and authorization headers unconditionally ... ok (1ms)
+redacts S3 credentials in every spelling, plus cookies and raw tokens ... ok (524µs)
+fromPlatformError preserves the non-enumerable cause ... ok (483µs)
+secrets smuggled in via cause are still redacted ... ok (354µs)
+fromPlatformError accepts any AnyError member (ConfigError needs no cast) ... ok (1ms)
+fromPlatformError never throws on non-object or foreign inputs ... ok (453µs)
+toJsonLine serializes BigInt instead of throwing (DecodeError.actual) ... ok (448µs)
+toJsonLine survives cyclic structures ... ok (262µs)
+toJsonLine survives throwing getters ... ok (588µs)
+toJsonLine caps hostile nesting depth instead of throwing ... ok (1ms)
+toJsonLine falls back to an envelope-only line instead of throwing ... ok (773µs)
+toJsonLine never contains a newline, even when inputs do ... ok (473µs)
+toJsonLine strips U+2028/U+2029 like other line breaks ... ok (536µs)
+toJsonLine is canonical: source key order does not change output ... ok (621µs)
+running 4 tests from ./tests/unit/ffi_classify_test.ts
+classify: every operation the SDK produces ... ok (11ms)
+classify: hand-built shapes at the edges of the rule ... ok (475µs)
+classify property: bounded ⇔ (_id eq filter present ∧ no aggregate) ... ok (75ms)
+classify property: writes are bounded whatever they carry ... ok (38ms)
+running 12 tests from ./tests/unit/framing_test.ts
+single message ... ok (4ms)
+multiple messages in one chunk ... ok (477µs)
+message split across chunks ... ok (542µs)
+split mid-multibyte-character ... ok (588µs)
+stream boundary: raw bytes split mid-UTF-8-sequence decode correctly ... ok (19ms)
+empty lines are skipped ... ok (580µs)
+oversize buffer fails with message-too-large ... ok (1ms)
+lines() delivers complete lines before raising the oversize error ... ok (8ms)
+framing errors carry a human-readable detail ... ok (837µs)
+truncated trailing buffer fails at finish ... ok (483µs)
+a whitespace-only trailing buffer is not truncated ... ok (246µs)
+default maxBytes is 2 MB, matching today's behavior ... ok (6ms)
+running 19 tests from ./tests/unit/http_test.ts
+matchRoute keeps the pre-port route shapes and adds the admin log routes ... ok (16ms)
+GET /health answers the reader's ping and the served apps ... ok (105ms)
+an unmatched route or method is a 404 RouteNotFound ... ok (66ms)
+a mutation commits to the app's storage and a query reads it back, per app ... ok (55ms)
+an absent or empty body is {}; malformed JSON is a 400 SchemaError ... ok (38ms)
+unknown app → 404, unknown handler → 404, kind mismatch → 400 ... ok (41ms)
+missing, malformed or wrong tokens → 401, on app and admin routes alike ... ok (55ms)
+a body over the 64 KiB cap → 413 RequestTooLarge, checked after auth ... ok (53ms)
+a stale _version → 409 ConflictError (was a 400 before the port) ... ok (39ms)
+a validation failure → 400 SchemaError; an app rule → 400 RuleError; a missing document → 404 ... ok (42ms)
+a full writer queue → 503 QueueFullError (was a 400 before the port) ... ok (393ms)
+a 5xx names the tag and trace but not the detail; the detail goes to the http event ... ok (27ms)
+FFI-05: a statement deadline → 504 with a message naming the deadline; the reader call timeout stays 502 ... ok (1ms)
+a reader that exited, timed out or broke the protocol → 502 per call; the writer is unaffected ... ok (24ms)
+a handler defect → 500 Defect with the trace id; the cause is logged under that trace ...
+------- post-test output -------
+timestamp=1970-01-01T00:00:00.000Z level=ERROR fiber=#1782 message="request handler defect" cause="Error: analysis handler blew up
+    at answer (file:///root/Software/tsdb-work/ffi06/tests/unit/http_test.ts:137:56)
+    at file:///root/Software/tsdb-work/ffi06/tests/unit/http_test.ts:149:23" traceId=t-defect
+----- post-test output end -----
+a handler defect → 500 Defect with the trace id; the cause is logged under that trace ... ok (23ms)
+POST /admin/backup/:appId takes a backup under the request's trace id ... ok (56ms)
+POST /admin/logs/analysis/:name passes a catalog name and scalar params, never SQL ... ok (22ms)
+X-Trace-Id is accepted or generated, echoed, and stamped on one http event per request ... ok (21ms)
+the server's LoggingLive writes one http event per request, and defect logs, to its JSONL file ... ok (57ms)
+running 27 tests from ./tests/unit/ipc_test.ts
+ping round-trips and the finalizer lets the child exit gracefully on stdin EOF ... ok (134ms)
+correlated replies resolve the right callers, even out of order ... ok (189ms)
+a reply split across chunks and an absent result both decode ... ok (118ms)
+early child exit fails every pending call with ReaderExitedError, and later calls immediately ... ok (79ms)
+a malformed line fails the connection, is logged, and kills the child ... ok (78ms)
+an interrupted call removes its pending entry ... ok (100ms)
+the per-call timeout fires and leaves no leaked Deferred; a late reply is an anomaly ... ok (547ms)
+a reply to an unknown id is logged and the real reply still resolves ... ok (69ms)
+the cap rejects with QueueFullError and emits high-water and rejected queue events ... ok (73ms)
+error frames rehydrate into the reader's tagged class; legacy strings into ReaderError ... ok (90ms)
+the scope finalizer kills a child that ignores stdin EOF ... ok (272ms)
+the scope finalizer escalates to SIGKILL when the child also ignores SIGTERM ... ok (479ms)
+an oversize frame with nothing after it fails the connection at once with message-too-large ... ok (129ms)
+a stdin write failure with the child still running fails the connection with write-failed ... ok (277ms)
+a stdin write failure followed by the child's exit reports the exit ... ok (229ms)
+a defect in the receiver fiber fails the connection with stream-failure instead of stalling ... ok (63ms)
+a call from an uninterruptible region still times out and frees its entry ... ok (138ms)
+ReaderClientLive provides the service and tears the child down with its layer ... ok (77ms)
+outgoingTrace: caller context, explicit properties, invalid values and no trace at all ... ok (874µs)
+a call carries the caller's trace, a fresh span and the caller's span as parent ... ok (80ms)
+explicit request properties win over the caller's; invalid ones are never sent ... ok (82ms)
+a call outside any trace sends a legacy frame: no trace properties at all ... ok (69ms)
+overlapping callers with distinct traces never swap contexts, even queued in a serial child ... ok (394ms)
+an interrupted call's late reply is logged under its own trace and never reaches the next caller ... ok (299ms)
+a timed-out call's late reply, arriving while another caller waits, keeps its own trace ... ok (330ms)
+a stray reply with no abandoned call stays on the connection's trace ... ok (199ms)
+queue events name the trace of the call that crossed the mark or was rejected ... ok (96ms)
+running 16 tests from ./tests/unit/logger_test.ts
+records land as one JSON object per line, in emission order ... ok (50ms)
+the scope finalizer flushes buffered records before the temp dir is removed ... ok (20ms)
+records below the configured level are not written; the rest are ... ok (15ms)
+every level is written when the gate is open at debug ... ok (14ms)
+a date boundary driven by TestClock opens a new dated directory ... ok (286ms)
+shutdown after a timer flush drains into the open file, then closes it ... ok (153ms)
+exceeding maxFileBytes rolls onto -002 within the same hour ... ok (40ms)
+server and reader write separate trees ... ok (25ms)
+overflowing the queue drops records visibly: emit never fails and the drops are reported ... ok (17ms)
+drop reports are written even when the level gate would suppress a warning ... ok (12ms)
+an unwritable LOG_DIR degrades instead of failing emit or shutdown ...
+------- post-test output -------
+ts-db event sink (server): 3 record(s) lost to I/O failure; latest: mkdir /tmp/ts-db-logger-e311b703b02771d8/blocked/server/2026-10-14: NotADirectory: Not a directory (os error 20): mkdir '/tmp/ts-db-logger-e311b703b02771d8/blocked/server/2026-10-14'
+----- post-test output end -----
+an unwritable LOG_DIR degrades instead of failing emit or shutdown ... ok (16ms)
+Effect.log* flows into the same JSONL records, with annotations and log spans ... ok (21ms)
+the configured level gates Effect.log* too ... ok (19ms)
+recordFromLogEntry maps every Effect log level onto an event level, and keeps the cause ... ok (5ms)
+appending 10 000 events completes in under 2 s ... ok (323ms)
+every event kind an item emits serializes to a line ... ok (14ms)
+running 41 tests from ./tests/unit/nul_contract_test.ts
+insert: U+0000 anywhere in the body fails SchemaError and rolls back earlier writes (live, columns) ... ok (162ms)
+insert: U+0000 anywhere in the body fails SchemaError and rolls back earlier writes (live, json) ... ok (69ms)
+insert: U+0000 anywhere in the body fails SchemaError and rolls back earlier writes (double, columns) ... ok (36ms)
+insert: U+0000 anywhere in the body fails SchemaError and rolls back earlier writes (double, json) ... ok (37ms)
+insert: a caught rejection wrote nothing, and the rest of the mutation commits (live, columns) ... ok (74ms)
+insert: a caught rejection wrote nothing, and the rest of the mutation commits (live, json) ... ok (60ms)
+insert: a caught rejection wrote nothing, and the rest of the mutation commits (double, columns) ... ok (27ms)
+insert: a caught rejection wrote nothing, and the rest of the mutation commits (double, json) ... ok (29ms)
+patch: U+0000 in the patch fails SchemaError; the document and its _version are unchanged (live, columns) ... ok (213ms)
+patch: U+0000 in the patch fails SchemaError; the document and its _version are unchanged (live, json) ... ok (64ms)
+patch: U+0000 in the patch fails SchemaError; the document and its _version are unchanged (double, columns) ... ok (34ms)
+patch: U+0000 in the patch fails SchemaError; the document and its _version are unchanged (double, json) ... ok (26ms)
+ids and filter values: get, patch, delete and where reject U+0000 with SchemaError (live, columns) ... ok (61ms)
+ids and filter values: get, patch, delete and where reject U+0000 with SchemaError (live, json) ... ok (55ms)
+ids and filter values: get, patch, delete and where reject U+0000 with SchemaError (double, columns) ... ok (30ms)
+ids and filter values: get, patch, delete and where reject U+0000 with SchemaError (double, json) ... ok (37ms)
+generated ids: an IdGen id holding U+0000 fails StorageError(insert) and rolls back (live, columns) ... ok (69ms)
+generated ids: an IdGen id holding U+0000 fails StorageError(insert) and rolls back (live, json) ... ok (60ms)
+generated ids: an IdGen id holding U+0000 fails StorageError(insert) and rolls back (double, columns) ... ok (27ms)
+generated ids: an IdGen id holding U+0000 fails StorageError(insert) and rolls back (double, json) ... ok (28ms)
+accepted text round-trips unchanged through insert, get, where, countBy and patch (live, columns) ... ok (162ms)
+accepted text round-trips unchanged through insert, get, where, countBy and patch (live, json) ... ok (231ms)
+accepted text round-trips unchanged through insert, get, where, countBy and patch (double, columns) ... ok (30ms)
+accepted text round-trips unchanged through insert, get, where, countBy and patch (double, json) ... ok (28ms)
+pre-existing NUL text fails the read with StorageError; clean rows still read (live, columns) ... ok (108ms)
+pre-existing NUL text fails the read with StorageError; clean rows still read (live, json) ... ok (99ms)
+pre-existing NUL text fails the read with StorageError; clean rows still read (double, columns) ... ok (22ms)
+pre-existing NUL text fails the read with StorageError; clean rows still read (double, json) ... ok (26ms)
+pre-existing NUL text in an array field named `doc` fails the read (live, columns) ... ok (51ms)
+pre-existing NUL text in an array field named `doc` fails the read (live, json) ... ok (47ms)
+pre-existing NUL text in an array field named `doc` fails the read (double, columns) ... ok (16ms)
+pre-existing NUL text in an array field named `doc` fails the read (double, json) ... ok (21ms)
+countBy beside an array field named `value` reads its group values as text (live, columns) ... ok (58ms)
+countBy beside an array field named `value` reads its group values as text (live, json) ... ok (60ms)
+countBy beside an array field named `value` reads its group values as text (double, columns) ... ok (19ms)
+countBy beside an array field named `value` reads its group values as text (double, json) ... ok (21ms)
+pre-existing NUL text: MemoryStore.select (ReaderTest's path) reads it losslessly, as DuckDB does ... ok (9ms)
+property: a text is stored iff it holds no U+0000, and reads back unchanged (live, columns) [seed=20261010] ... ok (377ms)
+property: a text is stored iff it holds no U+0000, and reads back unchanged (live, json) [seed=20261010] ... ok (337ms)
+property: a text is stored iff it holds no U+0000, and reads back unchanged (double, columns) [seed=20261010] ... ok (103ms)
+property: a text is stored iff it holds no U+0000, and reads back unchanged (double, json) [seed=20261010] ... ok (101ms)
+running 2 tests from ./tests/unit/number_dialects_test.ts
+number boundary matrix: SQLite and DuckDB, in separate processes, agree with the JS reference in both layouts ... ok (4s)
+number boundary matrix: the reference itself distinguishes the boundary doubles ... ok (405µs)
+running 48 tests from ./tests/unit/object_store_test.ts
+local: put then get round-trips bytes, nested keys included ... ok (51ms)
+local: overwriting a key replaces the object and leaves no temp files ... ok (25ms)
+local: getting a missing key fails with ObjectStoreError ... ok (10ms)
+local: invalid key (empty key) is an InvalidKeyError "illegal-character" for put and get ... ok (10ms)
+local: invalid key (space) is an InvalidKeyError "illegal-character" for put and get ... ok (8ms)
+local: invalid key (backslash) is an InvalidKeyError "illegal-character" for put and get ... ok (10ms)
+local: invalid key (query character) is an InvalidKeyError "illegal-character" for put and get ... ok (8ms)
+local: invalid key (non-ascii) is an InvalidKeyError "illegal-character" for put and get ... ok (9ms)
+local: invalid key (bare parent) is an InvalidKeyError "parent-traversal" for put and get ... ok (7ms)
+local: invalid key (leading parent) is an InvalidKeyError "parent-traversal" for put and get ... ok (13ms)
+local: invalid key (embedded parent) is an InvalidKeyError "parent-traversal" for put and get ... ok (7ms)
+local: invalid key (trailing parent) is an InvalidKeyError "parent-traversal" for put and get ... ok (12ms)
+local: invalid key (leading slash) is an InvalidKeyError "absolute-path" for put and get ... ok (6ms)
+local: invalid key (bare slash) is an InvalidKeyError "absolute-path" for put and get ... ok (6ms)
+local: invalid key (bare dot) is an InvalidKeyError "parent-traversal" for put and get ... ok (6ms)
+local: invalid key (dot and slash) is an InvalidKeyError "parent-traversal" for put and get ... ok (6ms)
+local: invalid key (dot, slash, dot) is an InvalidKeyError "parent-traversal" for put and get ... ok (11ms)
+local: invalid key (leading dot segment) is an InvalidKeyError "parent-traversal" for put and get ... ok (7ms)
+local: invalid key (embedded dot segment) is an InvalidKeyError "parent-traversal" for put and get ... ok (6ms)
+local: invalid key (trailing dot segment) is an InvalidKeyError "parent-traversal" for put and get ... ok (6ms)
+local: invalid key (parent after dot segment) is an InvalidKeyError "parent-traversal" for put and get ... ok (6ms)
+local: invalid key (empty segment) is an InvalidKeyError "illegal-character" for put and get ... ok (6ms)
+local: invalid key (trailing slash) is an InvalidKeyError "illegal-character" for put and get ... ok (6ms)
+local: invalid key (double trailing slash) is an InvalidKeyError "illegal-character" for put and get ... ok (9ms)
+keyFailure accepts the key shapes the platform generates ... ok (501µs)
+local: a failed write leaves no partial file at the final path ... ok (20ms)
+local: a failed overwrite keeps the previous object intact ... ok (24ms)
+local: a failed rename removes the temp file and reports ObjectStoreError ... ok (4ms)
+local: put and get each emit one event with key, bytes, duration and outcome ... ok (6ms)
+local: a failed put reports the attempted byte count and the error tag ... ok (4ms)
+local: a put inside a backup run carries the run's id from the backupRunId annotation ... ok (6ms)
+s3: put signs and sends a PUT to the base-relative URL ... ok (24ms)
+s3: get returns the response bytes ... ok (6ms)
+s3: a 4xx maps to ObjectStoreError with status and body, and is not retried ... ok (9ms)
+s3: get of a missing object maps 404 without retrying ... ok (6ms)
+s3: a 501 is permanent and is not retried ... ok (6ms)
+s3: a 400 RequestTimeout is transient and a later success wins ... ok (11ms)
+s3: a persistent 503 is retried three times, then surfaces as ObjectStoreError ... ok (20ms)
+s3: transient failures are retried and a later success wins ... ok (14ms)
+s3: a retried put is one transfer record whose attempts count every request ... ok (40ms)
+s3: an interrupted put still writes its transfer record, with the attempts so far ... ok (17ms)
+s3: a network error surfaces without a status and keeps its cause ... ok (21ms)
+s3: invalid keys are rejected before any request is made ... ok (3ms)
+s3: missing credentials fail layer construction with ConfigError ... ok (3ms)
+s3: events record the outcome, the HTTP error tag and no credentials ... ok (5ms)
+live: selects S3 when s3BaseUrl is set and the local stand-in otherwise ... ok (11ms)
+sha256 matches the known digest of 'abc' ... ok (780µs)
+platform/object_store.ts reads no environment variables ... ok (901µs)
+running 10 tests from ./tests/unit/reader_context_test.ts
+receiveFrame: an old sender's frame has no trace context and is otherwise unchanged ... ok (9ms)
+receiveFrame: valid traceId, spanId and parentSpanId are read beside every request kind ... ok (2ms)
+receiveFrame: invalid trace properties are ignored and named, never a malformed frame ... ok (2ms)
+receiveFrame: a malformed frame still fails as one, with or without a valid trace ... ok (4ms)
+readTraceContext: own properties only; an explicit undefined is absent ... ok (338µs)
+resolveRequestContext: a valid caller trace is kept as is, span and parent too ... ok (13ms)
+resolveRequestContext: an old sender, or an invalid trace, gets the reader-local fallback ... ok (3ms)
+withRequestContext: every log record of the request carries its context, including nested fibers ... ok (25ms)
+withRequestContext: a caller trace is not replaced by an outer annotation; old senders get the fallback ... ok (32ms)
+reader process: query records carry the caller's trace, or the fallback for old and invalid senders ... ok (1s)
+running 7 tests from ./tests/unit/reader_ingest_test.ts
+import graph: the reader entry reaches the event log and retention, never the writer's SQLite ... ok (51ms)
+import graph: the server never reaches the reader root or its context module ... ok (46ms)
+analysis RPC: catalog validates names and parameters and sees subsequent ingest commits ... ok (1s)
+ingest RPC: a closed source lands once, survives restarts with zero new rows, then only its tail; retention runs after ... ok (5s)
+ingest failures are typed replies: a failed open is retried, a failed run commits nothing, queries keep working ... ok (1s)
+SIGTERM in the middle of an ingest: no reply, no half-committed file, handles closed; a restart ingests the rest once ... ok (6s)
+the event-log handle opens on first ingest, is not cached when its open fails, and closes connection before instance even mid-ingest ... ok (1s)
+running 4 tests from ./tests/unit/reader_test.ts
+Reader service suite passes in its own process (DuckDB never shares one with the writer's SQLite) ... ok (4s)
+reader process: stdout carries only RPC reply lines; every log record lands under logs/reader ... ok (1s)
+reader process: a failed reader open is not cached; the next request retries it ... ok (1s)
+reader process: a malformed frame ends the process with an error on stderr, not stdout ... ok (815ms)
+running 15 tests from ./tests/unit/retention_ingest_test.ts
+ingest, then sweep: what is committed goes; today stays; nothing is ingested twice ... ok (954ms)
+restart: a sweep in a fresh process trusts only offsets that were committed before it ... ok (1s)
+dry run: nothing is ingested, sealed, touched or emitted; the plan is from committed state ... ok (993ms)
+append during the sweep: a file that grows after the gate read it is skipped, then swept ... ok (1s)
+append after ingest committed: the stale watermark blocks the sweep until the next ingest ... ok (1s)
+an unread partial tail blocks the sweep; once the file is closed it is sealed, then swept ... ok (817ms)
+a sealed torn tail is durable quarantine evidence; a tail with complete lines is never sealed ... ok (1s)
+a failed commit sweeps nothing and loses nothing; the retry ingests and sweeps ... ok (1s)
+the active file and today's directory are never sealed, gzipped or deleted ... ok (598ms)
+rejected lines are reconciled against durable quarantine before their source goes ... ok (853ms)
+a quarantine file left with a torn record still takes whole records after it ... ok (554ms)
+an empty closed file gets an empty-prefix row, so it no longer pins its directory ... ok (957ms)
+gzip retry: a crash after the rename, or before it, is finished by the next run ... ok (1s)
+an incompatible event-log schema stops ingest at startup, so nothing is swept ... ok (153ms)
+sustained writes over many rotations and sweeps: every accepted event ingested once, drops apart ...
+------- post-test output -------
+sweep 1 (day 0): input=800 ingested=512 rejected=4 dropped=288 | jsonl=191562B in 14 files (today 191562B, cap 393216B, unsafe backlog 0 files 0B) | duckdb=12288B wal=247970B rows=528 | gzipped=0 deleted=0
+sweep 2 (day 1): input=1600 ingested=1024 rejected=8 dropped=576 | jsonl=199846B in 28 files (today 192476B, cap 393216B, unsafe backlog 0 files 0B) | duckdb=12288B wal=495587B rows=1060 | gzipped=13 deleted=0
+sweep 3 (day 2): input=2400 ingested=1536 rejected=12 dropped=864 | jsonl=202213B in 28 files (today 194572B, cap 393216B, unsafe backlog 0 files 0B) | duckdb=12288B wal=745672B rows=1593 | gzipped=13 deleted=14
+sweep 4 (day 3): input=4000 ingested=2560 rejected=16 dropped=1440 | jsonl=381938B in 24 files (today 380836B, cap 393216B, unsafe backlog 2 files 1102B) | duckdb=12288B wal=1241323B rows=2646 | gzipped=0 deleted=26
+sweep 5 (day 4): input=4800 ingested=3072 rejected=20 dropped=1728 | jsonl=195614B in 16 files (today 194512B, cap 393216B, unsafe backlog 2 files 1102B) | duckdb=12288B wal=1493196B rows=3179 | gzipped=0 deleted=22
+sweep 6 (day 5): input=5600 ingested=3584 rejected=24 dropped=2016 | jsonl=201561B in 30 files (today 192732B, cap 393216B, unsafe backlog 2 files 1102B) | duckdb=12288B wal=1744591B rows=3712 | gzipped=13 deleted=0
+sweep 7 (day 6): input=6400 ingested=4096 rejected=28 dropped=2304 | jsonl=202359B in 28 files (today 194665B, cap 393216B, unsafe backlog 0 files 0B) | duckdb=12288B wal=1995537B rows=4245 | gzipped=13 deleted=16
+sweep 8 (day 7): input=6400 ingested=4096 rejected=28 dropped=2304 | jsonl=15422B in 28 files (today 0B, cap 393216B, unsafe backlog 0 files 0B) | duckdb=12288B wal=2001428B rows=4250 | gzipped=13 deleted=0
+sweep 9 (day 8): input=6400 ingested=4096 rejected=28 dropped=2304 | jsonl=8151B in 15 files (today 0B, cap 393216B, unsafe backlog 0 files 0B) | duckdb=12288B wal=2004267B rows=4251 | gzipped=1 deleted=14
+sustained: input=6400 ingested=4096 dropped=2304 foreign accepted=56 rejected=28/28 sweeps=9
+----- post-test output end -----
+sustained writes over many rotations and sweeps: every accepted event ingested once, drops apart ... ok (8s)
+running 28 tests from ./tests/unit/retention_test.ts
+30-day tree: gzips days 2–13, deletes day 14+, keeps today and yesterday untouched ... ok (899ms)
+a second sweep of the same tree changes nothing ... ok (876ms)
+the sweep does exactly what rotation.plan says, including the total-bytes cap ... ok (295ms)
+dry run reports the plan and changes nothing on disk, not even directories ... ok (395ms)
+a dry run that fails still emits its error event, with counts, and changes nothing ... ok (245ms)
+a file a sink holds open is neither gzipped nor deleted, and keeps its directory ... ok (776ms)
+anything else in a dated directory is left alone and keeps the directory ... ok (703ms)
+rejected.jsonl ages out with its directory but is never gzipped ... ok (1s)
+a dated directory that is a symlink is not followed ... ok (1s)
+a planned path outside LOG_DIR refuses the whole plan and emits an error event ... ok (1s)
+a file reached through a symlinked parent directory is refused ... ok (5ms)
+a `link/..` path acts on the resolved path only, never on what the OS would reach ... ok (107ms)
+a future-dated directory is held out of the sweep instead of blocking it ... ok (319ms)
+an unsafe LOG_DIR is refused before anything is read ... ok (46ms)
+a file that changed between inventory and apply is skipped, not touched ... ok (145ms)
+gzip rechecks the parent directory just before removing the source ... ok (3s)
+an interrupted sweep emits an audit event with the state it reached ... ok (3s)
+syncDir fsyncs a directory and treats an unsyncable or missing one as fine ... ok (12ms)
+applySafetyRails keeps open and quarantine paths, resolving them first ... ok (312µs)
+without committed watermarks nothing is gzipped or deleted, and all of it is reported ... ok (203ms)
+a short watermark pins its file; the cap then prunes the next directory instead ... ok (276ms)
+a rejected.jsonl stays as long as a source beside it does ... ok (663ms)
+a file modified within settleMs is not yet closed, whatever ingest says ... ok (737ms)
+a complete .gz left by an interrupted sweep is verified, then the source is removed ... ok (656ms)
+a .gz that does not match the source is left in place with the source, and reported ... ok (546ms)
+stale .tmp leftovers are swept; fresh ones and today's are not ... ok (617ms)
+the sweeper fiber sweeps at startup, then once a day, from Config ... ok (834ms)
+a failing sweep is an error event and does not stop tomorrow's sweep ... ok (108ms)
+running 22 tests from ./tests/unit/rotation_test.ts
+currentPath builds logs/<role>/<date>/events-<hour>-<pid>-<seq>.jsonl with zero-padding ... ok (2ms)
+currentPath rejects a role outside the known set ... ok (1ms)
+shouldRoll returns 'date' on a day boundary ... ok (549µs)
+shouldRoll returns 'hour' when the day matches but the hour changed ... ok (373µs)
+shouldRoll returns 'size' once bytesWritten crosses maxFileBytes ... ok (335µs)
+shouldRoll prefers 'date' over 'size' when both conditions hold ... ok (299µs)
+shouldRoll prefers 'hour' over 'size' when both conditions hold ... ok (197µs)
+shouldRoll returns 'no' when nothing has changed ... ok (257µs)
+invariant (a): today's directory is never gzipped or deleted, regardless of file age ... ok (1ms)
+invariant (b): the currently-open file is never in gzip or delete ... ok (1ms)
+invariant (c): gzip and delete are disjoint across day-age boundaries ... ok (646µs)
+invariant (d): gzip ∪ delete ∪ keep is exactly the input set, no overlaps or omissions ... ok (478µs)
+invariant (e): maxTotalBytes exceeded prunes oldest non-today directories first ... ok (489µs)
+invariant (e): a cap large enough for everything keeps all non-today decisions untouched ... ok (270µs)
+invariant (e): a cap too small for any non-today bytes prunes down to only today remaining ... ok (275µs)
+plan is idempotent: re-running on the post-plan file set yields empty gzip and delete ... ok (667µs)
+already-compressed .gz files are never re-gzipped but are still deleted past keepDays ... ok (235µs)
+.gz bytes still count toward maxTotalBytes when pruning under the cap ... ok (279µs)
+plan throws InvalidDateBucketError for a full-path dir instead of silently keeping ... ok (910µs)
+plan throws InvalidDateBucketError for a non-date dir ... ok (338µs)
+plan throws InvalidDateBucketError for an impossible calendar date ... ok (312µs)
+cap pruning treats same-date directories across roles as one pruning unit ... ok (347µs)
+running 20 tests from ./tests/unit/rules_test.ts
+applyMove: X wins on line 0-1-2 ... ok (3ms)
+applyMove: X wins on line 3-4-5 ... ok (384µs)
+applyMove: X wins on line 6-7-8 ... ok (241µs)
+applyMove: X wins on line 0-3-6 ... ok (210µs)
+applyMove: X wins on line 1-4-7 ... ok (157µs)
+applyMove: X wins on line 2-5-8 ... ok (163µs)
+applyMove: X wins on line 0-4-8 ... ok (128µs)
+applyMove: X wins on line 2-4-6 ... ok (152µs)
+applyMove: a full board with no line is a draw, not a win ... ok (457µs)
+applyMove: an unfinished game stays playing and flips the turn ... ok (497µs)
+applyMove: the turn flips even on the move that ends the game ... ok (178µs)
+applyMove: an occupied cell is rejected ... ok (1ms)
+applyMove: a cell outside 0..8 is rejected ... ok (386µs)
+applyMove: a non-integer cell is rejected without reading the board ... ok (401µs)
+applyMove: the player who does not hold the turn is rejected ... ok (335µs)
+applyMove: a finished game rejects every further move ... ok (312µs)
+applyMove: the game it was given is left untouched ... ok (171µs)
+winner: reports the mark holding a complete line, for each line and each mark ... ok (610µs)
+winner: an empty, partial or line-free board has no winner ... ok (123µs)
+validatePlayers: blank or identical players are rejected, distinct players pass ... ok (561µs)
+running 41 tests from ./tests/unit/schema_test.ts
+Either channels: values ride right, SchemaErrors ride left (value-first order) ... ok (2ms)
+validate: string accepts strings, including empty, and rejects everything else ... ok (741µs)
+validate: nullable string accepts null and still rejects non-strings ... ok (423µs)
+validate: number requires a finite number ... ok (479µs)
+validate: nullable number accepts null, rejects NaN ... ok (589µs)
+validate: integer requires Number.isSafeInteger, not merely an integral value ... ok (522µs)
+validate: nullable integer accepts null, rejects unsafe integers ... ok (263µs)
+validate: boolean accepts only true and false ... ok (323µs)
+validate: nullable boolean accepts null ... ok (221µs)
+validate: enum accepts only declared members ... ok (336µs)
+validate: nullable enum accepts null and rejects undeclared members ... ok (260µs)
+validate: array validates element-wise and accepts any length when unconstrained ... ok (1ms)
+validate: a fixed-length array rejects any other length ... ok (519µs)
+validate: a failing array element reports its own indexed path ... ok (566µs)
+validate: nested arrays accumulate both indices in the path ... ok (407µs)
+validate: a nullable array accepts null but a non-nullable element does not ... ok (450µs)
+validate: a sparse array is rejected at the first hole (strictly stronger than .map) ... ok (289µs)
+validate: an array node without an item descriptor returns a left, never raises ... ok (225µs)
+parseObject: accepts a complete object and keys the result in field order ... ok (489µs)
+parseObject: rejects anything that is not a plain object ... ok (591µs)
+parseObject: rejects an unknown field before validating any declared one ... ok (236µs)
+parseObject: a missing field fails its own node, since undefined is not null ... ok (279µs)
+parseObject: a bad field value reports that field's path ... ok (165µs)
+parseObject: partial mode skips absent fields and keeps every other rule ... ok (483µs)
+parseObject: an explicit undefined is a present key and still fails validation ... ok (175µs)
+parseObject: an empty field map accepts only an empty object ... ok (231µs)
+identifier: accepts SQL-safe names and rejects everything else ... ok (686µs)
+defineTable: accepts identifier field names and rejects reserved _-prefixed ones ... ok (1ms)
+defineSchema: rejects _-prefixed and sqlite_-prefixed table names in any case ... ok (648µs)
+names: table, field and index names holding U+0000 fail the identifier rule ... ok (942µs)
+defineTable: rejects an enum member holding U+0000, directly or inside arrays ... ok (520µs)
+validate: U+0000 is still a valid string; storage refusal is storable's job ... ok (201µs)
+storable: rejects the first string holding U+0000 at validate's path, leading, interior or trailing ... ok (1ms)
+storable: passes every value without U+0000 through unchanged, by reference ... ok (204µs)
+Table.addIndex: accepts scalar fields and leaves the receiver unchanged ... ok (311µs)
+Table.addIndex: rejects a bad name, no fields, array or unknown fields, and duplicates ... ok (527µs)
+withStorage: reprojects every table onto one layout, preserving fields and indexes ... ok (495µs)
+sdk: the Either forms pass values through unchanged ... ok (283µs)
+sdk: every failure renders the pre-port message ... ok (3ms)
+sdk: a module-load throw carries the structured SchemaError as its cause ... ok (476µs)
+sdk: AppTable keeps index chaining and storage reprojection app-shaped ... ok (421µs)
+running 3 tests from ./tests/unit/server_process_test.ts
+server process (spawned; DuckDB): SIGTERM mid-mutations drains, stops the reader, and logs shutdown last ... ok (2s)
+server process: its runtime module graph never loads DuckDB ... ok (49ms)
+server process (spawned): killing the reader child leaves document reads up while ingest waits for restart ... ok (5s)
+running 24 tests from ./tests/unit/server_scope_test.ts
+partial startup: a failure right after "logging" releases everything acquired before it ... ok (97ms)
+partial startup: a failure right after "object-store" releases everything acquired before it ... ok (57ms)
+partial startup: a failure right after "storage:tic-tac-toe" releases everything acquired before it ... ok (136ms)
+partial startup: a failure right after "storage:tic-tac-toe-json" releases everything acquired before it ... ok (133ms)
+partial startup: a failure right after "reader" releases everything acquired before it ... ok (900ms)
+partial startup: a failure right after "reader-ready" releases everything acquired before it ... ok (915ms)
+partial startup: a failure right after "ingest-sweep" releases everything acquired before it ... ok (849ms)
+partial startup: a failure right after "backup-timer" releases everything acquired before it ... ok (928ms)
+partial startup: a failure right after "http" releases everything acquired before it ... ok (857ms)
+partial startup: a later app that cannot open closes the earlier app's handle; no reader is spawned ... ok (102ms)
+partial startup: an occupied port fails with ListenError after the reader, fibers and apps, and releases them ... ok (906ms)
+partial startup: a stop signal right after "object-store" acquires interrupts startup and releases it ... ok (27ms)
+partial startup: a stop signal right after "storage:tic-tac-toe-json" acquires interrupts startup and releases it ... ok (112ms)
+partial startup: a stop signal right after "reader" acquires interrupts startup and releases it ... ok (913ms)
+partial startup: a stop signal while the startup ping waits for the reader ends startup and releases it ... ok (1s)
+clean stop: requests are served, then drain → fibers → reader → writers → shutdown, in order ... ok (874ms)
+a stop with a mutation in flight: the drain waits for it, it commits, then fibers, reader, writers close ... ok (1s)
+the reader child dies while serving: the supervisor restarts it and the server stops normally ... ok (2s)
+the ingest/sweep fiber triggers the reader's existing ingest RPC; the server holds no DuckDB file ... ok (1s)
+process: SIGTERM with a mutation in flight drains it, then exits 0 within the bound, finalizers in order ... ok (3s)
+process: an occupied port exits 1 with ListenError on stderr and leaves no reader behind ... ok (2s)
+process: a killed reader child is replaced, then SIGTERM exits 0 with finalizers in order ... ok (19s)
+import graph: DuckDB is not reachable from the server at runtime ... ok (53ms)
+import graph: no module the server loads reads the environment except platform/config.ts ... ok (73ms)
+running 11 tests from ./tests/unit/sqlite_ffi_cancel_test.ts
+deadline: a never-ending query is cancelled within a few ms while the event loop runs ...
+------- post-test output -------
+run 0: cancel latency 0.804 ms, elapsed 203.1 ms, loop ticks 70, max loop gap 5.7 ms, point reads 52
+run 1: cancel latency 0.240 ms, elapsed 202.6 ms, loop ticks 70, max loop gap 11.1 ms, point reads 53
+run 2: cancel latency 0.233 ms, elapsed 200.9 ms, loop ticks 70, max loop gap 7.8 ms, point reads 53
+run 3: cancel latency 0.372 ms, elapsed 202.6 ms, loop ticks 75, max loop gap 5.3 ms, point reads 61
+run 4: cancel latency 0.218 ms, elapsed 202.1 ms, loop ticks 81, max loop gap 3.6 ms, point reads 61
+median cancel latency 0.240 ms over 5 runs
+----- post-test output end -----
+deadline: a never-ending query is cancelled within a few ms while the event loop runs ... ok (1s)
+abort: an AbortSignal cancels a never-ending query; an aborted signal never starts it ...
+------- post-test output -------
+abort latency 2.672 ms (binding-reported 0.262 ms)
+----- post-test output end -----
+abort: an AbortSignal cancels a never-ending query; an aborted signal never starts it ... ok (57ms)
+deadline: an interrupted write inside a transaction rolls the transaction back ... ok (128ms)
+concurrency: four never-ending queries on four connections all meet their deadlines ...
+------- post-test output -------
+4 concurrent: cancel latencies 0.34, 0.37, 0.23, 0.32 ms; total 163.7 ms; loop ticks 56, max gap 16.1 ms
+----- post-test output end -----
+concurrency: four never-ending queries on four connections all meet their deadlines ... ok (167ms)
+busy: an in-flight execution owns its connection until it settles ...
+------- post-test output -------
+closeAsync with a statement in flight: 0.379 ms
+----- post-test output end -----
+busy: an in-flight execution owns its connection until it settles ... ok (10ms)
+options: timeoutMs is validated; timeoutMs 0 cancels at once ... ok (7ms)
+race: cancels issued before the pool thread enters sqlite3_step still stop it ...
+------- post-test output -------
+immediate abort: median 0.429 ms, max 12.992 ms over 100
+timeoutMs 0 (binding-reported cancel latency): median 0.204 ms, max 3.374 ms over 50
+immediate closeAsync: median 2.042 ms, max 6.004 ms over 50
+16 connections aborted in one tick: all settled in 2.254 ms
+----- post-test output end -----
+race: cancels issued before the pool thread enters sqlite3_step still stop it ... ok (2s)
+cleanup: a throwing signal detachment (method) never replaces the execution's outcome ... ok (95ms)
+cleanup: a throwing signal detachment (getter) never replaces the execution's outcome ... ok (103ms)
+cleanup: a throwing signal detachment (method) never touches an exception the caller threw ... ok (11ms)
+cleanup: a throwing signal detachment (getter) never touches an exception the caller threw ... ok (6ms)
+running 25 tests from ./tests/unit/sqlite_ffi_crud_test.ts
+library: loads the system libsqlite3 and reports its version ... ok (14ms)
+library: only Apple arm64 is refused for the fixed variadic db_config signature ... ok (411µs)
+library: a missing library fails SqliteLibraryError load-failed ... ok (3ms)
+defaults: unknown quoted columns fail on a read-write open ... ok (24ms)
+defaults: foreign keys enabled on a read-write open ... ok (22ms)
+defaults: unknown quoted columns fail on a read-only open ... ok (18ms)
+defaults: foreign keys enabled on a read-only open ... ok (15ms)
+defaults: DDL rejects double-quoted string literals ... ok (22ms)
+defaults: orphan inserts fail with SQLITE_CONSTRAINT_FOREIGNKEY ... ok (71ms)
+crud (sync): insert, select, update, delete with positional and named parameters ... ok (106ms)
+crud (async): the nonblocking methods give the same results as the sync ones ... ok (473ms)
+transactions: commit and rollback through exec ... ok (62ms)
+values: every storage class round-trips, including NUL text, empty text and empty blobs ... ok (252ms)
+values: integers beyond 2^53 fail SqliteValueError unless readBigInts ... ok (46ms)
+errors: constraint violations are SqliteError with extended codes ... ok (75ms)
+errors: prepare and exec failures are SqliteError; open failures are SqliteError op open ... ok (18ms)
+usage: parameter count, names and types are checked before the statement runs ... ok (2ms)
+usage: prepare takes exactly one statement ... ok (2ms)
+lifetimes: close finalizes statements; use after close or finalize is a typed error ... ok (1ms)
+column names follow the current schema, not the one at prepare time ... ok (45ms)
+reset errors: a RETURNING row whose commit fails SQLITE_BUSY is an error, never a result ... ok (52ms)
+reentrancy: a parameter getter that finalizes its own statement gets a typed error ... ok (699ms)
+reentrancy: an option getter that closes the connection gets a typed error ... ok (700ms)
+reentrancy: nested calls from any caller getter are refused, never overlapping ... ok (711ms)
+cleanup: signal detachment that closes or reuses the connection sees a finished reset error ... ok (1s)
+running 14 tests from ./tests/unit/sqlite_ffi_effect_test.ts
+scope: closing the scope cancels a pending async execution and closes within 50 ms ...
+------- post-test output -------
+scope close with a daemon-held execution: 10.180 ms
+scope close with a scoped fiber's execution: 6.216 ms
+----- post-test output end -----
+scope: closing the scope cancels a pending async execution and closes within 50 ms ... ok (122ms)
+interrupt: interrupting the fiber aborts the execution and waits until it has settled ...
+------- post-test output -------
+fiber interrupt: 1.772 ms (binding cancel latency 0.223 ms)
+----- post-test output end -----
+interrupt: interrupting the fiber aborts the execution and waits until it has settled ... ok (38ms)
+timeout: Effect.timeout and timeoutMs both stop the statement and free the connection ...
+------- post-test output -------
+Effect.timeout(30 ms): returned after 37.987 ms
+timeoutMs 30: SqliteCancelled after 32.099 ms
+----- post-test output end -----
+timeout: Effect.timeout and timeoutMs both stop the statement and free the connection ... ok (75ms)
+failures: binding errors are typed failures; caller exceptions are defects, untouched ... ok (71ms)
+provenance: a caller-thrown binding error is a defect, by identity and untouched ... ok (15ms)
+provenance: the binding runs no caller code after the snapshot ... ok (8ms)
+provenance: the binding's own errors stay typed failures ... ok (28ms)
+inTransaction: flips across BEGIN / COMMIT / ROLLBACK and follows SQLite's own rollback ... ok (57ms)
+busy: BEGIN IMMEDIATE on a second connection fails SQLITE_BUSY after busyTimeoutMs ...
+------- post-test output -------
+FFI: BEGIN IMMEDIATE failed after 102.0 ms (busyTimeoutMs 100)
+node:sqlite: BEGIN IMMEDIATE failed after 102.5 ms
+----- post-test output end -----
+busy: BEGIN IMMEDIATE on a second connection fails SQLITE_BUSY after busyTimeoutMs ... ok (312ms)
+cache: isCacheable bypasses VACUUM and DDL only ... ok (420µs)
+cache: hits reuse the statement; LRU eviction finalizes, never more than 64 live ...
+------- post-test output -------
+cache: max live statements 64 over 501 prepared
+----- post-test output end -----
+cache: hits reuse the statement; LRU eviction finalizes, never more than 64 live ... ok (43ms)
+cache: uncached statements are finalized at the next idle call; close finalizes all ... ok (27ms)
+cache: eviction never finalizes a statement while an execution is in flight ... ok (25ms)
+perf: point reads through prepareCached are at parity with node:sqlite ...
+------- post-test output -------
+point read µs: {"node_sqlite_reused":{"p50":11.683000000175525,"p99":45.79599999988204,"n":24000},"ffi_prepare_cached":{"p50":12.670999999954802,"p99":48.36199999999735,"n":24000},"node_sqlite_prepare_per_call":{"p50":30.904000000191445,"p99":83.6659999999938,"n":2000},"loadavg":[3.07568359375,3.34228515625,3.41064453125]}
+----- post-test output end -----
+perf: point reads through prepareCached are at parity with node:sqlite ... ok (1s)
+running 1 test from ./tests/unit/sqlite_ffi_perf_test.ts
+perf: FFI sync point reads are at parity with node:sqlite ...
+------- post-test output -------
+point read µs: {"node_sqlite_sync":{"p50":7.822000000032858,"p99":28.471000000081403,"n":24000},"ffi_sync":{"p50":7.744000000002416,"p99":28.829999999970823,"n":24000},"ffi_nonblocking":{"p50":56.99800000002142,"p99":327.44000000002416,"n":2000}}
+----- post-test output end -----
+perf: FFI sync point reads are at parity with node:sqlite ... ok (1s)
+running 21 tests from ./tests/unit/storage_test.ts
+an interrupted mutation fiber rolls back and leaves the connection usable ... ok (141ms)
+the writer queue rejects job 1001 with a typed QueueFullError ... ok (362ms)
+an interrupted waiter gives its queue slot back ... ok (420ms)
+a defect in the handler rolls back like a failure ... ok (47ms)
+a non-JSON result fails NonSerializableResultError before COMMIT ... ok (45ms)
+a Documents handle used after its transaction fails ContextExpiredError ... ok (60ms)
+a forked write switched out mid-operation cannot land after COMMIT ... ok (848ms)
+typed handler failures keep their tag and roll back ... ok (42ms)
+schema drift fails the layer with SchemaDriftError and closes the handle ... ok (40ms)
+closing the scope waits for in-flight work, then refuses new work ... ok (63ms)
+_creationTime comes from Clock (TestClock) and _id from IdGen ... ok (78ms)
+each statement emits a sql event; each transaction a tx event ... ok (39ms)
+LOG_INCLUDE_BIND_VALUES and TRACE_SQL change what a sql event carries ... ok (40ms)
+a failing statement emits an error sql event and a StorageError ... ok (60ms)
+a U+0000 rejection runs no statement for the rejected write and rolls back the earlier ones ... ok (57ms)
+a read of pre-existing U+0000 text fails StorageError via a second, guarded select ... ok (56ms)
+sq-06: 50 concurrent read-modify-write increments commit 50/50 with zero lost updates ... ok (384ms)
+FFI-05: a mutation whose find runs past the deadline rolls back, fails 504, and the next mutation succeeds ...
+------- post-test output -------
+FFI-05 writer deadline: statement 52.7 ms, mutation 57.0 ms; load1 2.83
+----- post-test output end -----
+FFI-05: a mutation whose find runs past the deadline rolls back, fails 504, and the next mutation succeeds ... ok (1s)
+FFI-05: a concurrent statement waits for an in-flight nonblocking read instead of failing busy ... ok (207ms)
+FFI-05: a blocking start does its native work before returning, so a competing nonblocking claim cannot take the connection first ... ok (400ms)
+FFI-05 grace period: a step that outlives its interrupt poisons the connection, which closes when the step returns ...
+------- post-test output -------
+FFI-05 grace: deadline 30 ms + grace 100 ms, stuck event at 133.6 ms, step returned at 605.2 ms (busy timeout 600 ms); load1 2.83
+----- post-test output end -----
+FFI-05 grace period: a step that outlives its interrupt poisons the connection, which closes when the step returns ... ok (620ms)
+running 3 tests from ./tests/unit/tenant_auth_test.ts
+tenant auth hashes keys before lookup and never resolves missing/malformed credentials ... ok (28ms)
+tenant key cache: fixed positive/negative TTL, capacity, local invalidation, no cached outages ... ok (88ms)
+tenant HTTP query does not re-prepare SQLite while a mutation holds its transaction ... ok (119ms)
+running 2 tests from ./tests/unit/tenant_http_test.ts
+tenant HTTP: CLI keys, reads, forged identity, concurrent mutations, revocation and deactivation ... ok (33s)
+tenant reader IPC rejects absent and malformed tenant context without opening legacy storage ... ok (1s)
+running 10 tests from ./tests/unit/tenant_routing_test.ts
+router rejects traversal and every non-canonical UUID form without I/O ... ok (7ms)
+prepare is idempotent, rejects forged locations and refuses symlinks at prepare and open ... ok (66ms)
+50 concurrent writes across 5 fiber-local tenants isolate identical document ids; single-flight opens ... ok (686ms)
+api-key fails closed for mutation and snapshot without TenantContext ... ok (10ms)
+better-auth fails closed for mutation and snapshot without TenantContext ... ok (8ms)
+tenancy off chooses legacy storage even when a TenantContext is provided ... ok (52ms)
+bounded eviction under concurrent load retains writes and never closes a leased handle ... ok (698ms)
+interrupted capacity waiter and active mutation release leases; idle eviction reopens ... ok (150ms)
+LocalFolderRouter layer uses config; enabled Storage requires a router at startup ... ok (5ms)
+scope shutdown waits for an active tenant lease and rejects subsequent operations ... ok (52ms)
+running 12 tests from ./tests/unit/tenants_test.ts
+createTenant → getTenant round trip ...
+------- post-test output -------
+{
+  severity_local: "NOTICE",
+  severity: "NOTICE",
+  code: "42P07",
+  message: 'relation "tenants" already exists, skipping',
+  file: "parse_utilcmd.c",
+  line: "207",
+  routine: "transformCreateStmt"
+}
+{
+  severity_local: "NOTICE",
+  severity: "NOTICE",
+  code: "42P07",
+  message: 'relation "api_keys" already exists, skipping',
+  file: "parse_utilcmd.c",
+  line: "207",
+  routine: "transformCreateStmt"
+}
+{
+  severity_local: "NOTICE",
+  severity: "NOTICE",
+  code: "42P07",
+  message: 'relation "api_keys_key_hash_idx" already exists, skipping',
+  file: "index.c",
+  line: "896",
+  routine: "index_create"
+}
+----- post-test output end -----
+createTenant → getTenant round trip ... ok (168ms)
+getTenant on an unknown id fails UnknownTenant ... ok (12ms)
+duplicate slug is rejected with ConflictError ... ok (23ms)
+listTenants returns every tenant, oldest first ... ok (16ms)
+updateTenant patches the name; an empty patch is a no-op ... ok (25ms)
+updateTenant on an unknown id fails UnknownTenant ... ok (12ms)
+key plaintext is shown exactly once — the store keeps only the hash ... ok (29ms)
+resolveTenantByKeyHash round trip; unknown hash fails UnknownTenant ... ok (29ms)
+revoked key is rejected; revoking twice is a no-op ... ok (31ms)
+deactivateTenant revokes keys for real; inactive tenants reject keys and issuance ... ok (49ms)
+issueApiKey is atomic: unknown tenant fails without leaving a key row ... ok (14ms)
+parseTenantId accepts only canonical-lowercase UUIDs ... ok (30ms)
+running 1 test from ./tests/unit/trace_e2e_test.ts
+end to end: caller traces through the SDK, server and reader child ... ok (4s)
+running 12 tests from ./tests/unit/trace_test.ts
+one token bound everywhere: trace.ts, the reader receiver and the router's header ... ok (15ms)
+ingressTraceId: 1-128 of [A-Za-z0-9._:-] is kept; absent or anything else is None ... ok (1ms)
+withChildSpan: nested spans link to their parent; a root span has none; the trace is inherited ... ok (5ms)
+currentTraceContext: None outside a trace; non-token annotations are not propagated ... ok (1ms)
+concurrent fibers never see each other's span ... ok (42ms)
+ingress: the router accepts exactly what ingressTraceId accepts and always echoes ... ok (256ms)
+a mutation: http, handler, sql and tx events share the trace; the handler's span covers SQL ... ok (66ms)
+a rollback: the tx event, the handler's log line and its failure all carry the trace and span ... ok (50ms)
+a defect and an auth failure are still recorded under the request's trace ... ok (80ms)
+a query: the reader call is made from inside the handler span; a reader error keeps the trace ... ok (161ms)
+generated and replaced trace ids are what the events carry ... ok (109ms)
+overlapping mutations: every sql/tx event carries its own caller's trace, span and values ... ok (238ms)
+running 35 tests from ./tests/core_test.ts
+columns: create, complete game, aggregate wins, delete ... ok (224ms)
+columns: two competing moves cannot both commit ... ok (133ms)
+columns: rollback restores board, version, and move history ... ok (95ms)
+columns: invalid arguments and illegal moves are rejected ... ok (30ms)
+columns: quote-bearing strings stay data, not SQL ... ok (65ms)
+columns: standalone backup includes uncheckpointed WAL commits ... ok (84ms)
+columns: schema drift fails rather than silently migrating ... ok (52ms)
+json: create, complete game, aggregate wins, delete ... ok (133ms)
+json: two competing moves cannot both commit ... ok (80ms)
+json: rollback restores board, version, and move history ... ok (72ms)
+json: invalid arguments and illegal moves are rejected ... ok (18ms)
+json: quote-bearing strings stay data, not SQL ... ok (57ms)
+json: standalone backup includes uncheckpointed WAL commits ... ok (85ms)
+json: schema drift fails rather than silently migrating ... ok (55ms)
+each app file has its own data, even when IDs collide ... ok (114ms)
+same logical plan generates both dialects and both storage layouts ... ok (11ms)
+array predicates and unknown fields fail instead of falling back to JS scans ... ok (15ms)
+JSON numeric queries cast extracted values; null uses IS NULL ... ok (20ms)
+decoder normalizes DuckDB BIGINT results to safe JS numbers ... ok (12ms)
+schema compiler emits indexes for either physical layout ... ok (17ms)
+conformance (columns): StorageTest matches StorageLive step for step ... ok (350ms)
+conformance (json): StorageTest matches StorageLive step for step ... ok (323ms)
+conformance: a second snapshot onto the same path fails alike (VACUUM INTO refuses it) ... ok (67ms)
+conformance: known divergence 3, a lone surrogate (live, columns) ... ok (61ms)
+conformance: known divergence 3, a lone surrogate (live, json) ... ok (60ms)
+conformance: known divergence 3, a lone surrogate (double, columns) ... ok (21ms)
+conformance: known divergence 3, a lone surrogate (double, json) ... ok (21ms)
+conformance: the script is deterministic ... ok (115ms)
+conformance: a double with a planted divergence fails against StorageLive ... ok (392ms)
+StorageTest: ids from IdGen, _creationTime from TestClock ... ok (33ms)
+ReaderTest: reads what StorageTest committed, never what it has not ... ok (16ms)
+StorageTest: a leaked db handle expires with its transaction ... ok (10ms)
+ObjectStoreTest: copies bytes, validates keys, injects failures ... ok (14ms)
+EventSinkTest: records every event, queryable by kind ... ok (17ms)
+IdGenTest: id-1, id-2, … restarting per layer build ... ok (9ms)
+
+ ERRORS 
+
+catalog: names are derived from the record => ./tests/unit/analysis_catalog_test.ts:63:1
+error: AssertionError: Expected values to be strictly deep-equal:
++ actual - expected
+
+  [
+    'backup-history',
++   'deadline-hits-per-handler-hour',
+    'error-rate-by-handler',
+    'handler-throughput',
+    'k6-vs-platform',
+    'mutation-vs-query-latency',
+    'plan-shapes',
+
+  assert.deepEqual([...ANALYSIS_QUERY_NAMES].sort(), [
+         ^
+    at NodeTestContext.<anonymous> (file:///root/Software/tsdb-work/ffi06/tests/unit/analysis_catalog_test.ts:65:10)
+
+doc: the named queries section lists exactly the catalog names => ./tests/unit/analysis_catalog_test.ts:92:1
+error: AssertionError: Expected values to be strictly deep-equal:
++ actual - expected
+
+  [
+    'backup-history',
+-   'deadline-hits-per-handler-hour',
+    'error-rate-by-handler',
+    'handler-throughput',
+    'k6-vs-platform',
+    'mutation-vs-query-latency',
+    'plan-shapes',
+
+  assert.deepEqual([...documented].sort(), [...ANALYSIS_QUERY_NAMES].sort());
+         ^
+    at NodeTestContext.<anonymous> (file:///root/Software/tsdb-work/ffi06/tests/unit/analysis_catalog_test.ts:94:10)
+
+doc: every parameter of every catalog entry is documented under its query => ./tests/unit/analysis_catalog_test.ts:97:1
+error: AssertionError: deadline-hits-per-handler-hour: parameter since is not documented
+      assert.ok(body.includes(`\`${param}\``), `${name}: parameter ${param} is not documented`);
+             ^
+    at NodeTestContext.<anonymous> (file:///root/Software/tsdb-work/ffi06/tests/unit/analysis_catalog_test.ts:104:14)
+
+doc: every column of every event-log table is documented => ./tests/unit/analysis_catalog_test.ts:109:1
+error: AssertionError: sql_events.path is documented
+        assert.match(body, new RegExp(`^\\| \`${column}\`\\s+\\|`, "m"), `${table}.${column} is documented`);
+               ^
+    at NodeTestContext.<anonymous> (file:///root/Software/tsdb-work/ffi06/tests/unit/analysis_catalog_test.ts:133:16)
+
+AnalysisLive: every catalog query runs against an empty file and against the fixture => ./tests/unit/analysis_catalog_test.ts:248:1
+error: Error: Binder Error: table sql_events has 15 columns but 14 values were supplied
+    at <anonymous> (ext:core/01_core.js:1236:34)
+
+AnalysisLive: query results => ./tests/unit/analysis_catalog_test.ts:264:1
+error: Error: Binder Error: table sql_events has 15 columns but 14 values were supplied
+    at <anonymous> (ext:core/01_core.js:1236:34)
+
+AnalysisLive: trace is the ordered cross-process timeline without double-listing typed events => ./tests/unit/analysis_catalog_test.ts:328:1
+error: Error: Binder Error: table sql_events has 15 columns but 14 values were supplied
+    at <anonymous> (ext:core/01_core.js:1236:34)
+
+AnalysisLive: typed failures => ./tests/unit/analysis_catalog_test.ts:347:1
+error: Error: Binder Error: table sql_events has 15 columns but 14 values were supplied
+    at <anonymous> (ext:core/01_core.js:1236:34)
+
+guide: analysis query names belong to the landed catalog => ./tests/unit/docs_guide_test.ts:41:1
+error: AssertionError: guide must describe every catalog query exactly once
++ actual - expected
+
+  [
+    'backup-history',
+-   'deadline-hits-per-handler-hour',
+    'error-rate-by-handler',
+    'handler-throughput',
+    'k6-vs-platform',
+    'mutation-vs-query-latency',
+    'plan-shapes',
+
+  assert.deepEqual(
+         ^
+    at NodeTestContext.<anonymous> (file:///root/Software/tsdb-work/ffi06/tests/unit/docs_guide_test.ts:54:10)
+
+ FAILURES 
+
+catalog: names are derived from the record => ./tests/unit/analysis_catalog_test.ts:63:1
+doc: the named queries section lists exactly the catalog names => ./tests/unit/analysis_catalog_test.ts:92:1
+doc: every parameter of every catalog entry is documented under its query => ./tests/unit/analysis_catalog_test.ts:97:1
+doc: every column of every event-log table is documented => ./tests/unit/analysis_catalog_test.ts:109:1
+AnalysisLive: every catalog query runs against an empty file and against the fixture => ./tests/unit/analysis_catalog_test.ts:248:1
+AnalysisLive: query results => ./tests/unit/analysis_catalog_test.ts:264:1
+AnalysisLive: trace is the ordered cross-process timeline without double-listing typed events => ./tests/unit/analysis_catalog_test.ts:328:1
+AnalysisLive: typed failures => ./tests/unit/analysis_catalog_test.ts:347:1
+guide: analysis query names belong to the landed catalog => ./tests/unit/docs_guide_test.ts:41:1
+
+FAILED | 677 passed | 9 failed | 1 ignored (4m34s)
+
+error: Test failed

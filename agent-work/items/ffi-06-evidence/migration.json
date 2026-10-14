@@ -1,0 +1,17 @@
+{
+  "migration": "PASS",
+  "ddl_runs": 2,
+  "column": [
+    {
+      "column_name": "path",
+      "data_type": "VARCHAR",
+      "is_nullable": "YES"
+    }
+  ],
+  "existing_rows": [
+    {
+      "rows": "165",
+      "populated": "0"
+    }
+  ]
+}

@@ -87,7 +87,7 @@ export const EVENT_TABLE_DDL: Readonly<Record<EventTable, string>> = {
   engine VARCHAR,
   dialect VARCHAR, statement_kind VARCHAR,
   table_name VARCHAR, sql_text VARCHAR, bind_count INTEGER,
-  duration_ms DOUBLE, row_count BIGINT, outcome VARCHAR, error_tag VARCHAR
+  duration_ms DOUBLE, row_count BIGINT, outcome VARCHAR, error_tag VARCHAR, path VARCHAR
 )`,
   tx_events: `CREATE TABLE IF NOT EXISTS tx_events (
   event_id VARCHAR, ts TIMESTAMP, trace_id VARCHAR, app_id VARCHAR, engine VARCHAR,
@@ -178,6 +178,7 @@ export const EVENTLOG_DDL: readonly string[] = [
   SCHEMA_TABLE_DDL,
   VERSION_GUARD,
   ...EVENT_TABLES.map((table) => EVENT_TABLE_DDL[table]),
+  "ALTER TABLE sql_events ADD COLUMN IF NOT EXISTS path VARCHAR",
   INGEST_STATE_DDL,
   STAMP_VERSION,
 ];
