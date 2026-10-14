@@ -198,12 +198,12 @@ representative numbers):
 | Earlier continuation run | 1.38 / 1.35 / 1.39 | 6.84 / 22.48    | 7.60 / 24.01            | 42.60 / 208.36             | FAIL          | PASS (9.89)             |
 
 Every read run is retained in the evidence report; the quiet-host results supersede neither the historical
-failures nor the unchanged gate.
+strict-parity failures nor the amended gate's own runs.
 
 The committed research JSON (`deno-ffi-read.json`) has blocking 6.35 / 27.77 µs, node 8.66 / 34.18 µs and
 nonblocking 44.31 / 241.36 µs; its load file spans 3.30 → 4.93. `deno-ffi.json` has one interrupt at 0.408 ms
-with 95 ticks. A 50-sample tail is a different statistic from that single observation. No failed threshold is
-relaxed by these ports.
+with 95 ticks. A 50-sample tail is a different statistic from that single observation. Apart from the approved
+parity amendment (Nick, 2026-10-13; plan risk 19), no failed threshold is relaxed by these ports.
 
 `deno task integration` also drives a 50 ms deadline over real HTTP using two API-key tenants: 500,000 JSON
 games make `winsByMark`'s grouped count run past the deadline, while primary-key reads on the other tenant
