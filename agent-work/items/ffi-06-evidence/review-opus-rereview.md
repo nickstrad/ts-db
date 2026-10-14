@@ -9,17 +9,17 @@ The gate, the test fix and the validation all hold. Two sentences in `perf/READM
 pre-amendment state. Neither blocks landing.
 
 1. `perf/README.md:200-201`: "the quiet-host results supersede neither the historical failures nor the
-   **unchanged gate**." The gate is no longer unchanged: this commit amends it, and line 164 says so. Suggested
-   wording: "...nor the historical strict-parity failures."
+   **unchanged gate**." The gate is no longer unchanged: this commit amends it, and line 164 says so.
+   Suggested wording: "...nor the historical strict-parity failures."
 2. `perf/README.md:205-206`: "No failed threshold is relaxed by these ports." Since the amendment, the
-   node-parity threshold *is* relaxed (strict `<=` became `1.3x + 1 us`). The relaxation is human-approved and
-   its provenance is documented, but this sentence now contradicts lines 164-172. Suggested wording: "Apart from
-   the approved parity amendment, no failed threshold is relaxed."
+   node-parity threshold _is_ relaxed (strict `<=` became `1.3x + 1 us`). The relaxation is human-approved and
+   its provenance is documented, but this sentence now contradicts lines 164-172. Suggested wording: "Apart
+   from the approved parity amendment, no failed threshold is relaxed."
 
 Observation (not a defect): the quiet-host table's "Amended gate" column is computed from the old harness's
 JSON. Those runs exited 1 under strict parity. The claim that the amended harness "exits 0 on a quiet host"
-rests on runs of the amended harness: the fixup's run (7.72 vs 7.25, bound 10.43, load 1.25) and the one below.
-Both agree with the computed column.
+rests on runs of the amended harness: the fixup's run (7.72 vs 7.25, bound 10.43, load 1.25) and the one
+below. Both agree with the computed column.
 
 ## Checks
 
@@ -34,8 +34,8 @@ Both agree with the computed column.
 3. **Catalog test**: `r-w1` ends 16:00:10.000 with 100 ms duration, so the widened start is 09.899.
    - `d12` @ 09.899 is exactly 1 ms before the start, on the inclusive boundary: attributed.
    - `d13` @ 09.898 is 2 ms before the start, with the same trace: unattributed.
-   - `d14` @ 09.950 uses trace `dl-other`, the same app and the same span, with a NULL path. It tests the trace
-     predicate alone.
+   - `d14` @ 09.950 uses trace `dl-other`, the same app and the same span, with a NULL path. It tests the
+     trace predicate alone.
 
    The 11 -> 14 bump is the only existing line changed. Mutations were applied to scratch copies outside the
    repo; no repo file was edited.
@@ -51,7 +51,8 @@ Both agree with the computed column.
    - An earlier ci run, started while another agent's `deno test` was running (load 2.29), failed only
      `tests/unit/document_reader_test.ts:383` on its load-scaled timing bound (median 7.25 ms vs bound 5.33).
      That code is not in the delta, and it passed in the quiet rerun.
-   - `deno run -A perf/ffi_read_cost.ts` exit 0 at load 1.09 / 1.31 / 1.57. Results: node p50 / p99 7.09 / 32.00
-     us; FFI blocking 7.66 / 30.34 us (amended bound 10.22; PoC budget 10.2); nonblocking 56.96 / 481.45 us.
+   - `deno run -A perf/ffi_read_cost.ts` exit 0 at load 1.09 / 1.31 / 1.57. Results: node p50 / p99 7.09 /
+     32.00 us; FFI blocking 7.66 / 30.34 us (amended bound 10.22; PoC budget 10.2); nonblocking 56.96 / 481.45
+     us.
 5. **Scope**: the delta touches only `perf/ffi_read_cost.ts`, `perf/README.md`,
    `tests/unit/analysis_catalog_test.ts` and `agent-work/items/ffi-06-evidence/brief.md`.
