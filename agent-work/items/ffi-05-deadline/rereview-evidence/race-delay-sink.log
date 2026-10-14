@@ -1,0 +1,19 @@
+load [ 0.9208984375, 1.37939453125, 1.3798828125 ] mode [ "delay-sink" ]
+result { _id: "Exit", _tag: "Success", value: null }
+slow { _id: "Exit", _tag: "Success", value: 0 }
+late {
+  _id: "Exit",
+  _tag: "Failure",
+  cause: {
+    _id: "Cause",
+    _tag: "Fail",
+    failure: { context: "query", _tag: "ContextExpiredError" }
+  }
+}
+order [
+  [ "exec", "PRAGMA foreign_keys=ON" ],
+  [ "exec", "BEGIN TRANSACTION" ],
+  [ "sql", "ok" ],
+  [ "exec", "COMMIT" ],
+  [ "tx", "commit" ]
+]

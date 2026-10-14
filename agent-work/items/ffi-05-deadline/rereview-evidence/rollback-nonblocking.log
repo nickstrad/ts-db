@@ -1,0 +1,42 @@
+load [ 1.00732421875, 1.39013671875, 1.38330078125 ] mode [ "nonblocking" ]
+result {
+  _id: "Exit",
+  _tag: "Failure",
+  cause: {
+    _id: "Cause",
+    _tag: "Die",
+    defect: Error: review rollback trigger
+        at file:///tmp/claude-0/-root-Software-ts-db/4baa5237-5a2a-4889-84ed-3eddee24e601/scratchpad/rereview-reader-rollback.ts:48:33
+        at Generator.next (<anonymous>)
+        at file:///root/Software/tsdb-work/ffi05-rev2/node_modules/.deno/effect@3.22.2/node_modules/effect/src/internal/fiberRuntime.ts:198:67
+        at effect_internal_function (file:///root/Software/tsdb-work/ffi05-rev2/node_modules/.deno/effect@3.22.2/node_modules/effect/src/Utils.ts:779:12)
+        at Object.Iterator (file:///root/Software/tsdb-work/ffi05-rev2/node_modules/.deno/effect@3.22.2/node_modules/effect/src/internal/fiberRuntime.ts:198:21)
+        at FiberRuntime.Success (file:///root/Software/tsdb-work/ffi05-rev2/node_modules/.deno/effect@3.22.2/node_modules/effect/src/internal/fiberRuntime.ts:1185:37)
+        at file:///root/Software/tsdb-work/ffi05-rev2/node_modules/.deno/effect@3.22.2/node_modules/effect/src/internal/fiberRuntime.ts:1398:53
+        at Object.context (file:///root/Software/tsdb-work/ffi05-rev2/node_modules/.deno/effect@3.22.2/node_modules/effect/src/internal/tracer.ts:101:19)
+        at FiberRuntime.runLoop (file:///root/Software/tsdb-work/ffi05-rev2/node_modules/.deno/effect@3.22.2/node_modules/effect/src/internal/fiberRuntime.ts:1384:34)
+        at FiberRuntime.evaluateEffect (file:///root/Software/tsdb-work/ffi05-rev2/node_modules/.deno/effect@3.22.2/node_modules/effect/src/internal/fiberRuntime.ts:950:27)
+  }
+}
+slow { _id: "Exit", _tag: "Success", value: 0 }
+late {
+  _id: "Exit",
+  _tag: "Failure",
+  cause: {
+    _id: "Cause",
+    _tag: "Fail",
+    failure: { context: "query", _tag: "ContextExpiredError" }
+  }
+}
+order [
+  [ "exec", "PRAGMA foreign_keys=ON" ],
+  [ "exec", "BEGIN TRANSACTION" ],
+  [
+    "allAsync",
+    `SELECT COUNT(*) AS "count" FROM "t" WHERE json_extract("doc", '$.value') = ?`,
+    1202.695889
+  ],
+  [ "sql", "ok", undefined, 1291.543895 ],
+  [ "exec", "ROLLBACK" ],
+  [ "tx", "rollback", 1, 1293.087448 ]
+]
