@@ -2,6 +2,24 @@
 
 Dated decisions with rationale. Plans carry the _what_; this page carries the _why_. Newest first.
 
+## 2026-10-14 — Statement execution through the FFI binding, not `node:sqlite`
+
+Decision (plan `docs/plans/ffi-implementation.md`, ADR 0008): the API process opens every application SQLite
+file through `platform/sqlite_ffi/`, a `Deno.dlopen` binding over the system `libsqlite3`. `node:sqlite`
+leaves the server's module graph. Why: a synchronous `DatabaseSync` call cannot be stopped, so a long `count`
+held the event loop and the request could only fail by timeout while the statement kept running.
+`sqlite3_interrupt` can stop it. The cutover is one commit with no flag, because two copies of SQLite must
+never open one file in one process. Unbounded reads run under `STATEMENT_DEADLINE_MS` and fail HTTP 504 when
+they pass it. Point reads and writes stay synchronous and are never interrupted.
+
+## 2026-10-13 — Parity gate amended: blocking p50 within 1.3× of `node:sqlite` plus 1 µs
+
+Human decision (nickstrad, ~23:03 CDT, 2026-10-13, relayed through the coordinator). The plan's first read
+gate, "blocking p50 ≤ `node:sqlite` p50 in the same run", cannot be met by a per-step native call: four FFI
+crossings per read cost 3.5 to 6 % over node's single call. The gate is now
+`blocking p50 ≤ 1.3 × node p50 + 1 µs`, and it passes on the FFI-06 quiet-host runs. Strict parity is recorded
+as not met. The end-to-end HTTP point reads are faster than before the cutover. See ADR 0008 and plan risk 19.
+
 ## 2026-10-13 — Fresh agent and worktree for every unit
 
 Human decision: each build, review, repair/fixup, documentation follow-up, and side quest uses a newly spawned

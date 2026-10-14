@@ -41,19 +41,20 @@ also has fixture coverage. No live load-performance claim follows from that cove
 
 ## Start here to skim
 
-| File                          | What it demonstrates                                                                         |
-| ----------------------------- | -------------------------------------------------------------------------------------------- |
-| `app/schema.ts`               | The developer's schema builder: typed fields and indexes.                                    |
-| `app/functions.ts`            | All application code: create/move/delete mutations, reads, grouped statistics. No SQL.       |
-| `sdk/db.ts`                   | Document operations become an engine-neutral query plan.                                     |
-| `core/compile/`               | Schema to DDL; query plan to dialect-specific SQL; document writes to SQL; row decoding.     |
-| `platform/sqlite.ts`          | Per-app mutation serialization and SQLite transactions, including mutation-internal reads.   |
-| `platform/document_reader.ts` | In-process read-only SQLite connections for document queries, with a concurrency cap.        |
-| `platform/server.ts`          | Server entrypoint: scoped listener, backup and ingest-then-sweep timers, signal shutdown.    |
-| `platform/layers.ts`          | `PlatformLive`: the server's ordered layer chain (config, logging, per-app storage, reader). |
-| `platform/http/`              | Router, auth, handlers, and the `X-Trace-Id` / span contract (`trace.ts`).                   |
-| `platform/reader.ts`          | Reader child entrypoint; its layer root is `platform/reader_layers.ts`.                      |
-| `platform/backup.ts`          | Consistent SQLite snapshot, checksum, immutable object, latest manifest.                     |
+| File                          | What it demonstrates                                                                               |
+| ----------------------------- | -------------------------------------------------------------------------------------------------- |
+| `app/schema.ts`               | The developer's schema builder: typed fields and indexes.                                          |
+| `app/functions.ts`            | All application code: create/move/delete mutations, reads, grouped statistics. No SQL.             |
+| `sdk/db.ts`                   | Document operations become an engine-neutral query plan.                                           |
+| `core/compile/`               | Schema to DDL; query plan to dialect-specific SQL; document writes to SQL; row decoding.           |
+| `platform/sqlite.ts`          | Per-app mutation serialization and SQLite transactions, including mutation-internal reads.         |
+| `platform/document_reader.ts` | In-process read-only SQLite connections for document queries, with a concurrency cap.              |
+| `platform/sqlite_ffi/`        | FFI binding over the system `libsqlite3`: blocking point reads and writes, deadline-bounded reads. |
+| `platform/server.ts`          | Server entrypoint: scoped listener, backup and ingest-then-sweep timers, signal shutdown.          |
+| `platform/layers.ts`          | `PlatformLive`: the server's ordered layer chain (config, logging, per-app storage, reader).       |
+| `platform/http/`              | Router, auth, handlers, and the `X-Trace-Id` / span contract (`trace.ts`).                         |
+| `platform/reader.ts`          | Reader child entrypoint; its layer root is `platform/reader_layers.ts`.                            |
+| `platform/backup.ts`          | Consistent SQLite snapshot, checksum, immutable object, latest manifest.                           |
 
 `GENERATED_SQL.txt` shows actual compiler output for the two layouts and two dialects.
 `deno task explain > GENERATED_SQL.txt` regenerates it without running either database engine.
@@ -126,7 +127,7 @@ TypeScript client / browser
      v
 Deno process 1: HTTP API + SQLite document reads/writes + backup and ingest timers
      |                  |
-     | node:sqlite      | JSON-lines RPC over stdin/stdout (ping, ingest, analysis)
+     | libsqlite3 (FFI) | JSON-lines RPC over stdin/stdout (ping, ingest, analysis)
      v                  v
 app.sqlite          Deno process 2: DuckDB event-log ingest + named analysis
      |                  |
@@ -143,17 +144,20 @@ DuckDB file is the **derived** event-log file written by the reader's ingest fro
 (`EVENTLOG_DUCKDB`, default `<DATA_DIR>/eventlog.duckdb`); the server never opens it. See "Observability and
 the event log" below.
 
-The server uses `node:sqlite` for document reads and writes. The separate reader child remains responsible for
-DuckDB event-log ingest and named analysis. Keeping DuckDB in its own process also avoids loading its SQLite
-extension alongside `node:sqlite` in one process. Deno Workers/threads are not substituted for that OS-process
-boundary.
+The server opens every application SQLite file through the FFI binding in `platform/sqlite_ffi/`, which calls
+the system `libsqlite3`; the server does not load `node:sqlite`. The separate reader child remains responsible
+for DuckDB event-log ingest and named analysis. Keeping DuckDB in its own process also keeps DuckDB's SQLite
+extension out of the API process, so the server never opens one database file through two SQLite copies (ADR
+0008). Deno Workers/threads are not substituted for that OS-process boundary.
 
 ## Run
 
-Use a recent Deno 2 runtime (Deno 2.2+ includes `node:sqlite`; a current Deno 2 release is the intended
-target). The native DuckDB npm module needs local `node_modules` plus FFI permission. `nodeModulesDir: auto`
-and the local demo's `-A` cover those requirements. Dependencies and the DuckDB `sqlite` extension need
-network access on first use. This is native Deno, not a browser-WASM example or an edge-runtime deployment.
+Use a recent Deno 2 runtime (a current Deno 2 release is the intended target). The server's FFI binding needs
+a system `libsqlite3` of 3.37.0 or newer; set `SQLITE_LIBRARY` to its path when the default search order picks
+a different copy (vm-1 has two). The native DuckDB npm module needs local `node_modules` plus FFI permission.
+`nodeModulesDir: auto` and the local demo's `-A` cover those requirements. Dependencies and the DuckDB
+`sqlite` extension need network access on first use. This is native Deno, not a browser-WASM example or an
+edge-runtime deployment.
 
 From this directory:
 
@@ -266,13 +270,14 @@ clients cannot patch metadata. Arguments and writes also receive runtime validat
   `tests/unit/number_dialects_test.ts`: a database created before item 30 keeps its old bare `json_extract`
   index on a json-layout number field (results stay correct; drop and recreate the `idx_*` to use it again),
   and the DuckDB bind path throws for integral numbers with `|x| >= 2^63` in either layout.
-- **Embedded NUL.** `node:sqlite` binds U+0000 intact but truncates TEXT at it on read, so an accepted string
-  could commit and read back as a different value. Item 31 rejects it before commit (ADR 0005): a string or
-  enum field value (at any array depth), a `get`/`patch`/`delete` id or a filter value containing U+0000 fails
-  with `SchemaError { reason: "type-mismatch", expected: "text without U+0000" }`, and an `IdGen` id
-  containing it fails as a `StorageError`. Nothing runs, so nothing is written. Reading a row that already
-  holds NUL text (written before the contract) fails with a `StorageError` instead of returning a truncated
-  value. Both layouts and both `Storage` implementations apply the same rules.
+- **Embedded NUL.** Before FFI-04, `node:sqlite` truncated TEXT at U+0000 on read, so an accepted string could
+  commit and read back as a different value; the FFI binding returns the whole string, but the rule stays.
+  Item 31 rejects it before commit (ADR 0005): a string or enum field value (at any array depth), a
+  `get`/`patch`/`delete` id or a filter value containing U+0000 fails with
+  `SchemaError { reason: "type-mismatch", expected: "text without U+0000" }`, and an `IdGen` id containing it
+  fails as a `StorageError`. Nothing runs, so nothing is written. Reading a row that already holds NUL text
+  (written before the contract) fails with a `StorageError` instead of returning a truncated value. Both
+  layouts and both `Storage` implementations apply the same rules.
 
 ## Two physical layouts, same logical schema
 
@@ -300,8 +305,10 @@ atomic. If validation or game logic throws, both roll back. Concurrent move atte
 Public `query` handlers execute in the server process with a read-only SQLite connection to the app's file (or
 the authenticated tenant's file). Each handler has its own connection and read transaction, without taking the
 Storage writer semaphore. A separate semaphore caps concurrent document reads at 32. Handlers have independent
-snapshots; connections close on success, failure, interruption, or the configured deadline. Ingest, analysis,
-and ping still use the supervised DuckDB reader child over IPC.
+snapshots; connections close on success, failure, or interruption. A `count`, `countBy` or any `select` that
+is not a primary-key lookup runs under `STATEMENT_DEADLINE_MS`: past the deadline the statement is interrupted
+and the request fails with HTTP 504 (`StatementDeadlineError`). Primary-key reads and writes are never
+interrupted. Ingest, analysis, and ping still use the supervised DuckDB reader child over IPC.
 
 The mutation response returns the locally committed game immediately. DuckDB is never used to make
 transactional write decisions. There is no second data copy that needs to catch up. This does not establish a
@@ -487,8 +494,9 @@ have no automatic retry or idempotency key, so a network timeout can leave an un
 
 Legacy mode uses one writer connection per app; tenancy leases writers from a bounded per-app handle cache.
 The reader child remains shared for event-log ingest and named analysis. This demonstrates the design without
-establishing capacity. SQLite's synchronous API and snapshot creation can block the API event loop. There are
-queue-size and result-size caps but no complete deadline/cancellation, overload, restart, or
+establishing capacity. Primary-key reads, writes and snapshot creation run synchronously on the API event loop
+and cannot be interrupted; every other document read runs under `STATEMENT_DEADLINE_MS` (default 5 s) and is
+interrupted at the deadline. There are queue-size and result-size caps but no overload, restart, or
 resource-governance policy. Avoid network I/O or long-running work inside mutation handlers. All long-lived
 processes must remain on one local filesystem; object storage is a backup target, not a mounted live SQLite
 volume.

@@ -1,8 +1,9 @@
 # Container — request path
 
 Audited against landed main `643b706` on 2026-10-11 (item 27); re-checked for FFI-01 to FFI-05 at `f2bf1c9` on
-2026-10-14. Both formats are generated from `diagrams/c4-container-platform.py`; numbered relationships are
-identical. All boxes describe landed code.
+2026-10-14, and re-audited at `aa26b27` (FFI-06 and FFI-07 change no element here; FFI-08 changes none). Both
+formats are generated from `diagrams/c4-container-platform.py`; numbered relationships are identical. All
+boxes describe landed code.
 
 ```mermaid
 flowchart TB
