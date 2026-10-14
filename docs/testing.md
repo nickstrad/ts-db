@@ -48,15 +48,16 @@ double alone cannot prove native SQL, filesystem, IPC or process cleanup behavio
 
 ## FFI binding properties
 
-Generator-driven invariants for the SQLite FFI binding (`platform/sqlite_ffi/`), all in `deno task test:prop`
-(the task globs `tests/property/`). The two `tests/property/` suites use seed 20261010 unless `PROP_SEED` is
-set; the run count is in each test name.
+Generator-driven invariants for the SQLite FFI binding (`platform/sqlite_ffi/`). The two `tests/property/`
+suites run in `deno task test:prop` (the task globs `tests/property/`) and use seed 20261010 unless
+`PROP_SEED` is set; the run count is in each test name. The classifier property is a unit test (last row) and
+runs in `deno task test`.
 
-| Suite                                  | What it pins                                                                                                                                                                                                                                                                                                                                                   | Runs                                         |
-| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
-| `tests/property/ffi_roundtrip_test.ts` | `bind -> step -> column` of text (U+0000, lone surrogates), int64 (`bigint`), doubles, blobs and NULL equals `node:sqlite` on a separate `:memory:` database. Named differences: U+0000 text comes back whole (ADR 0005), integral doubles bind as INTEGER, `-0` binds as INTEGER 0, `NaN` is NULL in both drivers. Also unsafe-integer and unbindable values. | 3 properties x 200, plus one edge-value test |
-| `tests/property/ffi_interrupt_test.ts` | Interrupt totality: a random statement and a 0-50 ms `timeoutMs` / `AbortSignal` / both / `Effect.timeout` ends in its rows or its promised cancellation, never hangs (15 s guard fails the test), and the connection answers the next statement.                                                                                                              | 200 iterations, 1 test                       |
-| `tests/unit/ffi_classify_test.ts`      | The statement classifier property (FFI-05): `bounded <=> (_id eq filter present and no aggregate)` over 2 000 generated `SelectPlan`s, plus writes always bounded. Lives in the unit suite (`deno task test`, not the seeded harness: fast-check picks a fresh seed each run), not duplicated here.                                                            | 2 000 and 500                                |
+| Suite                                  | What it pins                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Runs                                         |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| `tests/property/ffi_roundtrip_test.ts` | `bind -> step -> column` of text (U+0000, lone surrogates), int64 (`bigint`), doubles, blobs and NULL equals `node:sqlite` on a separate `:memory:` database. Named differences: U+0000 text comes back whole (ADR 0005), integral doubles bind as INTEGER, `-0` binds as INTEGER 0, `NaN` is NULL in both drivers. Also unsafe-integer and unbindable values.                                                                                                    | 3 properties x 200, plus one edge-value test |
+| `tests/property/ffi_interrupt_test.ts` | Interrupt totality: a random statement and a 0-50 ms `timeoutMs` / `AbortSignal` / both / `Effect.timeout` ends in its rows or its promised cancellation, never hangs (a 15 s guard around the whole iteration, recovery probes included, fails the test), and the connection answers the next statement. A close failure or a close that outlives a 1 s grace fails the test; a native step that cannot be stopped is reported and the process killed (SIGKILL). | 200 iterations, 1 test                       |
+| `tests/unit/ffi_classify_test.ts`      | The statement classifier property (FFI-05): `bounded <=> (_id eq filter present and no aggregate)` over 2 000 generated `SelectPlan`s, plus writes always bounded. Lives in the unit suite (`deno task test`, not the seeded harness: fast-check picks a fresh seed each run), not duplicated here.                                                                                                                                                               | 2 000 and 500                                |
 
 The oracle never opens the binding's file: the two SQLite copies in one process must not share a file
 (`docs/knowledge/gotchas.md`). Sweep one file over seeds, three at a time (keep it off a loaded host):
@@ -66,7 +67,13 @@ bash work-scripts/bash/property-seed-sweep.sh tests/property/ffi_roundtrip_test.
 bash work-scripts/bash/property-seed-sweep.sh tests/property/ffi_interrupt_test.ts - 1 200
 ```
 
-A seed that fails fails every time (replay with `PROP_SEED=<n>`); only exit 139 is run-to-run intermittent.
+A seed fixes the generated inputs, so a failing counterexample replays with `PROP_SEED=<n>` for the round-trip
+suite and for every input-only failure. It does not fix scheduling: the interrupt suite races a wall-clock
+delay against a running statement, so the same inputs can end in rows on one run and in a cancellation on
+another, and a failure that depends on timing or host load can recur only under similar load. Its failure
+reports therefore carry the iteration's inputs, phase, elapsed time and the load average, and its coverage
+line records the load; read them before concluding a seed is "good" or "bad". Exit 139 (the DuckDB teardown
+flake) is the other run-to-run intermittent outcome.
 
 ## Integration and MT-10 gate
 
