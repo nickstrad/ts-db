@@ -130,8 +130,7 @@ export interface SqlPayload {
   readonly errorDetail?: unknown;
   /**
    * The SQLite step path (FFI-05); set on every event the writer and the document reader emit.
-   * Not yet in the JSONL line: `toJsonLine` writes only the keys `KIND_KEYS` lists, and the
-   * `sql_events` column arrives with FFI-06.
+   * Persisted in JSONL and the nullable `sql_events.path` column (FFI-06).
    */
   readonly path?: SqlPath;
 }
@@ -357,6 +356,7 @@ const KIND_KEYS: Record<EventRecord["kind"], readonly string[]> = {
     "engine",
     "dialect",
     "statementKind",
+    "path",
     "tableName",
     "sqlText",
     "bindCount",

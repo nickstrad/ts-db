@@ -126,3 +126,96 @@ As the repo README states under "Deliberate limits": this is a local, trusted-ap
 writer connection per app and one shared serial reader process, "enough to expose the design, not to establish
 capacity." Treat `smoke.js` as a functional/regression check against the live HTTP surface, not as a capacity
 or performance claim about this system.
+
+## FFI production-binding harnesses
+
+Run each harness independently on a quiet host; each prints JSON and fails its acceptance gates with a nonzero
+exit. These are ports of `origin/research/fable-lang-switch:work-scripts/deno/ffi-sqlite-*.ts`, using the
+landed `Database`/`Statement` API. The read-cost and interrupt reports retain the PoC's top-level metric keys,
+with `loadavg` (1/5/15 minutes) added.
+
+```sh
+deno run -A perf/ffi_read_cost.ts
+deno run -A perf/ffi_interrupt.ts
+deno run -A perf/ffi_cap.ts
+```
+
+`ffi_read_cost.ts` measures 20,000 reused-statement point reads per path on identical 1,000-row WAL files. The
+binding and `node:sqlite` each own a separate file. Blocking rounds alternate order, and result correctness is
+checked outside the measured interval. Bind arrays and expected TEXT are precomputed; both blocking paths and
+the nonblocking path get 2,000 excluded warm-ups. Both public APIs receive the same numeric values: Statement
+takes the reused array and node:sqlite takes its spread values. Gates: blocking p50 ≤ 10.2 µs (6.8 × 1.5) and
+≤ same-run node p50; nonblocking p50 ≤ 100 µs and p99 ≤ 3,000 µs.
+
+`ffi_interrupt.ts` runs 50 one-second unbounded counts and aborts each through the binding's signal bridge. It
+measures abort → typed `SqliteCancelled` settlement, including reset. Each sample has the PoC fields; the
+top-level sample is the slowest interrupt. Gates: interrupt p99 ≤ 20 ms and at least 90 ten-millisecond timer
+ticks in each window.
+
+`ffi_cap.ts` submits 32 unbounded counts in one main-thread turn, each on its own temp file and connection,
+via `Statement.allAsync(undefined, { timeoutMs: 50 })`. Every cancellation must have reason `deadline` and
+finish within 100 ms from its own submission. Cleanup awaits all connections before removing the scratch
+directory.
+
+Measured on vm-1, Deno 2.9.5, 2026-10-14:
+
+| Measurement              | Result                                       | Load 1/5/15        | Gate                                                 |
+| ------------------------ | -------------------------------------------- | ------------------ | ---------------------------------------------------- |
+| Blocking read p50/p99    | 8.96 / 37.18 µs; node 8.28 / 34.65 µs        | 1.84 / 2.08 / 2.78 | PoC budget passes; strict same-run node parity fails |
+| Nonblocking read p50/p99 | 49.52 / 419.00 µs                            | same read run      | Pass                                                 |
+| Interrupt p99            | 6.114 ms; minimum 92 ticks across 50 windows | 2.09 / 2.13 / 2.79 | Pass (50/50 windows)                                 |
+| 32-reader cap            | 32/32 deadline cancellations; max 71.050 ms  | 2.09 / 2.13 / 2.79 | Pass (≤ 100 ms each)                                 |
+
+Quiet-host continuation (same date, fair harness above), 20,000 samples per path per run. All three runs exit
+1 on **strict same-run node parity: FAILING**. All three absolute blocking and nonblocking budgets pass. No
+threshold or binding code was changed.
+
+| Run | Load 1/5/15        | node p50/p99 µs | FFI blocking p50/p99 µs | FFI nonblocking p50/p99 µs | Strict parity |
+| --- | ------------------ | --------------- | ----------------------- | -------------------------- | ------------- |
+| 1   | 0.50 / 1.35 / 1.76 | 6.93 / 28.00    | 7.35 / 29.97            | 43.85 / 322.94             | FAIL          |
+| 2   | 0.70 / 1.38 / 1.77 | 7.21 / 29.24    | 7.64 / 29.66            | 47.56 / 745.04             | FAIL          |
+| 3   | 0.70 / 1.38 / 1.77 | 7.10 / 29.19    | 7.57 / 31.80            | 47.80 / 480.43             | FAIL          |
+
+Earlier run at load 1.38 / 1.35 / 1.39: blocking p50/p99 7.60 / 24.01 µs versus node 6.84 / 22.48 µs;
+nonblocking 42.60 / 208.36 µs. Strict parity failed; absolute/NB budgets passed. The previous final run (8.96
+versus 8.28 µs) is in the measurement table above. Every read run is retained in the evidence report;
+quiet-host results supersede neither historical failures nor the unchanged gate.
+
+The committed research JSON (`deno-ffi-read.json`) has blocking 6.35 / 27.77 µs, node 8.66 / 34.18 µs and
+nonblocking 44.31 / 241.36 µs; its load file spans 3.30 → 4.93. `deno-ffi.json` has one interrupt at 0.408 ms
+with 95 ticks. A 50-sample tail is a different statistic from that single observation. No failed threshold is
+relaxed by these ports.
+
+`deno task integration` also drives a 50 ms deadline over real HTTP using two API-key tenants: 500,000 JSON
+games make `winsByMark`'s grouped count run past the deadline, while primary-key reads on the other tenant
+remain responsive. It prints point-read p99, host load and its `50 × max(1, load1 / CPU count)` budget. It
+uses an isolated database created on the dev Postgres (`DATABASE_URL`, default
+`postgres://tsdb:tsdb@localhost:5432/tsdb`) and drops it on exit. After server shutdown it runs `logs:ingest`
+and `logs:query deadline-hits-per-handler-hour`, asserting the deadline rows have `path = 'nonblocking'`. Old
+JSONL without `path` projects NULL; ingest adds the column idempotently to existing v2 event logs.
+
+Final integration run: 20/20 HTTP 504 responses; 153 competing point reads, p99 **22.10 ms** against a 50 ms
+budget at load 1.79 / 2.09 / 2.81. `logs:ingest` accepted **762 lines**, rejected zero;
+`logs:query deadline-hits-per-handler-hour --format json` returned:
+
+```json
+{
+  "app_id": "tic-tac-toe-json",
+  "handler_kind": "query",
+  "name": "winsByMark",
+  "path": "nonblocking",
+  "deadline_hits": 20
+}
+```
+
+An earlier interrupt run overlapped the FFI-07 seed sweep and failed the tick gate (minimum 61 ticks); its
+latency p99 was 6.293 ms. Both runs are retained under `agent-work/items/ffi-06-evidence/`. A scratch old-v2
+migration check ran the DDL twice and preserved 165 SQL rows with NULL paths.
+
+Continuation integration after the correlation repair: 20/20 HTTP 504 responses, 181 competing point reads,
+p99 **16.44 ms** against 50 ms at load 2.13 / 2.38 / 2.13; ingest **874 lines**, zero rejects. The catalog
+again returned winsByMark / nonblocking / 20 deadline hits. The first continuation attempt failed catalog
+attribution (19 matched, one unmatched) because its SQL timestamp was 1 ms after the HTTP completion
+timestamp. The join now allows the documented 1 ms rounding at both request-window boundaries. The repaired
+query also returns all 20 matched hits against that attempt's retained database; its failure remains in the
+evidence.

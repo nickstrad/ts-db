@@ -72,7 +72,7 @@ test("sql event: golden fixture (bind values withheld by default)", () => {
     outcome: "ok",
   });
   const expected =
-    '{"eventId":"evt-1","ts":"2026-10-10T12:00:00.000Z","level":"info","role":"server","pid":4242,"traceId":"trace-1","spanId":"span-1","parentSpanId":"span-0","appId":"app-1","kind":"sql","engine":"sqlite","dialect":"sqlite","statementKind":"select","tableName":"games","sqlText":"SELECT * FROM games WHERE id = ?","bindCount":1,"bindValues":null,"durationMs":0.8,"rowCount":1,"outcome":"ok","errorTag":null,"errorDetail":null}';
+    '{"eventId":"evt-1","ts":"2026-10-10T12:00:00.000Z","level":"info","role":"server","pid":4242,"traceId":"trace-1","spanId":"span-1","parentSpanId":"span-0","appId":"app-1","kind":"sql","engine":"sqlite","dialect":"sqlite","statementKind":"select","path":null,"tableName":"games","sqlText":"SELECT * FROM games WHERE id = ?","bindCount":1,"bindValues":null,"durationMs":0.8,"rowCount":1,"outcome":"ok","errorTag":null,"errorDetail":null}';
   assert.equal(toJsonLine(record), expected);
 });
 

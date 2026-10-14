@@ -382,6 +382,7 @@ const TYPED_COLUMNS: Readonly<Record<keyof typeof TYPED_EVENT_TABLES, TableInser
     ["engine", textOf("engine")],
     ["dialect", textOf("dialect")],
     ["statement_kind", textOf("statementKind")],
+    ["path", textOf("path")],
     ["table_name", textOf("tableName")],
     ["sql_text", textOf("sqlText")],
     ["bind_count", intOf("bindCount", "INTEGER")],

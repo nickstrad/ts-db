@@ -64,6 +64,7 @@ test("catalog: names are derived from the record", () => {
   assert.deepEqual([...ANALYSIS_QUERY_NAMES], Object.keys(CATALOG));
   assert.deepEqual([...ANALYSIS_QUERY_NAMES].sort(), [
     "backup-history",
+    "deadline-hits-per-handler-hour",
     "error-rate-by-handler",
     "handler-throughput",
     "k6-vs-platform",
@@ -222,7 +223,8 @@ async function fixture(sql: (text: string) => Promise<unknown>): Promise<void> {
     ('p-reader', '2026-10-10 12:00:06', 'info', 'reader', 2, '${TRACE}', 's4', 's2', 'app1', 'handler', 'query', 'get', 'ok', NULL, 1.0, NULL),
     ('p-other', '2026-10-10 12:00:07', 'info', 'server', 1, 'other', 's5', NULL, 'app1', 'handler', 'query', 'get', 'ok', NULL, 1.0, NULL),
     ('p-slow', '2026-10-10 12:00:30', 'info', 'server', 1, 't2', 's6', NULL, 'app1', 'handler', 'mutation', 'play', 'error', 'MutationError', 30.0, NULL)`);
-  await sql(`INSERT INTO sql_events VALUES
+  await sql(`INSERT INTO sql_events (event_id, ts, trace_id, app_id, engine, dialect, statement_kind,
+    table_name, sql_text, bind_count, duration_ms, row_count, outcome, error_tag) VALUES
     ('p-sql', '2026-10-10 12:00:05', '${TRACE}', 'app1', 'sqlite', 'sqlite', 'insert', 'games', 'INSERT INTO games VALUES (?)', 1, 1.0, 1, 'ok', NULL),
     ('s-b', '2026-10-10 12:00:10', 't9', 'app1', 'sqlite', 'sqlite', 'insert', 'games', 'INSERT INTO games VALUES (?)', 1, 3.0, 1, 'ok', NULL),
     ('s-c', '2026-10-10 12:00:11', 't9', 'app1', 'duckdb', 'duckdb', 'select', 'games', 'SELECT * FROM games', 0, 7.0, 4, 'ok', NULL)`);
@@ -252,7 +254,12 @@ test("AnalysisLive: every catalog query runs against an empty file and against t
       assert.deepEqual(await runQuery(dbPath, (a) => a.run(name, params)), [], `${name} on an empty file`);
     }
   });
-  await withFixture(fixture, async (dbPath) => {
+  await withFixture(async (sql) => {
+    await fixture(sql);
+    // This query only returns deadline events; the shared fixture has none.
+    await sql(`INSERT INTO sql_events (event_id, ts, trace_id, app_id, error_tag, path) VALUES
+      ('s-deadline', '2026-10-10 12:00:19.990', 't2', 'app1', 'StatementDeadlineError', 'nonblocking')`);
+  }, async (dbPath) => {
     for (const name of ANALYSIS_QUERY_NAMES) {
       const params = name === "trace" ? { traceId: TRACE } : {};
       const rows = await runQuery(dbPath, (a) => a.run(name, params));

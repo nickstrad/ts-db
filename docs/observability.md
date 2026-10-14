@@ -96,6 +96,7 @@ One row per SQL statement run by either engine.
 | `row_count`      | BIGINT    | Rows returned or changed.                                                                                                |
 | `outcome`        | VARCHAR   | `ok` or `error`.                                                                                                         |
 | `error_tag`      | VARCHAR   | Failure tag when `outcome = 'error'`.                                                                                    |
+| `path`           | VARCHAR   | SQLite execution path: `blocking` or `nonblocking`; NULL in older logs.                                                  |
 
 ### `tx_events`
 
@@ -253,6 +254,15 @@ The catalog lives in `platform/analysis/catalog.ts` as a plain record of `{ sql,
 added that way). This section and the catalog are kept in step by `tests/unit/analysis_catalog_test.ts`, which
 fails if a name or parameter is documented here and absent there, or the reverse. Every entry is a single
 `SELECT`/`WITH`, also asserted by that test.
+
+### `deadline-hits-per-handler-hour`
+
+**Question:** how many statements hit their deadline per app, handler and UTC hour? Returns `hour`, `app_id`,
+`handler_kind`, `name`, `path` and `deadline_hits`. Joins deadline-tagged `sql_events` to the nearest
+completing request by trace, app and request time window (one match per SQL event, including millisecond
+timestamp rounding at both window boundaries). Parameters: `since`, `until`, `appId` (all optional). Failed
+statements are logged even without `TRACE_SQL`; execution paths in older JSONL are NULL. Ingest adds the
+nullable `path` column to existing v2 event logs.
 
 ### `slowest-sql`
 
