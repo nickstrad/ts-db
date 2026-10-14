@@ -57,3 +57,11 @@ Separate `agent-work: add FFI-08 brief` commit. Push `item/ffi-08-docs`; do not 
 `task_completed`. Final output: commit SHA(s), the check outputs, the list of docs changed and why, any code-side
 hand-offs (for example the stale `statementDeadlineMs` description in `platform/config.ts` that still says "once
 FFI-05 lands" — you may NOT edit it; name it), learning assessment.
+
+## Fixup (haiku-ffi-08-fixup)
+
+Astra review at `caf1efe` returned NITS (review-astra.md, on `origin/review/ffi-08-astra`). Fixed in `bba6f7f`:
+the `docs/knowledge/gotchas.md` tenant boundary entry is marked superseded (2026-10-14) with the current FFI and
+in-process document query boundary; the strict-parity overhead is approximately 6.0 to 6.6 % in ADR 0008 and
+`decisions.md`; ADR 0008 separates the same-run parity ratio from the absolute gate budgets, with load recorded.
+`perf/README.md` still carries the old percentage and is a coordinator hand-off. Delta review pending; no landing.
