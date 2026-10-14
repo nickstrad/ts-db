@@ -43,3 +43,13 @@ header plus a `TRACE_SQL=false` pass; (8) upgrade note in docs/observability.md.
 exit 0 (687 unit, 79 property), `deno task integration` exit 0 (157 reads, p99 18.67 ms at load 2.19; second
 pass 3/3 deadline events without TRACE_SQL), `perf/ffi_interrupt.ts` exit 0 on the third run (the first two
 failed only the load-fragile tick gate at min 88 and 50 ticks while other agents were running).
+
+## Gate fixup and final NIT
+
+Actor `claude-sonnet-ffi-06-fixup2`. (1) `perf/ffi_read_cost.ts` and `perf/README.md` now encode the amended
+parity gate, blocking p50 <= 1.3 x node:sqlite p50 + 1 us (Nick, 2026-10-13; plan risk 19); the harness exits 0 on
+a quiet host (7.72 vs node 7.25 us, bound 10.43, load 1.25). (2) Astra's re-review NIT closed in
+`tests/unit/analysis_catalog_test.ts`: new fixtures vary trace and time independently (a different-trace event
+inside a same-app request window; events 1 ms and 2 ms before a request starts). Scratch mutations of the catalog
+query confirm the test fails with the trace match removed and, separately, with the lower bound removed, and passes
+unmutated. Validation: fmt --check, lint, check clean; full `deno task test` 687 passed, 0 failed.
