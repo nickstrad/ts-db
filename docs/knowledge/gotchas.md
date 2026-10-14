@@ -121,11 +121,20 @@ wrong backend. (2026-10-11)
 
 ## 2026-10-11 — MT-07 tenant reader and preparation boundary
 
-Tenant queries carry a writer-resolved location over private IPC; no path or tenant id is copied from HTTP
-arguments. Do not import `platform/tenants/routing.ts` in the reader: it loads `node:sqlite` and would violate
-the two-native-libraries process boundary. The pure UUID parser lives in `registry.ts`. Tenant readers are
-scoped to one query for now; a bounded, leased tenant reader pool is a performance follow-up, not a reason to
-fall back to the legacy app file.
+> **Superseded 2026-10-14 (FFI-08).** The boundary below is no longer current. Original account (2026-10-11):
+> tenant queries carried a writer-resolved location over private IPC, and `platform/tenants/routing.ts` loaded
+> `node:sqlite`, so it must not be imported in the reader. Current state: `platform/tenants/routing.ts`
+> imports the FFI binding (`platform/sqlite_ffi/`), and no file under `platform/` imports `node:sqlite`
+> (`tests/unit/boundaries_test.ts`). Document queries are intercepted in-process by `DocumentReaderClientLive`
+> (`platform/layers.ts`, `platform/document_reader.ts`): they open a read-only FFI connection per handler in
+> the server process and never cross IPC. Ingest and analysis still go to the reader child over IPC. The
+> location the reader uses is still the writer-resolved tenant file, validated in the reader (absolute path,
+> parseable tenant id); no path or tenant id is taken from HTTP arguments. See ADR 0008 for the current
+> two-copies and threading rules.
+
+Original account, kept for history: no path or tenant id is copied from HTTP arguments. The pure UUID parser
+lives in `registry.ts`. Tenant readers are scoped to one query for now; a bounded, leased tenant reader pool
+is a performance follow-up, not a reason to fall back to the legacy app file.
 
 Writer initialization and query preparation must share the same successful-preparation barrier. Calling
 `router.prepare` again on every query takes `BEGIN IMMEDIATE` on a second connection and can block the writer
@@ -290,3 +299,25 @@ forked read queued behind an in-flight read"):
   the native call fails `SqliteUsageError` `"busy"`. Call the driver inside `start` and return
   `Effect.succeed(result)`; `tests/unit/storage_test.ts` ("a blocking start does its native work before
   returning") makes that window deterministic with a hand-off to a competing `nonblocking` claim.
+
+## 2026-10-14 — FFI-07 and FFI-08: binding facts the other driver hides
+
+Found by FFI-07's round-trip property and the FFI-08 docs pass. Each one is pinned by a test or read from the
+code.
+
+- **`-0` binds as INTEGER 0.** The int32 fast path excludes `-0`, and the next branch,
+  `Number.isSafeInteger(-0)`, binds it as an integer. `SELECT ?` returns integer `0` where `node:sqlite`
+  returns real `-0`. Pinned in `tests/property/ffi_roundtrip_test.ts`; the pin moves when `-0` is bound as a
+  double (plan risk 18).
+- **NaN binds as NULL in both drivers.** `sqlite3_bind_double` turns NaN into NULL, so "NaN rejected" in the
+  plan was wrong. The round-trip property pins NULL on both sides (plan risk 22).
+- **`getCString` stops at the first NUL.** Text from `sqlite3_column_text` is read with `sqlite3_column_bytes`
+  and a full-length copy. `readText` in `platform/sqlite_ffi/database.ts` keeps the `getCString` result only
+  when its length equals the byte count; a truncated string can never pass that check.
+- **Bare `libsqlite3.so.0` resolves to 3.53.4 on vm-1.** `ldconfig -p` maps the soname to `/usr/local/lib`,
+  while `/usr/lib/x86_64-linux-gnu/libsqlite3.so.0` is 3.45.1. `DEFAULT_LIBRARY_PATHS` tries the absolute
+  distro path first, so an unset `SQLITE_LIBRARY` loads 3.45.1; setting `SQLITE_LIBRARY` names the copy
+  explicitly. Either way there are two copies, and each file must be opened by one of them.
+- **The deadline is validated against the reader timeout, not the other way round.** `STATEMENT_DEADLINE_MS`
+  must be below `READER_CALL_TIMEOUT_MS`, or the outer call gives up first and the statement is left running
+  until the interrupt. Config validation refuses the combination (`platform/config.ts`).

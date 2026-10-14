@@ -10,7 +10,7 @@ Typed client / browser
        v
 Deno server: HTTP + in-process SQLite document reads/writes + backups
        |                        |
-       | node:sqlite            | JSON-lines RPC over stdin/stdout
+       | libsqlite3 (FFI)      | JSON-lines RPC over stdin/stdout
        v                        v
 Per-app SQLite files      Deno reader: DuckDB ingest + named analysis
        |                        |
@@ -61,6 +61,13 @@ run, understand these:
 - `BACKUP_INTERVAL_MS` (default `0`) disables the backup timer at zero. A nonzero period must be finite and at
   least 1000 milliseconds.
 - `LOG_DIR` (default `./logs`) selects the structured log tree.
+- `SQLITE_LIBRARY` (unset) names the system `libsqlite3` the FFI binding loads. Unset, the binding tries its
+  default search order. It must be SQLite 3.37.0 or newer, and a startup `sqlite-library` lifecycle event
+  names the path and version it loaded.
+- `STATEMENT_DEADLINE_MS` (default `5000`) is the deadline for an unbounded read (a `select` that is not a
+  primary-key lookup, `count` or `countBy`). It must be below `READER_CALL_TIMEOUT_MS`.
+- `STATEMENT_INTERRUPT_GRACE_MS` (default `1000`) is how long an interrupted statement may take to return. If
+  it does not, the server logs an error-level `lifecycle` event and stops using that connection.
 
 Configuration is decoded once during layer construction. Invalid values or inconsistent combinations fail
 startup with a typed `ConfigError`, before serving requests. Empty strings are treated as unset. Set real,
@@ -82,9 +89,11 @@ the same schema and return the same TypeScript document shape. See
 
 A **query** runs in the server process against the app's SQLite file (or the authenticated tenant's file),
 using a fresh read-only connection and read transaction. A concurrency semaphore caps active document reads at
-32. A **mutation** also runs in the server process, serialized per app, in one SQLite `BEGIN IMMEDIATE`
-transaction. Its reads use SQLite inside that transaction; its writes commit together or roll back on
-failure/interruption. Do not retain a handler's database context after the handler finishes.
+32. An unbounded read that runs past `STATEMENT_DEADLINE_MS` is interrupted and the request returns HTTP 504
+with a `Statement deadline exceeded` message; primary-key reads and writes are not interrupted. A **mutation**
+also runs in the server process, serialized per app, in one SQLite `BEGIN IMMEDIATE` transaction. Its reads
+use SQLite inside that transaction; its writes commit together or roll back on failure/interruption. Do not
+retain a handler's database context after the handler finishes.
 
 A successful mutation response follows local commit. Queries read the live file rather than an asynchronously
 refreshed replica; a query overlapping a write may see earlier state. Event-log ingest and named analysis
@@ -345,6 +354,15 @@ bucket-level comparison, not a one-to-one request join.
 
 Each entry follows symptom → cause → fix:
 
+- **504 `Statement deadline exceeded`** → an unbounded read (a non-primary-key select, `count` or `countBy`)
+  ran past `STATEMENT_DEADLINE_MS` and was stopped → find the trace in the response's `X-Trace-Id`, then run
+  `deno task logs:ingest` and `deno task logs:query trace --param traceId=<id>`;
+  `deno task logs:query deadline-hits-per-handler-hour` lists the handlers that hit it. Narrow the read, or
+  raise the deadline if the work is legitimate (it must stay below `READER_CALL_TIMEOUT_MS`).
+- **Startup fails with a `StorageError` (operation `open`) that names libsqlite3** → no usable `libsqlite3`
+  was found, or the one found is older than 3.37.0 or was built without threads → install a current
+  libsqlite3, set `SQLITE_LIBRARY` to its path, and confirm the server runs with FFI permission (the repo's
+  tasks already pass `-A`).
 - **`deno` not found** → its bin directory is missing from the shell path → use the Installation path export
   and confirm `deno --version`; install Deno 2.9.5 if absent.
 - **`ConfigError` at startup with `BACKUP_INTERVAL_MS=500`** → a nonzero interval is below 1000 ms → use zero
