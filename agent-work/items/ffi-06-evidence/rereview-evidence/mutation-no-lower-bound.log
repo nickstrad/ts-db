@@ -1,0 +1,5 @@
+Check tests/unit/analysis_catalog_test.ts
+running 1 test from ./tests/unit/analysis_catalog_test.ts
+AnalysisLive: deadline-hits-per-handler-hour pins its counting, attribution and bucketing rules ... ok (321ms)
+
+ok | 1 passed | 0 failed | 14 filtered out (336ms)

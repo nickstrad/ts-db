@@ -1,0 +1,24 @@
+Check tests/unit/analysis_catalog_test.ts
+running 1 test from ./tests/unit/analysis_catalog_test.ts
+AnalysisLive: deadline-hits-per-handler-hour pins its counting, attribution and bucketing rules ... FAILED (331ms)
+
+ ERRORS
+
+AnalysisLive: deadline-hits-per-handler-hour pins its counting, attribution and bucketing rules => ./tests/unit/analysis_catalog_test.ts:335:1
+error: AssertionError: same trace id in another app never matches
+
+0 !== 1
+
+    assert.equal(hits("app2", null, "nonblocking"), 1, "same trace id in another app never matches");
+           ^
+    at file:///root/Software/tsdb-work/ffi06-rev2/tests/unit/analysis_catalog_test.ts:387:12
+    at async withFixture (file:///root/Software/tsdb-work/ffi06-rev2/tests/unit/analysis_catalog_test.ts:194:12)
+    at async NodeTestContext.<anonymous> (file:///root/Software/tsdb-work/ffi06-rev2/tests/unit/analysis_catalog_test.ts:345:3)
+
+ FAILURES
+
+AnalysisLive: deadline-hits-per-handler-hour pins its counting, attribution and bucketing rules => ./tests/unit/analysis_catalog_test.ts:335:1
+
+FAILED | 0 passed | 1 failed | 14 filtered out (348ms)
+
+error: Test failed

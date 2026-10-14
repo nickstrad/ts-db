@@ -1,0 +1,22 @@
+Task integration deno run -A tests/integration.ts
+PASS: both layouts, DuckDB read-after-write, aggregation, app isolation, backup, restore, HTTP auth, X-Trace-Id in JSONL (32 ids), logs-ingest populates DuckDB (125 lines), error-rate-by-handler handlers
+PASS FFI-06 deadline HTTP 504 / two tenants (TRACE_SQL=true, point-read p99 gate): {"point_reads":152,"point_p99_ms":21.364846000000398,"budget_ms":50,"loadavg":[1.005859375,1.3017578125,1.79052734375]}
+logs:ingest {
+  "filesScanned": 2,
+  "filesIngested": 2,
+  "bytesIngested": 389498,
+  "linesIngested": 758,
+  "linesRejected": 0,
+  "durationMs": 329.920457
+}
+logs:query [{"hour":"2026-10-14 04:00:00","app_id":"tic-tac-toe-json","handler_kind":"query","name":"winsByMark","path":"nonblocking","deadline_hits":20}]
+PASS FFI-06 deadline HTTP 504 / two tenants (TRACE_SQL=false, failed-statement logging only): {"rounds":3,"loadavg":[1.07861328125,1.30810546875,1.78759765625]}
+logs:ingest {
+  "filesScanned": 2,
+  "filesIngested": 2,
+  "bytesIngested": 28462,
+  "linesIngested": 56,
+  "linesRejected": 0,
+  "durationMs": 207.909376
+}
+logs:query [{"hour":"2026-10-14 04:00:00","app_id":"tic-tac-toe-json","handler_kind":"query","name":"winsByMark","path":"nonblocking","deadline_hits":3}]

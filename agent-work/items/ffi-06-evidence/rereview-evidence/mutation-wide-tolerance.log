@@ -1,0 +1,24 @@
+Check tests/unit/analysis_catalog_test.ts
+running 1 test from ./tests/unit/analysis_catalog_test.ts
+AnalysisLive: deadline-hits-per-handler-hour pins its counting, attribution and bucketing rules ... FAILED (321ms)
+
+ ERRORS
+
+AnalysisLive: deadline-hits-per-handler-hour pins its counting, attribution and bucketing rules => ./tests/unit/analysis_catalog_test.ts:335:1
+error: AssertionError: d1 and d2 share a timestamp and both count once
+
+3 !== 2
+
+    assert.equal(hits("app1", "play", "nonblocking"), 2, "d1 and d2 share a timestamp and both count once");
+           ^
+    at file:///root/Software/tsdb-work/ffi06-rev2/tests/unit/analysis_catalog_test.ts:378:12
+    at async withFixture (file:///root/Software/tsdb-work/ffi06-rev2/tests/unit/analysis_catalog_test.ts:194:12)
+    at async NodeTestContext.<anonymous> (file:///root/Software/tsdb-work/ffi06-rev2/tests/unit/analysis_catalog_test.ts:345:3)
+
+ FAILURES
+
+AnalysisLive: deadline-hits-per-handler-hour pins its counting, attribution and bucketing rules => ./tests/unit/analysis_catalog_test.ts:335:1
+
+FAILED | 0 passed | 1 failed | 14 filtered out (336ms)
+
+error: Test failed

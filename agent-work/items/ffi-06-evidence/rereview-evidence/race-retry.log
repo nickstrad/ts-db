@@ -1,0 +1,12 @@
+Check tests/unit/sqlite_ffi_cancel_test.ts
+running 1 test from ./tests/unit/sqlite_ffi_cancel_test.ts
+race: cancels issued before the pool thread enters sqlite3_step still stop it ...
+------- output -------
+immediate abort: median 0.272 ms, max 4.365 ms over 100
+timeoutMs 0 (binding-reported cancel latency): median 0.124 ms, max 0.347 ms over 50
+immediate closeAsync: median 1.542 ms, max 3.101 ms over 50
+16 connections aborted in one tick: all settled in 1.736 ms
+----- output end -----
+race: cancels issued before the pool thread enters sqlite3_step still stop it ... ok (2s)
+
+ok | 1 passed | 0 failed | 10 filtered out (2s)

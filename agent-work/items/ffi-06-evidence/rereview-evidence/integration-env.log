@@ -1,0 +1,7 @@
+start load: 0.82 1.28 1.79 2/629 3833409
+{"pid": "3833448", "module": "platform/server.ts", "traceSql": "TRACE_SQL=<unset>"}
+{"pid": "3833463", "module": "/root/Software/tsdb-work/ffi06-rev2/platform/reader.ts", "traceSql": "TRACE_SQL=<unset>"}
+{"pid": "3833627", "module": "platform/server.ts", "traceSql": "TRACE_SQL=true"}
+{"pid": "3833637", "module": "/root/Software/tsdb-work/ffi06-rev2/platform/reader.ts", "traceSql": "TRACE_SQL=true"}
+{"pid": "3833881", "module": "platform/server.ts", "traceSql": "TRACE_SQL=false"}
+{"pid": "3833894", "module": "/root/Software/tsdb-work/ffi06-rev2/platform/reader.ts", "traceSql": "TRACE_SQL=false"}
