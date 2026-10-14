@@ -208,8 +208,11 @@ const PLATFORM_PROSE_ONLY: readonly string[] = [
  * - The two oracle suites: a different SQLite build is a better oracle than the one under test.
  * - The binding's own suites: `node:sqlite` is their parity and behaviour oracle (coordinator
  *   ruling at FFI-04 dispatch).
+ * - `tests/property/ffi_roundtrip_test.ts` (FFI-07): the round-trip oracle, on its own `:memory:`
+ *   database while the binding uses a separate temp file.
  */
 const TESTS_MAY_IMPORT: readonly string[] = [
+  "tests/property/ffi_roundtrip_test.ts",
   "tests/property/json_number_test.ts",
   "tests/property/sqlite_oracle_test.ts",
   "tests/unit/sqlite_ffi_effect_test.ts",
