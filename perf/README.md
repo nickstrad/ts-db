@@ -145,7 +145,8 @@ binding and `node:sqlite` each own a separate file. Blocking rounds alternate or
 checked outside the measured interval. Bind arrays and expected TEXT are precomputed; both blocking paths and
 the nonblocking path get 2,000 excluded warm-ups. Both public APIs receive the same numeric values: Statement
 takes the reused array and node:sqlite takes its spread values. Gates: blocking p50 ≤ 10.2 µs (6.8 × 1.5) and
-≤ same-run node p50; nonblocking p50 ≤ 100 µs and p99 ≤ 3,000 µs.
+≤ 1.3 × same-run node p50 + 1 µs (the plan's amended parity gate); nonblocking p50 ≤ 100 µs and p99 ≤ 3,000
+µs.
 
 `ffi_interrupt.ts` runs 50 one-second unbounded counts and aborts each through the binding's signal bridge. It
 measures abort → typed `SqliteCancelled` settlement, including reset. Each sample has the PoC fields; the
@@ -160,21 +161,25 @@ via `Statement.allAsync(undefined, { timeoutMs: 50 })`. Every cancellation must 
 finish within 100 ms from its own submission. Cleanup awaits all connections before removing the scratch
 directory.
 
-**Gate status: the strict same-run `node:sqlite` parity gate FAILS.** `ffi_read_cost.ts` exits 1 on a quiet
-host because blocking p50 is 3.5-6 % above `node:sqlite`'s. Every other gate passes (the PoC budget of 10.2
-µs, the nonblocking budgets, the interrupt and cap gates). The Opus review traced the gap to the floor of four
-FFI crossings per read against node's single native call, and the PoC's "6.35 vs 8.66 µs" win to a cold,
-unwarmed, non-interleaved harness. A plan amendment (FFI-01's 1.3 × node p50 + 1 µs) is pending with the
-human. Until it lands the gate stays as written: no threshold and no harness exit status was changed.
+**Gate status: the amended same-run `node:sqlite` parity gate PASSES.** The plan's FFI-06 read gate was
+originally "binding blocking p50 ≤ node:sqlite p50 in the same run". Nick approved an amendment on 2026-10-13
+(recorded in the plan, risk 19): **blocking p50 ≤ 1.3 × node:sqlite p50 + 1 µs**, the same formula FFI-01
+used. `ffi_read_cost.ts` now asserts that formula and exits 0 on a quiet host. Quiet-host blocking p50 runs
+7.35 / 7.64 / 7.57 µs against bounds of 1.3 × 6.93 + 1 = 10.01 µs, 1.3 × 7.21 + 1 = 10.37 µs and 1.3 × 7.10 +
+1 = 10.23 µs: all three PASS. They remain 3.5-6 % above `node:sqlite` itself, so the original strict gate
+would have failed; the Opus review traced that gap to the floor of four FFI crossings per read against node's
+single native call, and the PoC's "6.35 vs 8.66 µs" win to a cold, unwarmed, non-interleaved harness. Every
+other gate also passes (the PoC budget of 10.2 µs, the nonblocking budgets, the interrupt and cap gates).
 
 Measured on vm-1, Deno 2.9.5, 2026-10-14, quiet-host runs (fair harness above), 20,000 samples per path per
-run. All three runs exit 1 on strict parity; all three absolute blocking and nonblocking budgets pass.
+run. All three runs fail the original strict parity but pass the amended gate; all three absolute blocking and
+nonblocking budgets pass.
 
-| Run | Load 1/5/15        | node p50/p99 µs | FFI blocking p50/p99 µs | FFI nonblocking p50/p99 µs | Strict parity |
-| --- | ------------------ | --------------- | ----------------------- | -------------------------- | ------------- |
-| 1   | 0.50 / 1.35 / 1.76 | 6.93 / 28.00    | 7.35 / 29.97            | 43.85 / 322.94             | FAIL          |
-| 2   | 0.70 / 1.38 / 1.77 | 7.21 / 29.24    | 7.64 / 29.66            | 47.56 / 745.04             | FAIL          |
-| 3   | 0.70 / 1.38 / 1.77 | 7.10 / 29.19    | 7.57 / 31.80            | 47.80 / 480.43             | FAIL          |
+| Run | Load 1/5/15        | node p50/p99 µs | FFI blocking p50/p99 µs | FFI nonblocking p50/p99 µs | Strict parity | Amended gate (bound µs) |
+| --- | ------------------ | --------------- | ----------------------- | -------------------------- | ------------- | ----------------------- |
+| 1   | 0.50 / 1.35 / 1.76 | 6.93 / 28.00    | 7.35 / 29.97            | 43.85 / 322.94             | FAIL          | PASS (10.01)            |
+| 2   | 0.70 / 1.38 / 1.77 | 7.21 / 29.24    | 7.64 / 29.66            | 47.56 / 745.04             | FAIL          | PASS (10.37)            |
+| 3   | 0.70 / 1.38 / 1.77 | 7.10 / 29.19    | 7.57 / 31.80            | 47.80 / 480.43             | FAIL          | PASS (10.23)            |
 
 Interrupt and cap results (earlier, loaded host, load 2.09 / 2.13 / 2.79; the review re-ran both on a quiet
 host at load 0.58 with interrupt p99 4.034 ms, minimum 90 ticks, and cap max 84.5 ms):
@@ -187,10 +192,10 @@ host at load 0.58 with interrupt p99 4.034 ms, minimum 90 ticks, and cap max 84.
 Historical read runs at higher host load (retained for the record; the quiet-host runs above are the
 representative numbers):
 
-| Run                      | Load 1/5/15        | node p50/p99 µs | FFI blocking p50/p99 µs | FFI nonblocking p50/p99 µs | Strict parity |
-| ------------------------ | ------------------ | --------------- | ----------------------- | -------------------------- | ------------- |
-| First unit run (loaded)  | 1.84 / 2.08 / 2.78 | 8.28 / 34.65    | 8.96 / 37.18            | 49.52 / 419.00             | FAIL          |
-| Earlier continuation run | 1.38 / 1.35 / 1.39 | 6.84 / 22.48    | 7.60 / 24.01            | 42.60 / 208.36             | FAIL          |
+| Run                      | Load 1/5/15        | node p50/p99 µs | FFI blocking p50/p99 µs | FFI nonblocking p50/p99 µs | Strict parity | Amended gate (bound µs) |
+| ------------------------ | ------------------ | --------------- | ----------------------- | -------------------------- | ------------- | ----------------------- |
+| First unit run (loaded)  | 1.84 / 2.08 / 2.78 | 8.28 / 34.65    | 8.96 / 37.18            | 49.52 / 419.00             | FAIL          | PASS (11.76)            |
+| Earlier continuation run | 1.38 / 1.35 / 1.39 | 6.84 / 22.48    | 7.60 / 24.01            | 42.60 / 208.36             | FAIL          | PASS (9.89)             |
 
 Every read run is retained in the evidence report; the quiet-host results supersede neither the historical
 failures nor the unchanged gate.

@@ -67,7 +67,10 @@ try {
   };
   console.log(JSON.stringify(report));
   assert.ok(report.ffi_blocking_us.p50_us <= 6.8 * 1.5, "PoC blocking budget");
-  assert.ok(report.ffi_blocking_us.p50_us <= report.node_sqlite_sync_us.p50_us, "node parity");
+  assert.ok(
+    report.ffi_blocking_us.p50_us <= 1.3 * report.node_sqlite_sync_us.p50_us + 1,
+    "node parity (plan FFI-06 as amended 2026-10-13: <= 1.3x node p50 + 1 us)",
+  );
   assert.ok(report.ffi_nonblocking_us.p50_us <= 100, "nonblocking p50");
   assert.ok(report.ffi_nonblocking_us.p99_us <= 3000, "nonblocking p99");
 } finally {

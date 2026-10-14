@@ -349,7 +349,8 @@ test("AnalysisLive: deadline-hits-per-handler-hour pins its counting, attributio
       ${http("r-x1", "2026-10-11 14:00:10.000", "dl-s", "mutation", "x1", 5)},
       ${http("r-y1", "2026-10-11 14:00:10.050", "dl-s", "query", "y1", 55)},
       ${http("r-a1", "2026-10-11 15:00:00.020", "dl-b", "mutation", "a1", 10)},
-      ${http("r-b1", "2026-10-11 15:00:00.030", "dl-b", "query", "b1", 9)}`);
+      ${http("r-b1", "2026-10-11 15:00:00.030", "dl-b", "query", "b1", 9)},
+      ${http("r-w1", "2026-10-11 16:00:10.000", "dl-w", "mutation", "w1", 100)}`);
     await sql(`INSERT INTO sql_events (event_id, ts, trace_id, app_id, error_tag, path) VALUES
       ${deadline("d1", "2026-10-11 12:00:04.995", "dl-a", "app1", "nonblocking")},
       ${deadline("d2", "2026-10-11 12:00:04.995", "dl-a", "app1", "nonblocking")},
@@ -362,6 +363,9 @@ test("AnalysisLive: deadline-hits-per-handler-hour pins its counting, attributio
       ${deadline("d9", "2026-10-11 15:00:00.021", "dl-b", "app1", "nonblocking")},
       ${deadline("d10", "2026-10-11 15:00:00.025", "dl-b", "app1", "nonblocking")},
       ${deadline("d11", "2026-10-11 15:00:00.015", "dl-b", "app1", "nonblocking")},
+      ${deadline("d12", "2026-10-11 16:00:09.899", "dl-w", "app1", "nonblocking")},
+      ${deadline("d13", "2026-10-11 16:00:09.898", "dl-w", "app1", "blocking")},
+      ${deadline("d14", "2026-10-11 16:00:09.950", "dl-other", "app1", null)},
       ('not-deadline', '2026-10-11 12:00:05.000', 'dl-a', 'app1', 'SqliteError', 'nonblocking'),
       ('no-error', '2026-10-11 12:00:05.000', 'dl-a', 'app1', NULL, 'nonblocking')`);
   }, async (dbPath) => {
@@ -370,8 +374,8 @@ test("AnalysisLive: deadline-hits-per-handler-hour pins its counting, attributio
       rows.filter((r) => r.app_id === app && r.name === name && r.path === path)
         .reduce((n, r) => n + Number(r.deadline_hits), 0);
 
-    // One hit per deadline-tagged sql event: 11 events, no double count, other error tags excluded.
-    assert.equal(rows.reduce((n, r) => n + Number(r.deadline_hits), 0), 11);
+    // One hit per deadline-tagged sql event: 14 events, no double count, other error tags excluded.
+    assert.equal(rows.reduce((n, r) => n + Number(r.deadline_hits), 0), 14);
     assert.equal(typeof rows[0]!.deadline_hits, "number", "counts are numbers, not strings");
 
     // Attribution to the completing request by trace and app, with the path column carried through.
@@ -400,6 +404,18 @@ test("AnalysisLive: deadline-hits-per-handler-hour pins its counting, attributio
     // even though the later request has already started; later events fall to the later request.
     assert.equal(hits("app1", "a1", "nonblocking"), 2, "d11 plus the d9 tail");
     assert.equal(hits("app1", "b1", "nonblocking"), 1, "d10 only");
+
+    // Trace and time vary independently. r-w1 completes at 16:00:10.000 after 100 ms, so it started at
+    // 16:00:09.900 and its widened start is 09.899. d12 is exactly 1 ms before the start: still attributed.
+    // d13 is 2 ms before it: below the lower bound, even though the trace matches. d14 sits inside the
+    // request's span in the same app but carries another trace: never attributed by time alone.
+    const hour16 = rows.filter((r) => String(r.hour).startsWith("2026-10-11 16:00:00"))
+      .map((r) => `${r.app_id}/${r.name ?? "unattributed"}/${r.path}=${r.deadline_hits}`).sort();
+    assert.deepEqual(hour16, [
+      "app1/unattributed/blocking=1",
+      "app1/unattributed/null=1",
+      "app1/w1/nonblocking=1",
+    ]);
   });
 });
 
