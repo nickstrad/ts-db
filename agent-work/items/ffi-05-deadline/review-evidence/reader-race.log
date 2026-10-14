@@ -1,0 +1,41 @@
+load [ 0.5927734375, 1.35546875, 1.6005859375 ] mode []
+result { _id: "Exit", _tag: "Success", value: null }
+slow { _id: "Exit", _tag: "Success", value: 0 }
+late {
+  _id: "Exit",
+  _tag: "Failure",
+  cause: {
+    _id: "Cause",
+    _tag: "Fail",
+    failure: {
+      operation: "select",
+      table: "t",
+      detail: "prepare on a closed connection",
+      cause: SqliteUsageError
+          at usage (file:///root/Software/tsdb-work/ffi05-rev/platform/sqlite_ffi/database.ts:328:10)
+          at assertIdle (file:///root/Software/tsdb-work/ffi05-rev/platform/sqlite_ffi/database.ts:357:22)
+          at Database.prepare (file:///root/Software/tsdb-work/ffi05-rev/platform/sqlite_ffi/database.ts:530:5)
+          at prepareCached (file:///root/Software/tsdb-work/ffi05-rev/platform/sqlite_ffi/effect.ts:473:41)
+          at file:///root/Software/tsdb-work/ffi05-rev/platform/document_reader.ts:224:47
+          at nativeNow (file:///root/Software/tsdb-work/ffi05-rev/platform/document_reader.ts:98:27)
+          at file:///root/Software/tsdb-work/ffi05-rev/platform/document_reader.ts:224:21
+          at EffectPrimitive.commit (file:///root/Software/tsdb-work/ffi05-rev/platform/sqlite.ts:336:35)
+          at file:///root/Software/tsdb-work/ffi05-rev/node_modules/.deno/effect@3.22.2/node_modules/effect/src/internal/fiberRuntime.ts:1353:34
+          at effect_internal_function (file:///root/Software/tsdb-work/ffi05-rev/node_modules/.deno/effect@3.22.2/node_modules/effect/src/Utils.ts:779:12) {
+        reason: "closed",
+        detail: "prepare on a closed connection",
+        sql: 'SELECT * FROM "t" WHERE "_id" = ? ORDER BY "_id" ASC LIMIT ?',
+        _tag: "SqliteUsageError"
+      },
+      _tag: "ReaderError"
+    }
+  }
+}
+order [
+  [ "exec", "PRAGMA foreign_keys=ON" ],
+  [ "exec", "BEGIN TRANSACTION" ],
+  [ "sql", "ok" ],
+  [ "exec", "COMMIT" ],
+  [ "tx", "commit" ],
+  [ "sql", "error" ]
+]

@@ -1,0 +1,2 @@
+PASS 100 immediate/delayed interrupts: gate released, connection reusable, no late watchdog; load [ 2.005859375, 1.85595703125, 1.77978515625 ]
+PASS stuck step with an open transaction: poisoned, closed, inTransaction=false before a queued caller can proceed; load [ 2.005859375, 1.85595703125, 1.77978515625 ]
