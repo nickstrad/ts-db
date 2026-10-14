@@ -1,7 +1,7 @@
 # Container — request path
 
-Audited against landed main `643b706` on 2026-10-11 (item 27); re-checked for FFI-01 to FFI-04 at `51a5283` on
-2026-10-13. Both formats are generated from `diagrams/c4-container-platform.py`; numbered relationships are
+Audited against landed main `643b706` on 2026-10-11 (item 27); re-checked for FFI-01 to FFI-05 at `f2bf1c9` on
+2026-10-14. Both formats are generated from `diagrams/c4-container-platform.py`; numbered relationships are
 identical. All boxes describe landed code.
 
 <!-- c4-render: diagrams/c4-container-platform.py -->
@@ -68,8 +68,10 @@ is acquired lazily for registry use; TENANCY=off preserves app tokens and legacy
 LocalFolderRouter over the shared TENANTS_DIR/tenantId.db path. Different physical layouts need distinct
 tenants because the schema guard rejects switching layouts. Document queries use fresh read-only connections
 in the server, opened through the FFI SQLite binding over system libsqlite3 (node:sqlite is no longer loaded),
-with authenticated tenant routing selecting the file. The DuckDB SQLite extension stays in the separate reader
-process, so the two SQLite copies never share an address space. Application documents stay in SQLite. Better
-Auth is mounted in the server at /api/auth/*; scripts/auth.ts is the headless CLI. The future control-plane
-router is not implemented. E2E uses ephemeral Postgres, distinct tenants for layouts, and fresh Better Auth
-servers per layout.
+with authenticated tenant routing selecting the file. Unbounded SQLite reads (any select that is not a
+primary-key lookup, count, countBy) run nonblocking under a statement deadline (default 5 s) and fail HTTP 504
+when it passes; writes and point reads stay blocking (FFI-05). The DuckDB SQLite extension stays in the
+separate reader process, so the two SQLite copies never share an address space. Application documents stay in
+SQLite. Better Auth is mounted in the server at /api/auth/*; scripts/auth.ts is the headless CLI. The future
+control-plane router is not implemented. E2E uses ephemeral Postgres, distinct tenants for layouts, and fresh
+Better Auth servers per layout.

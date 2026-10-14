@@ -12,6 +12,13 @@ Document reads use scoped, read-only SQLite handles and emit server-side SQLite 
 adds the execution semaphore and preserves the admission limit and deadline. Mutations continue to use the
 existing SQLite writer.
 
+> **FFI-05 update (2026-10-14).** The in-process path now classifies each select
+> (`platform/sqlite_ffi/classify.ts`). A primary-key lookup stays on the blocking path; `find`, `count` and
+> `countBy` run nonblocking under `sqlite.statementDeadlineMs` (default 5 s) and fail `StatementDeadlineError`
+> (HTTP 504) when the binding interrupts them. The call-level `reader.callTimeoutMs` guard remains, but config
+> validation keeps the statement deadline below it, so the deadline fires first. The verification below
+> predates this change.
+
 Event-log ingest and named analysis queries are untouched by the pivot. `ingest` and `analysis` requests still
 travel through the supervised reader client, across IPC, into `platform/reader.ts`. Its dispatch calls
 `eventLog.ingest` and `analysis.run`, respectively. The reader owns the event-log DuckDB handle;

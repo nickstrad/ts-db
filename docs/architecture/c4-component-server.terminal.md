@@ -1,7 +1,7 @@
 # Component — server process
 
-Audited against landed main `643b706` on 2026-10-11 (item 27); updated for FFI-01 to FFI-04b at `702c354` on
-2026-10-13. Both formats are generated from `diagrams/c4-component-server.py`; numbered relationships are
+Audited against landed main `643b706` on 2026-10-11 (item 27); updated for FFI-01 to FFI-05 at `f2bf1c9` on
+2026-10-14. Both formats are generated from `diagrams/c4-component-server.py`; numbered relationships are
 identical. All boxes describe landed code.
 
 <!-- c4-render: diagrams/c4-component-server.py -->
@@ -13,10 +13,13 @@ identical. All boxes describe landed code.
 ╎  │ HTTP API / auth              │   │ Server lifecycle             │ ╎
 ╎  │ [Component]                  │   │ [Component]                  │ ╎
 ╎  │ platform/http/;              │   │ platform/server.ts           │ ╎
-╎  │ platform/auth/               │   │ Scoped listener, backup and  │ ╎
-╎  │ Named routes, traces,        │   │ ingest timers, reader-exit   │ ╎
-╎  │ tenant/API-key/session       │   │ watch                        │ ╎
-╎  │ authentication               │   └──────────────────────────────┘ ╎
+╎  │ platform/auth/;              │   │ Scoped listener, backup and  │ ╎
+╎  │ core/errors.ts               │   │ ingest timers, reader-exit   │ ╎
+╎  │ Named routes, traces,        │   │ watch                        │ ╎
+╎  │ tenant/API-key/session       │   └──────────────────────────────┘ ╎
+╎  │ authentication; toHttpStatus │                                    ╎
+╎  │ maps StatementDeadlineError  │                                    ╎
+╎  │ to 504                       │                                    ╎
 ╎  └──────────────────────────────┘                                    ╎
 ╎                                                                      ╎
 ╎  ┌──────────────────────────────┐   ┌──────────────────────────────┐ ╎
@@ -44,50 +47,62 @@ identical. All boxes describe landed code.
 ╎  │ platform/sqlite.ts           │   │ platform/backup.ts;          │ ╎
 ╎  │ Scoped handles;              │   │ platform/object_store.ts     │ ╎
 ╎  │ serialization; rollback and  │   │ Snapshot/hash/manifest;      │ ╎
-╎  │ context expiry               │   │ local or signed S3           │ ╎
-╎  └──────────────────────────────┘   └──────────────────────────────┘ ╎
+╎  │ context expiry;              │   │ local or signed S3           │ ╎
+╎  │ ConnectionGate; unbounded    │   └──────────────────────────────┘ ╎
+╎  │ reads under the statement    │                                    ╎
+╎  │ deadline                     │                                    ╎
+╎  └──────────────────────────────┘                                    ╎
 ╎                                                                      ╎
 ╎  ┌──────────────────────────────┐   ┌──────────────────────────────┐ ╎
 ╎  │ ReaderClient / ReaderProcess │   │ DocumentReaderClient         │ ╎
 ╎  │ [Effect services]            │   │ [Effect service]             │ ╎
-╎  │ platform/ipc.ts;             │   │ platform/document_reader.ts  │ ╎
-╎  │ platform/layers.ts           │   │ In-process SQLite queries;   │ ╎
-╎  │ Scoped child for             │   │ read-only connection;        │ ╎
-╎  │ ingest/analysis; capped      │   │ concurrency cap 32           │ ╎
-╎  │ queue, deadline, trace       │   └──────────────────────────────┘ ╎
+╎  │ platform/ipc.ts;             │   │ platform/document_reader.ts; │ ╎
+╎  │ platform/layers.ts           │   │ platform/sqlite.ts           │ ╎
+╎  │ Scoped child for             │   │ (ConnectionGate)             │ ╎
+╎  │ ingest/analysis; capped      │   │ In-process SQLite queries;   │ ╎
+╎  │ queue, deadline, trace       │   │ read-only connection;        │ ╎
+╎  └──────────────────────────────┘   │ concurrency cap 32;          │ ╎
+╎                                     │ ConnectionGate; unbounded    │ ╎
+╎                                     │ selects under the statement  │ ╎
+╎                                     │ deadline                     │ ╎
+╎                                     └──────────────────────────────┘ ╎
+╎                                                                      ╎
+╎  ┌──────────────────────────────┐   ┌──────────────────────────────┐ ╎
+╎  │ FFI SQLite binding           │   │ Statement classifier         │ ╎
+╎  │ [Library in server process]  │   │ [Pure function]              │ ╎
+╎  │ platform/sqlite_ffi/         │   │ platform/sqlite_ffi/classify │ ╎
+╎  │ System libsqlite3 via        │   │ .ts                          │ ╎
+╎  │ Deno.dlopen; every server    │   │ classify(operation) from the │ ╎
+╎  │ SQLite open goes through it  │   │ plan IR, never SQL text:     │ ╎
+╎  │ (FFI-04), node:sqlite is not │   │ insert, patch, delete and a  │ ╎
+╎  │ loaded. Every open applies   │   │ select with _id equality and │ ╎
+╎  │ node:sqlite-compatible       │   │ no aggregate are bounded     │ ╎
+╎  │ defaults (double-quoted      │   │ (blocking path); every other │ ╎
+╎  │ strings off, foreign keys    │   │ select, count and countBy is │ ╎
+╎  │ on); darwin/aarch64 refused. │   │ unbounded (nonblocking path) │ ╎
+╎  │ Blocking path (main thread)  │   └──────────────────────────────┘ ╎
+╎  │ for writes and point reads;  │                                    ╎
+╎  │ nonblocking path             │                                    ╎
+╎  │ (allAsync/getAsync on the    │                                    ╎
+╎  │ blocking pool,               │                                    ╎
+╎  │ sqlite3_interrupt at the     │                                    ╎
+╎  │ deadline) for unbounded      │                                    ╎
+╎  │ reads (FFI-05); 64-statement │                                    ╎
+╎  │ cache                        │                                    ╎
 ╎  └──────────────────────────────┘                                    ╎
 ╎                                                                      ╎
 ╎  ┌──────────────────────────────┐   ┌──────────────────────────────┐ ╎
-╎  │ FFI SQLite binding           │   │ Logger / EventSink           │ ╎
-╎  │ [Library in server process]  │   │ [Effect logger/service]      │ ╎
-╎  │ platform/sqlite_ffi/         │   │ platform/logging/            │ ╎
-╎  │ System libsqlite3 via        │   │ Dropping queue; batched      │ ╎
-╎  │ Deno.dlopen; every server    │   │ JSONL; final drain           │ ╎
-╎  │ SQLite open goes through it  │   └──────────────────────────────┘ ╎
-╎  │ (FFI-04), node:sqlite is not │                                    ╎
-╎  │ loaded. Every open applies   │                                    ╎
-╎  │ node:sqlite-compatible       │                                    ╎
-╎  │ defaults (double-quoted      │                                    ╎
-╎  │ strings off, foreign keys    │                                    ╎
-╎  │ on); darwin/aarch64 refused. │                                    ╎
-╎  │ Blocking path with           │                                    ╎
-╎  │ 64-statement cache in use;   │                                    ╎
-╎  │ interruptible async API and  │                                    ╎
-╎  │ statement deadline not used  │                                    ╎
-╎  │ yet                          │                                    ╎
-╎  └──────────────────────────────┘                                    ╎
-╎                                                                      ╎
-╎  ┌──────────────────────────────┐                                    ╎
-╎  │ Config / IdGen               │                                    ╎
-╎  │ [Effect services]            │                                    ╎
-╎  │ platform/config.ts;          │                                    ╎
-╎  │ platform/sqlite.ts           │                                    ╎
-╎  │ Validated options            │                                    ╎
-╎  │ (sqlite.library read by      │                                    ╎
-╎  │ every open; statement        │                                    ╎
-╎  │ deadline and grace parsed    │                                    ╎
-╎  │ but unread); UUIDs; Clock    │                                    ╎
-╎  └──────────────────────────────┘                                    ╎
+╎  │ Logger / EventSink           │   │ Config / IdGen               │ ╎
+╎  │ [Effect logger/service]      │   │ [Effect services]            │ ╎
+╎  │ platform/logging/            │   │ platform/config.ts;          │ ╎
+╎  │ Dropping queue; batched      │   │ platform/sqlite.ts           │ ╎
+╎  │ JSONL; final drain           │   │ Validated options            │ ╎
+╎  └──────────────────────────────┘   │ (sqlite.library,             │ ╎
+╎                                     │ sqlite.statementDeadlineMs   │ ╎
+╎                                     │ and sqlite.statementInterrup │ ╎
+╎                                     │ tGraceMs are all read);      │ ╎
+╎                                     │ UUIDs; Clock                 │ ╎
+╎                                     └──────────────────────────────┘ ╎
 ╎                                                                      ╎
 ╰╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╯
 
@@ -119,41 +134,46 @@ identical. All boxes describe landed code.
 
 ## Relationships
 
-| #  | From                         | To                           | Relationship                                                                           |
-| -- | ---------------------------- | ---------------------------- | -------------------------------------------------------------------------------------- |
-| 1  | HTTP API / auth              | AppRegistry / AppServices    | Resolve app and named handler                                                          |
-| 2  | HTTP API / auth              | TenantRegistry               | Resolve hashed credentials; admin tenant/key CRUD                                      |
-| 3  | HTTP API / auth              | Central registry             | Better Auth session/registration SQL                                                   |
-| 4  | HTTP API / auth              | TenantContext                | Provide authenticated tenant per request                                               |
-| 5  | TenantContext                | Storage                      | Resolve tenant writer; never use caller selectors                                      |
-| 6  | AppRegistry / AppServices    | TenantStorageRouter          | Build per-app LocalFolderRouter                                                        |
-| 7  | TenantStorageRouter          | FFI SQLite binding           | Open and prepare validated tenant SQLite file; schema guard                            |
-| 8  | Storage                      | TenantStorageRouter          | Resolve/prepare tenant location before opening a cached writer                         |
-| 9  | HTTP API / auth              | Storage                      | Mutation Effect inside serialized transaction                                          |
-| 10 | HTTP API / auth              | DocumentReaderClient         | Document query in-process; compiled SQLite SQL                                         |
-| 11 | DocumentReaderClient         | AppRegistry / AppServices    | Resolve registered query, schema and file                                              |
-| 12 | DocumentReaderClient         | FFI SQLite binding           | Read-only connection and transaction; prepared-statement cache                         |
-| 13 | HTTP API / auth              | ReaderClient / ReaderProcess | Ingest/analysis RPC; trace context                                                     |
-| 14 | Storage                      | FFI SQLite binding           | Writer connection, transactions and snapshot reads; blocking path                      |
-| 15 | Server lifecycle             | Backups / ObjectStore        | Scoped backup timer                                                                    |
-| 16 | Backups / ObjectStore        | Storage                      | Consistent VACUUM INTO snapshot                                                        |
-| 17 | Backups / ObjectStore        | FFI SQLite binding           | Read-only quick_check of the snapshot copy before publication                          |
-| 18 | Backups / ObjectStore        | Object storage               | Verified snapshot and manifest publication                                             |
-| 19 | TenantRegistry               | Central registry             | Parameterized registry SQL; lazy scoped pool                                           |
-| 20 | Server lifecycle             | ReaderClient / ReaderProcess | Ping; hourly ingest; reader-exit watch and finalizer                                   |
-| 21 | ReaderClient / ReaderProcess | Reader child                 | JSONL RPC; scoped child shutdown                                                       |
-| 22 | Storage                      | Logger / EventSink           | SQL/tx/queue events                                                                    |
-| 23 | HTTP API / auth              | Logger / EventSink           | HTTP/handler spans and failures                                                        |
-| 24 | Server lifecycle             | Logger / EventSink           | Startup/shutdown and timer events                                                      |
-| 25 | Backups / ObjectStore        | Logger / EventSink           | Backup and object-transfer events                                                      |
-| 26 | Logger / EventSink           | Server JSONL                 | Batched append; rotation and scope drain                                               |
-| 27 | Config / IdGen               | AppRegistry / AppServices    | App schemas, tokens and paths; generated ids                                           |
-| 28 | Config / IdGen               | TenantRegistry               | DATABASE_URL and scope-owned cache                                                     |
-| 29 | Config / IdGen               | TenantStorageRouter          | TENANTS_DIR and router selection                                                       |
-| 30 | Config / IdGen               | Logger / EventSink           | Level, queue, flush and rotation settings                                              |
-| 31 | Config / IdGen               | FFI SQLite binding           | sqlite.library: the libsqlite3 path passed to every open                               |
-| 32 | AppRegistry / AppServices    | FFI SQLite binding           | Load libsqlite3 once at startup; sqlite-library lifecycle event names path and version |
-| 33 | FFI SQLite binding           | Application files            | libsqlite3 file I/O; WAL transactions and read-only snapshots                          |
+| #  | From                         | To                           | Relationship                                                                                                                              |
+| -- | ---------------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| 1  | HTTP API / auth              | AppRegistry / AppServices    | Resolve app and named handler                                                                                                             |
+| 2  | HTTP API / auth              | TenantRegistry               | Resolve hashed credentials; admin tenant/key CRUD                                                                                         |
+| 3  | HTTP API / auth              | Central registry             | Better Auth session/registration SQL                                                                                                      |
+| 4  | HTTP API / auth              | TenantContext                | Provide authenticated tenant per request                                                                                                  |
+| 5  | TenantContext                | Storage                      | Resolve tenant writer; never use caller selectors                                                                                         |
+| 6  | AppRegistry / AppServices    | TenantStorageRouter          | Build per-app LocalFolderRouter                                                                                                           |
+| 7  | TenantStorageRouter          | FFI SQLite binding           | Open and prepare validated tenant SQLite file; schema guard                                                                               |
+| 8  | Storage                      | TenantStorageRouter          | Resolve/prepare tenant location before opening a cached writer                                                                            |
+| 9  | HTTP API / auth              | Storage                      | Mutation Effect inside serialized transaction                                                                                             |
+| 10 | HTTP API / auth              | DocumentReaderClient         | Document query in-process; compiled SQLite SQL                                                                                            |
+| 11 | DocumentReaderClient         | AppRegistry / AppServices    | Resolve registered query, schema and file                                                                                                 |
+| 12 | DocumentReaderClient         | FFI SQLite binding           | Read-only connection and transaction; point reads blocking, other selects allAsync under the deadline; prepared-statement cache           |
+| 13 | DocumentReaderClient         | Statement classifier         | Pick the path of each select from its plan                                                                                                |
+| 14 | HTTP API / auth              | ReaderClient / ReaderProcess | Ingest/analysis RPC; trace context                                                                                                        |
+| 15 | Storage                      | FFI SQLite binding           | Writer connection, transactions and snapshot reads; writes and point reads blocking, unbounded reads allAsync/getAsync under the deadline |
+| 16 | Storage                      | Statement classifier         | Pick the path of each handler read from its plan                                                                                          |
+| 17 | Server lifecycle             | Backups / ObjectStore        | Scoped backup timer                                                                                                                       |
+| 18 | Backups / ObjectStore        | Storage                      | Consistent VACUUM INTO snapshot                                                                                                           |
+| 19 | Backups / ObjectStore        | FFI SQLite binding           | Read-only quick_check of the snapshot copy before publication                                                                             |
+| 20 | Backups / ObjectStore        | Object storage               | Verified snapshot and manifest publication                                                                                                |
+| 21 | TenantRegistry               | Central registry             | Parameterized registry SQL; lazy scoped pool                                                                                              |
+| 22 | Server lifecycle             | ReaderClient / ReaderProcess | Ping; hourly ingest; reader-exit watch and finalizer                                                                                      |
+| 23 | ReaderClient / ReaderProcess | Reader child                 | JSONL RPC; scoped child shutdown                                                                                                          |
+| 24 | Storage                      | Logger / EventSink           | SQL/tx/queue events (each sql event carries its path); error lifecycle event for a stuck statement                                        |
+| 25 | DocumentReaderClient         | Logger / EventSink           | SQL/tx events (with path); error lifecycle event for a stuck statement                                                                    |
+| 26 | HTTP API / auth              | Logger / EventSink           | HTTP/handler spans and failures                                                                                                           |
+| 27 | Server lifecycle             | Logger / EventSink           | Startup/shutdown and timer events                                                                                                         |
+| 28 | Backups / ObjectStore        | Logger / EventSink           | Backup and object-transfer events                                                                                                         |
+| 29 | Logger / EventSink           | Server JSONL                 | Batched append; rotation and scope drain                                                                                                  |
+| 30 | Config / IdGen               | AppRegistry / AppServices    | App schemas, tokens and paths; generated ids                                                                                              |
+| 31 | Config / IdGen               | TenantRegistry               | DATABASE_URL and scope-owned cache                                                                                                        |
+| 32 | Config / IdGen               | TenantStorageRouter          | TENANTS_DIR and router selection                                                                                                          |
+| 33 | Config / IdGen               | Logger / EventSink           | Level, queue, flush and rotation settings                                                                                                 |
+| 34 | Config / IdGen               | FFI SQLite binding           | sqlite.library: the libsqlite3 path passed to every open                                                                                  |
+| 35 | Config / IdGen               | Storage                      | sqlite.statementDeadlineMs and statementInterruptGraceMs: deadline and interrupt grace of unbounded reads                                 |
+| 36 | Config / IdGen               | DocumentReaderClient         | sqlite.statementDeadlineMs and statementInterruptGraceMs: deadline and interrupt grace of unbounded selects                               |
+| 37 | AppRegistry / AppServices    | FFI SQLite binding           | Load libsqlite3 once at startup; sqlite-library lifecycle event names path and version                                                    |
+| 38 | FFI SQLite binding           | Application files            | libsqlite3 file I/O; WAL transactions and read-only snapshots                                                                             |
 
 ## Runtime notes
 
@@ -172,4 +192,19 @@ only through the FFI binding, on Config.sqlite.library; node:sqlite is not in th
 (tests/unit/boundaries_test.ts). Startup loads libsqlite3 once and logs a lifecycle event, phase
 sqlite-library, with the resolved path and version. FFI-04b: every FFI open, read-only included, applies
 node:sqlite-compatible connection defaults (double-quoted string literals off, foreign_keys on) before any
-caller SQL, and loadLibrary refuses darwin/aarch64.
+caller SQL, and loadLibrary refuses darwin/aarch64. FFI-05: the classifier (platform/sqlite_ffi/classify.ts)
+picks one of two execution paths per document operation from the plan IR. Blocking: writes, primary-key
+selects and the writer's pragmas, DDL, BEGIN/COMMIT/ROLLBACK and VACUUM INTO run on the main thread, never
+interrupted. Nonblocking: every other select, count and countBy (and the writer's U+0000 probe of such a
+select) runs allAsync/getAsync on Deno's blocking pool under Config.sqlite.statementDeadlineMs. At the
+deadline the binding calls sqlite3_interrupt and the statement fails StatementDeadlineError, which
+toHttpStatus maps to HTTP 504 (core/errors.ts). Writes never take the nonblocking path: an interrupt landing
+after an async write committed would leave the commit standing while the caller saw a failure. The call-level
+reader.callTimeoutMs guard stays; config validation keeps the statement deadline below it, so the deadline
+fires first. A per-connection ConnectionGate (platform/sqlite.ts, shared by Storage and the document reader)
+keeps one statement at a time on a connection: while an async read is in flight, every other statement (a
+forked fiber's, COMMIT, the release's ROLLBACK) waits instead of failing the binding's busy refusal. A step
+that has not returned Config.sqlite.statementInterruptGraceMs after its interrupt poisons the connection: an
+error-level lifecycle event (phase "statement did not return after interrupt"), no further statements, and the
+connection closes when the step returns. Every sql event carries path (blocking or nonblocking) in memory; the
+JSONL key list and the DuckDB sql_events column arrive with FFI-06, so the event-log containers are unchanged.
