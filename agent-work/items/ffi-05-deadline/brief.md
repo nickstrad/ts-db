@@ -121,3 +121,23 @@ default 5000, must be `< reader.callTimeoutMs`; `sqlite.statementInterruptGraceM
 - Close with: commit SHA(s), validation output per task, perf comparison, learning assessment (what went to
   `docs/knowledge/`, what is handed to the coordinator because it lies outside Owns), and what the reviewer
   should look at first.
+
+## Repair 1 after Astra review
+
+Astra review (FAIL, `review/ffi-05-astra`, `agent-work/items/ffi-05-deadline/review-astra.md`) on `6246f9d`;
+repair by `claude-opus-ffi-05-repair1` in `/root/Software/tsdb-work/ffi05-rep1`, the one repair round before
+arbitration. Repair commit `076b327`.
+
+- Defect 1 (P2), fixed: the reader's query context is rechecked where each select starts, after any gate wait
+  (`admit`: the `gate.blocking` start callback and the `gate.nonblocking` guard), and `COMMIT`'s gate callback
+  expires the context in the same synchronous step, as the writer does. A refusal for an expired context emits
+  no `sql` event and is not counted as an operation. Regression in `tests/unit/document_reader_test.ts`
+  (blocking and nonblocking late read × immediate and yielding sink); all four variants fail against
+  `6246f9d`.
+- Defect 2 (P3), fixed: the gate fixtures in `tests/unit/storage_test.ts` do their native call inside `start`;
+  a new competing-claim regression shows the deferred shape failing `"busy"`.
+- Reviewer's reproduction, scratch copy, both modes: before, `delay-sink` late `Success` after `COMMIT` and
+  the `tx` event, immediate late `ReaderError` "prepare on a closed connection"; after, both
+  `ContextExpiredError` with no native call or `sql` event after `COMMIT`.
+- Validation: lint, check, test (686 passed, 0 failed, 1 ignored), test:prop (79 passed), integration PASS,
+  `deno fmt --check` on touched files. Knowledge: `docs/knowledge/gotchas.md`, "FFI-05 repair".
