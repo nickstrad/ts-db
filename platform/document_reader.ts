@@ -211,27 +211,43 @@ export function querySqlite(
               })));
 
           /**
-           * One select on its plan's path. Blocking: fetched and run in the step that saw the
-           * connection idle. Nonblocking: `allAsync` under the binding's own deadline, mapped to
-           * `StatementDeadlineError` when it fires; every other binding failure is a `ReaderError`.
+           * The admission check of one select, made in the step that starts it, after any wait for the
+           * connection (both gate paths): a handler's forked fiber can pass `executeIn`'s check, queue
+           * behind an in-flight read, and reach the connection only after `COMMIT` expired the context.
+           * Admitted selects count toward the transaction's `operations`; a poisoned connection refuses.
            */
-          const runSelect = (plan: SelectPlan, sql: SQL) => {
+          const admit = (
+            context: QueryContext,
+            plan: SelectPlan,
+          ): ContextExpiredError | ReaderError | undefined => {
+            if (!context.active) return new ContextExpiredError({ context: "query" });
+            context.operations += 1;
+            return gate.poisoned ? poisoned("select", plan.table) : undefined;
+          };
+
+          /**
+           * One select on its plan's path. Blocking: admitted, fetched and run in the step that saw the
+           * connection idle. Nonblocking: admitted in the step that claims the connection, then
+           * `allAsync` under the binding's own deadline, mapped to `StatementDeadlineError` when it
+           * fires; every other binding failure is a `ReaderError`.
+           */
+          const runSelect = (context: QueryContext, plan: SelectPlan, sql: SQL) => {
             const { values } = sql;
             if (pathOf(classify(plan)) === "blocking") {
-              return gate.blocking(() =>
-                gate.poisoned
-                  ? Effect.fail(poisoned("select", plan.table))
-                  : nativeNow("select", () => prepareCached(connection, sql.text).all(values), plan.table)
-              );
+              return gate.blocking((): Effect.Effect<Row[], ReaderError | ContextExpiredError> => {
+                const refused = admit(context, plan);
+                if (refused !== undefined) return Effect.fail(refused);
+                return nativeNow("select", () => prepareCached(connection, sql.text).all(values), plan.table);
+              });
             }
-            return gate.nonblocking<Row[], ReaderError>({
+            return gate.nonblocking<Row[], ReaderError | ContextExpiredError>({
               sql: sql.text,
-              guard: () => gate.poisoned ? poisoned("select", plan.table) : undefined,
+              guard: () => admit(context, plan),
               execute: (statement) => allAsync(statement, values, { timeoutMs: limits.deadlineMs }),
               limits,
               onStuck: stuck(plan, sql.text),
             }).pipe(
-              Effect.mapError((failure): ReaderError | StatementDeadlineError =>
+              Effect.mapError((failure): ReaderError | ContextExpiredError | StatementDeadlineError =>
                 !isSqliteFfiError(failure)
                   ? failure
                   : toDeadlineError(failure, plan.table, deadlineKind(plan), limits.deadlineMs) ??
@@ -251,11 +267,16 @@ export function querySqlite(
           ): Effect.Effect<unknown, DocumentQueryError> =>
             Effect.gen(function* () {
               const sql = yield* compileSelect(app.schema, plan, "sqlite");
-              context.operations += 1;
               const path = pathOf(classify(plan));
               const start = yield* Clock.currentTimeNanos;
-              const exit = yield* Effect.exit(runSelect(plan, sql));
+              const exit = yield* Effect.exit(runSelect(context, plan, sql));
               const durationMs = elapsedMs(start, yield* Clock.currentTimeNanos);
+              // Refused for an expired context: no statement ran, so no `sql` event (as before the
+              // wait, and as on the writer), and none can land after the transaction's `tx` event.
+              const refused = Exit.isFailure(exit) ? Cause.failureOption(exit.cause) : Option.none();
+              if (Option.isSome(refused) && refused.value._tag === "ContextExpiredError") {
+                return yield* refused.value;
+              }
               if (logging.traceSql || Exit.isFailure(exit)) {
                 const failure = Exit.isFailure(exit) ? Cause.failureOption(exit.cause) : Option.none();
                 yield* sink.emit(sqlEvent({
@@ -277,7 +298,10 @@ export function querySqlite(
               return yield* decode(app.schema, plan, yield* exit);
             });
 
-          /** The handler's executor: reads only, and only while its transaction is open. */
+          /**
+           * The handler's executor: reads only, and only while its transaction is open. This check
+           * refuses early; `admit` repeats it where the statement actually starts.
+           */
           const executeIn = (context: QueryContext): Execute => (operation) =>
             Effect.suspend(() => {
               if (!context.active) return Effect.fail(new ContextExpiredError({ context: "query" }));
@@ -352,11 +376,15 @@ export function querySqlite(
                     cause,
                   }),
               });
-              yield* gate.blocking(() =>
-                gate.poisoned
+              yield* gate.blocking(() => {
+                // Expire in the same step as COMMIT (as the writer does): a forked fiber's read queued
+                // behind an in-flight one must find the context expired when it reaches the connection,
+                // not run after COMMIT, outside the snapshot, or on a connection the release closed.
+                context.active = false;
+                return gate.poisoned
                   ? Effect.fail(poisoned("commit"))
-                  : nativeNow("commit", () => connection.exec("COMMIT"))
-              );
+                  : nativeNow("commit", () => connection.exec("COMMIT"));
+              });
               return safe;
             });
 

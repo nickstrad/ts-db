@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { Deferred, Effect, Either, Exit, Fiber, Option } from "effect";
+import { Cause, Deferred, Effect, Either, Exit, Fiber, Option } from "effect";
 import { type StatementDeadlineError, toHttpStatus } from "../../core/errors.ts";
 import type { EventRecord, SqlEventRecord, TxEventRecord } from "../../core/events.ts";
 import { compileDDL } from "../../core/compile/ddl.ts";
@@ -526,6 +526,110 @@ test("FFI-05: an unbounded count stops at the statement deadline (504) while a p
         assert.equal((after as { _id?: string } | null)?._id, "game-7");
       }).pipe(Effect.provide(AppRegistryTest([app]))),
     ));
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("FFI-05: a forked read queued behind an in-flight read fails ContextExpiredError once COMMIT ran, on both paths, with no late sql event", async () => {
+  // Astra review of FFI-05, defect 1. A handler forks a long count (nonblocking, on the pool) and a
+  // delayed read, then returns. COMMIT queues behind the count; the delayed read passes `executeIn`'s
+  // check (the context is still active) and queues behind COMMIT. When the count settles, COMMIT runs
+  // and expires the context in its own step, so the queued read must refuse where it starts: before
+  // the repair it ran after COMMIT (outside the snapshot, a `sql` event after the `tx` event) or hit
+  // the connection the release had closed (ReaderError "prepare on a closed connection").
+  const root = await Deno.makeTempDir({ prefix: "ffi05-escaped-" });
+  const file = join(root, "big.sqlite");
+  try {
+    seedGames(file, 200_000);
+    const appSchema = withStorage(schema, "json");
+    const app = { id: "big", file, schema: appSchema };
+    const { load1 } = loadFactor();
+    for (const path of ["blocking", "nonblocking"] as const) {
+      // `yielding`: the sink sleeps 5 ms after recording a `tx` event, as a real sink may yield.
+      for (const sinkMode of ["immediate", "yielding"] as const) {
+        const label = `${path}/${sinkMode}`;
+        const events: EventRecord[] = [];
+        let slow: Fiber.RuntimeFiber<unknown, unknown> | undefined;
+        let late: Fiber.RuntimeFiber<unknown, unknown> | undefined;
+        let lateStarted = 0;
+        let countSettled = 0;
+        const query = defineFunctions(appSchema).query({
+          args: {},
+          handler: ({ db }) =>
+            Effect.gen(function* () {
+              // About 200 ms on vm-1 (see `seedGames`), far under the default 5 s statement deadline.
+              slow = yield* Effect.forkDaemon(
+                db.find("games", { xPlayer: "alice", oPlayer: "nobody" }).count(),
+              );
+              late = yield* Effect.forkDaemon(Effect.zipRight(
+                Effect.sleep("10 millis"),
+                Effect.suspend((): Effect.Effect<unknown, unknown> => {
+                  lateStarted = performance.now();
+                  // `get` by `_id` is bounded (blocking path); a filtered `count` is unbounded.
+                  return path === "blocking"
+                    ? db.get("games", "game-1")
+                    : db.find("games", { oPlayer: "nobody" }).count();
+                }),
+              ));
+              yield* Effect.sleep("2 millis");
+              return null;
+            }),
+        });
+        const started = performance.now();
+        const result = await Effect.runPromise(
+          Effect.gen(function* () {
+            const exit = yield* Effect.exit(querySqlite(app, query, {}));
+            const slowExit = yield* Fiber.await(slow!);
+            const lateExit = yield* Fiber.await(late!);
+            return { exit, slowExit, lateExit };
+          }).pipe(
+            Effect.provide(ConfigTest({ logging: { traceSql: true } })),
+            Effect.provideService(EventSink, {
+              emit: (event) =>
+                Effect.zipRight(
+                  Effect.sync(() => {
+                    if (event.kind === "sql" && countSettled === 0) countSettled = performance.now();
+                    events.push(event);
+                  }),
+                  sinkMode === "yielding" && event.kind === "tx" ? Effect.sleep("5 millis") : Effect.void,
+                ),
+            }),
+          ),
+        );
+        const sql = events.filter((e): e is SqlEventRecord => e.kind === "sql");
+        const tx = events.filter((e): e is TxEventRecord => e.kind === "tx");
+        console.log(
+          `FFI-05 escaped read ${label}: late read began at ${(lateStarted - started).toFixed(1)} ms, ` +
+            `count settled at ${(countSettled - started).toFixed(1)} ms; load1 ${load1.toFixed(2)}`,
+        );
+        assert.ok(Exit.isSuccess(result.exit), `${label}: handler ${String(result.exit)}`);
+        assert.equal(result.exit.value, null);
+        // The count ran inside the transaction: count 0 (no `oPlayer` is "nobody").
+        assert.ok(Exit.isSuccess(result.slowExit), `${label}: count ${String(result.slowExit)}`);
+        assert.equal(result.slowExit.value, 0);
+        // Fixture check: the late read began while the count was still on the pool, so it queued
+        // behind the count (and behind COMMIT) rather than meeting an already-expired context.
+        assert.ok(sql.length >= 1 && sql[0].path === "nonblocking", `${label}: ${JSON.stringify(sql)}`);
+        assert.ok(
+          lateStarted > 0 && lateStarted < countSettled,
+          `${label}: the late read must begin before the count settles`,
+        );
+        // The queued read refused where it reached the connection: expected ContextExpiredError,
+        // the pre-FFI-05 outcome, and no statement ran.
+        assert.ok(Exit.isFailure(result.lateExit), `${label}: late read ${String(result.lateExit)}`);
+        const failure = Cause.failureOption(result.lateExit.cause);
+        assert.ok(Option.isSome(failure), `${label}: ${String(result.lateExit.cause)}`);
+        assert.equal((failure.value as { _tag: string })._tag, "ContextExpiredError", label);
+        // Only the count's `sql` event, and it precedes the transaction's completion event.
+        assert.deepEqual(sql.map((e) => [e.path, e.outcome]), [["nonblocking", "ok"]], label);
+        assert.equal(tx.length, 1, label);
+        assert.equal(tx[0].outcome, "commit", label);
+        assert.equal(tx[0].operations, 1, `${label}: the refused read is not an operation`);
+        assert.ok(events.indexOf(sql[0]) < events.indexOf(tx[0]), `${label}: sql event after tx`);
+        assert.equal(events.at(-1), tx[0], `${label}: nothing recorded after the tx event`);
+      }
+    }
   } finally {
     await Deno.remove(root, { recursive: true });
   }

@@ -926,17 +926,84 @@ test("FFI-05: a concurrent statement waits for an in-flight nonblocking read ins
       );
       yield* Effect.sleep("2 millis");
       assert.ok(db.inFlight, "the read is on the pool");
-      // Without the gate this would throw SqliteUsageError("busy") from the main thread.
-      const value = yield* gate.blocking(() =>
-        Effect.sync(() => {
-          order.push("blocking");
-          return db.prepare("SELECT x FROM t").get()?.x;
-        })
-      );
+      // Without the gate this would throw SqliteUsageError("busy") from the main thread. The native
+      // call runs inside `start`, and only its result is returned as an Effect (the gate's contract).
+      const value = yield* gate.blocking(() => {
+        order.push("blocking");
+        return Effect.succeed(db.prepare("SELECT x FROM t").get()?.x);
+      });
       assert.equal(value, 1);
       assert.equal((yield* Fiber.join(read))[0]?.c, 300001);
       assert.deepEqual(order, ["read", "blocking"]);
     }));
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("FFI-05: a blocking start does its native work before returning, so a competing nonblocking claim cannot take the connection first", async () => {
+  // The gate's contract (`ConnectionGate.blocking`): once `start` returns, nothing holds the
+  // connection for it, so a nonblocking claimant may take it before the returned Effect runs. A start
+  // that defers its native call into the Effect (`Effect.sync(() => nativeCall())`) then finds the
+  // connection busy. `handOff` is that window made deterministic: it lets the competitor claim the
+  // connection and waits until it has, standing in for any yield between `start` and its Effect.
+  const dir = mkdtempSync(join(tmpdir(), "ts-db-ffi05-claim-"));
+  const db = Database.open(join(dir, "claim.sqlite"));
+  try {
+    db.exec("CREATE TABLE t (x INTEGER)");
+    db.exec("INSERT INTO t VALUES (1)");
+    const gate = new ConnectionGate(db);
+    const slow =
+      "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 300000) SELECT count(*) AS c FROM n";
+    const race = (start: (handOff: Effect.Effect<void>) => Effect.Effect<unknown, unknown>) =>
+      Effect.gen(function* () {
+        const go = yield* Deferred.make<void>();
+        const claimed = yield* Deferred.make<void>();
+        const competitor = yield* Effect.fork(Effect.zipRight(
+          Deferred.await(go),
+          gate.nonblocking({
+            sql: slow,
+            // Called in the claiming step, after the claim: `claimed` means the connection is taken.
+            execute: (statement) =>
+              Effect.zipRight(
+                Deferred.succeed(claimed, undefined),
+                allAsync(statement, [], { timeoutMs: 5000 }),
+              ),
+            limits: { deadlineMs: 5000, graceMs: 1000 },
+            onStuck: Effect.void,
+          }),
+        ));
+        const handOff = Effect.zipRight(Deferred.succeed(go, undefined), Deferred.await(claimed));
+        const outcome = yield* Effect.exit(gate.blocking(() => start(handOff)));
+        const read = yield* Fiber.join(competitor);
+        return { outcome, inFlightAfter: db.inFlight, count: read[0]?.c };
+      });
+
+    // Contract-following start: the native call has returned before `start` does.
+    const immediate = await Effect.runPromise(race((handOff) => {
+      const x = db.prepare("SELECT x FROM t").get()?.x;
+      return Effect.as(handOff, x);
+    }));
+    assert.ok(Exit.isSuccess(immediate.outcome), String(immediate.outcome));
+    assert.equal(immediate.outcome.value, 1);
+    assert.equal(immediate.count, 300001);
+    assert.equal(immediate.inFlightAfter, false);
+
+    // The deferred pattern the contract forbids: the competitor claims first and the native call,
+    // made later, is refused busy. This is what the fixtures above must never do.
+    const deferred = await Effect.runPromise(race((handOff) =>
+      Effect.zipRight(
+        handOff,
+        Effect.try({ try: () => db.prepare("SELECT x FROM t").get()?.x, catch: (cause) => cause }),
+      )
+    ));
+    assert.ok(Exit.isFailure(deferred.outcome), "a deferred native call lost the connection to the claim");
+    const failure = Cause.squash(deferred.outcome.cause);
+    assert.ok(isSqliteFfiError(failure), String(failure));
+    assert.equal(failure._tag, "SqliteUsageError");
+    assert.equal((failure as { reason?: string }).reason, "busy");
+    assert.equal(deferred.count, 300001);
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
@@ -957,7 +1024,7 @@ test("FFI-05 grace period: a step that outlives its interrupt poisons the connec
     const gate = new ConnectionGate(victim);
     // Prepare (and cache) while unlocked: preparing reads the schema, which would wait on the main thread.
     assert.equal(
-      Effect.runSync(gate.blocking(() => Effect.sync(() => prepareCached(victim, sql).all())))[0]?.n,
+      Effect.runSync(gate.blocking(() => Effect.succeed(prepareCached(victim, sql).all())))[0]?.n,
       0,
     );
     holder.exec("BEGIN EXCLUSIVE");
@@ -977,12 +1044,11 @@ test("FFI-05 grace period: a step that outlives its interrupt poisons the connec
       })));
       // Queued behind the stuck read: it runs only after the step returns, and then refuses.
       yield* Effect.sleep("60 millis");
-      const queued = yield* Effect.fork(gate.blocking(() =>
-        Effect.sync(() => {
-          if (gate.poisoned) refused.push(victim.isOpen ? "open" : "closed");
-          else prepareCached(victim, sql).all();
-        })
-      ));
+      const queued = yield* Effect.fork(gate.blocking(() => {
+        if (gate.poisoned) refused.push(victim.isOpen ? "open" : "closed");
+        else prepareCached(victim, sql).all();
+        return Effect.void;
+      }));
       const result = yield* Fiber.join(read);
       yield* Fiber.join(queued);
       return result;
