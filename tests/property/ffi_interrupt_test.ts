@@ -23,9 +23,10 @@
  *    `CLOSE_GRACE_MS`, a native step is running that nothing in this process can stop, so the test
  *    reports it and kills the process (SIGKILL, exit 137): a stuck native execution must not survive
  *    into later tests, and abandoning it only moves the crash to runtime teardown (SIGSEGV, exit 139).
- * 3. A watchdog on its own thread (a `Worker`) kills the process with SIGKILL if the iteration makes
- *    no progress for `BACKSTOP_MS`. That is the only layer that covers a synchronous stall, which
- *    blocks the event loop and so every timer on it. Its report names the iteration's inputs.
+ * 3. A watchdog on its own thread (a `Worker`) kills the process with SIGKILL if the test (fixture
+ *    setup, iterations, cleanup) makes no progress for `BACKSTOP_MS`. It is armed before the fixture
+ *    opens the database and re-armed at each phase boundary, so it covers a synchronous stall anywhere,
+ *    which blocks the event loop and so every timer on it. Its report names the phase or iteration.
  *
  * A failure report carries the iteration's inputs (statement, mechanism and delays), phase, elapsed
  * time and the host load average. The seed fixes the generated inputs, not scheduling: a timing
@@ -104,6 +105,8 @@ const plain = (rows: readonly Row[]) => rows.map((r) => ({ ...r }));
 type Health = { stuck: string | null };
 
 const loadavg = () => Deno.loadavg().map((l) => l.toFixed(2)).join("/");
+/** Watchdog context for a phase outside the generated iterations (the same fields as an iteration's). */
+const setupContext = (phase: string) => `${phase}, load ${loadavg()}, seed ${SEED}`;
 
 /**
  * Report a native execution that cannot be stopped, then kill the process (SIGKILL, exit 137). Never
@@ -145,12 +148,17 @@ async function closeWithGrace(db: Database): Promise<"closed" | "expired"> {
   }
 }
 
-async function withFixture<T>(health: Health, fn: (f: Fixture) => Promise<T>): Promise<T> {
+async function withFixture<T>(
+  health: Health,
+  beat: (context: string) => void,
+  fn: (f: Fixture) => Promise<T>,
+): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), "ts-db-ffi-interrupt-"));
   const db = Database.open(join(dir, "interrupt.db"));
   let body: { ok: true; value: T } | { ok: false; error: unknown };
   try {
     db.exec("CREATE TABLE big(id INTEGER PRIMARY KEY, grp INTEGER NOT NULL, pad TEXT NOT NULL)");
+    beat(setupContext("fixture seed insert"));
     db.prepare(
       "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?) " +
         "INSERT INTO big SELECT i, i % 50, printf('row-%08d-padding', i) FROM n",
@@ -159,9 +167,11 @@ async function withFixture<T>(health: Health, fn: (f: Fixture) => Promise<T>): P
       KINDS.map((k) => [k, db.prepare(STATEMENTS[k])]),
     ) as Fixture["statements"];
     const expected = {} as Fixture["expected"];
+    beat(setupContext("fixture baseline reads"));
     for (const k of KINDS) if (k !== "forever") expected[k] = plain(statements[k].all());
     assert.equal(expected.point.length, 1, "the point read finds its row");
     assert.ok(Number(expected.join[0].n) > 1_000_000, "the join is big enough to run for a while");
+    beat(setupContext("fixture ready, starting iterations"));
     body = { ok: true, value: await fn({ db, statements, expected, probe: db.prepare("SELECT 42 AS x") }) };
   } catch (error) {
     body = { ok: false, error };
@@ -169,6 +179,7 @@ async function withFixture<T>(health: Health, fn: (f: Fixture) => Promise<T>): P
   // Cleanup is part of the test: a close failure fails it, and so does running out of grace.
   let closeError: unknown;
   let closed: "closed" | "expired" = "closed";
+  beat(setupContext("cleanup"));
   try {
     closed = await closeWithGrace(db);
   } catch (error) {
@@ -324,7 +335,8 @@ Deno.test(
     const health: Health = { stuck: null };
     const watchdog = startWatchdog();
     try {
-      await withFixture(health, async ({ db, statements, expected, probe }) => {
+      watchdog.beat(setupContext("fixture open"));
+      await withFixture(health, watchdog.beat, async ({ db, statements, expected, probe }) => {
         await fc.assert(
           fc.asyncProperty(kindArb, mechanismArb, async (kind, mechanism) => {
             // After a timeout the connection may still be executing: do not replay (shrink) against it.
