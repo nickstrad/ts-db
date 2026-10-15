@@ -87,8 +87,9 @@ c4-sdk is the oracle) plus a conversion inventory.
 6. **Inventory.** `content/<dataset>/inventory.md` lists source node/edge → JSON id → document ids, every
    Mermaid-versus-terminal discrepancy and every conversion decision. The test fails if an element or
    relationship id is missing from it.
-7. **Verify.** `deno fmt pages/public pages/content` (the root fmt check covers them), then `npm test`, then
-   look at the result in `npm run dev`.
+7. **Verify.** `deno fmt --config deno.json pages/public pages/content` from the repo root (the root fmt check
+   covers them; without `--config` deno formats at width 80 because of `pages/package.json`), then `npm test`,
+   then look at the result in `npm run dev`.
 
 `tsdb-current` is pinned to `main` at `2d30330` (audit stamp `0b82504`). When the Markdown diagrams change,
 refresh it from the new commit: diff the pairs, update elements, relationships, documents and sources, and
