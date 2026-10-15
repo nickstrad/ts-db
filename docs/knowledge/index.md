@@ -18,12 +18,12 @@ read and edit entries with zero tooling.
 
 ## Where the project stands
 
-- `docs/plans/ffi-implementation.md` — the FFI statement execution layer: FFI-01 to FFI-07 on `main`, FFI-08
-  (this documentation item) pending review and approval. Decision record:
+- `docs/plans/ffi-implementation.md` — the FFI statement execution layer: FFI-01 to FFI-08, including FFI-04b,
+  all landed on `main` (FFI-08 merge `0b82504`; the plan record landed at `2d30330`). Decision record:
   `docs/adr/0008-statement-execution-via-ffi.md`.
-- `pages/` — the architecture diagrams site (PG-01, 2026-10-15): current and proposed C4 views side by side,
-  on an interim c4-sdk copy until the npm package exists. See `pages/README.md` and the decision of
-  2026-10-15.
+- `pages/` — the architecture diagrams site (PG-01, landed 2026-10-15 as `b789441`): current and proposed C4
+  views side by side, on an interim c4-sdk copy until the npm package exists. See `pages/README.md` and the
+  decision of 2026-10-15.
 - `agent-work/COORDINATION.md` — the coordinator's live log: what landed, what is in review, what is building.
 - `docs/plans/effect-port-and-observability.md` and `docs/plans/multitenancy.md` — the build plans.
 - `/root/MUSE_HATCH_README.md` — vm-1 orientation (read once per host).
