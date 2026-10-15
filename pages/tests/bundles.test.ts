@@ -7,7 +7,7 @@ describe("catalog", () => {
   it("lists the current and the proposed dataset", () => {
     expect(catalog.entries.map((entry) => entry.id)).toEqual([
       "tsdb-current",
-      "tsdb-ffi-proposal",
+      "tsdb-lanes-proposal",
     ]);
   });
 });

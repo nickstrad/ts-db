@@ -1,6 +1,13 @@
-# Conversion inventory: `tsdb-ffi-proposal`
+# Conversion inventory: `tsdb-lanes-proposal`
 
-Bundle: [`public/architectures/tsdb-ffi-proposal.json`](../../public/architectures/tsdb-ffi-proposal.json).
+Title: "Proposed: statement lanes and tenant placement (scale-out)". This dataset proposes **only** the
+unbuilt scale-out design: statement lanes, the placement table, the forwarder, the lane supervisor, the peer
+node and WAL frames. The FFI execution layer (FFI-01 to FFI-08: binding, statement classifier, deadline and
+HTTP 504) has landed on `main` and is part of `tsdb-current`; here it appears as `existing`, never as the
+proposal.
+
+Bundle:
+[`public/architectures/tsdb-lanes-proposal.json`](../../public/architectures/tsdb-lanes-proposal.json).
 Source: the proposed context and container pairs in `docs/plans/ffi/` on branch `docs/ffi-c4` at
 [`81d9936`](https://github.com/nickstrad/ts-db/tree/81d9936df084763c1577f37bd844b4ff00b95fdc/docs/plans/ffi)
 (not merged to `main`; read with `git show`), corrected against `main` at `2d30330`, where the FFI execution
@@ -36,7 +43,7 @@ from this file.
 | `src-current-platform` | [docs/architecture/c4-container-platform.github.md](https://github.com/nickstrad/ts-db/blob/2d30330ed2c0aa967fb737827e43a7cbb8714e59/docs/architecture/c4-container-platform.github.md)   | `2d30330` |
 | `src-current-context`  | [docs/architecture/c4-context-document-db.github.md](https://github.com/nickstrad/ts-db/blob/2d30330ed2c0aa967fb737827e43a7cbb8714e59/docs/architecture/c4-context-document-db.github.md) | `2d30330` |
 
-## System Context — FFI execution layer and tenant cells → diagram `ffi-context`
+## System Context — proposed lanes and tenant placement → diagram `lanes-context`
 
 Source: `docs/plans/ffi/c4-context-ffi.github.md` and `.terminal.md`.
 
@@ -63,7 +70,7 @@ Source: `docs/plans/ffi/c4-context-ffi.github.md` and `.terminal.md`.
 | (5)         | Document DB platform → Object storage                 | `ctx-5`         | mixed    | WAL frames (phase two).                                                            |
 | (6)         | Document DB platform → Analytics consumer             | `ctx-6`         | existing | —                                                                                  |
 
-## Container — data node with statement lanes → diagram `ffi-containers`
+## Container — data node with statement lanes → diagram `lanes-containers`
 
 Source: `docs/plans/ffi/c4-container-ffi.github.md` and `.terminal.md`.
 
@@ -169,3 +176,12 @@ relationship table and runtime notes are byte-identical. The pictures carry the 
 - **P10. Documents.** Both diagrams and every element with source prose (`platform`, `registry`, `objects`,
   `api`, `lanes`, `files`, `peer`) have plain and STE (ASD-STE100 Issue 9, `draft`) texts. The STE texts draw
   on the source's own STE restatement (`architecture-ste100.md`) and are not certified.
+- **P11. Renamed from its first id, which carried an `ffi` prefix (Nick, 2026-10-14).** The old name read as
+  if the FFI execution layer were still proposed, but FFI-01 to FFI-08 landed and `tsdb-current` already draws
+  them. The dataset id is now `tsdb-lanes-proposal` and its two diagram ids are `lanes-context` and
+  `lanes-containers` (were `ffi-context` and `ffi-containers`; old deep links to the proposed dataset are not
+  redirected). Content, statuses, relationships and the side-by-side mechanics are unchanged. Kept on purpose:
+  the bundle `revision` string (`docs-ffi-c4-81d9936-on-main-2d30330-pg01`), the source ids (`src-ffi-readme`,
+  `src-ffi-plan`, ...) and the source paths, because they name real files and the branch `docs/ffi-c4` the
+  diagrams were converted from; source titles now say "Source diagram ... (branch docs/ffi-c4)" instead of
+  "FFI ...".

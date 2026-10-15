@@ -6,9 +6,9 @@
       "url": "architectures/tsdb-current.json"
     },
     {
-      "id": "tsdb-ffi-proposal",
-      "title": "Proposed: FFI statement lanes and tenant placement",
-      "url": "architectures/tsdb-ffi-proposal.json"
+      "id": "tsdb-lanes-proposal",
+      "title": "Proposed: statement lanes and tenant placement (scale-out)",
+      "url": "architectures/tsdb-lanes-proposal.json"
     }
   ]
 }

@@ -272,7 +272,7 @@ function DatasetNote(
       className={proposedSet ? "dataset-note dataset-note-proposed" : "dataset-note"}
     >
       <strong>{architecture.bundle.title}.</strong> {proposedSet
-        ? "Dashed boxes and lines are planned or existing with planned changes; the inventory records which parts have since landed."
+        ? "Dashed boxes and lines are planned or existing with planned changes. This set proposes only statement lanes and tenant placement; the FFI execution layer (FFI-01 to FFI-08) has landed and is part of the current set."
         : "Every box and line exists on main; the diagrams mirror the audited docs/architecture/ set."}
     </p>
   );

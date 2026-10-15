@@ -6,16 +6,20 @@ and components. It is not a replacement for the Markdown diagrams in
 [`docs/architecture/`](../docs/architecture/README.md) (the audited source of truth for the current system);
 it renders converted copies of them, with every element traceable to a commit-pinned source.
 
+The proposed dataset covers only the unbuilt scale-out design (statement lanes, the placement table, the
+forwarder, the lane supervisor, the peer node and WAL frames). The FFI execution layer (FFI-01 to FFI-08:
+binding, classifier, deadline and 504) has landed on `main` and is part of `tsdb-current`.
+
 Future URL: <https://nickstrad.github.io/ts-db/> (GitHub Pages is **not enabled yet**; see
 [Deploying](#deploying)).
 
 ## What it shows
 
-| Mode         | URL                                                               | Content                                                              |
-| ------------ | ----------------------------------------------------------------- | -------------------------------------------------------------------- |
-| Current      | `#/architectures/tsdb-current/diagrams/<id>[/elements/<id>]`      | `tsdb-current`: the four audited pairs of `docs/architecture/`       |
-| Proposed     | `#/architectures/tsdb-ffi-proposal/diagrams/<id>[/elements/<id>]` | `tsdb-ffi-proposal`: FFI lanes and placement, context and containers |
-| Side by side | `#/compare/<current diagram id>/<proposed diagram id>`            | Both, each pane with its own viewer; the level links pair C4 levels  |
+| Mode         | URL                                                                 | Content                                                                      |
+| ------------ | ------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Current      | `#/architectures/tsdb-current/diagrams/<id>[/elements/<id>]`        | `tsdb-current`: the four audited pairs of `docs/architecture/`               |
+| Proposed     | `#/architectures/tsdb-lanes-proposal/diagrams/<id>[/elements/<id>]` | `tsdb-lanes-proposal`: statement lanes and placement, context and containers |
+| Side by side | `#/compare/<current diagram id>/<proposed diagram id>`              | Both, each pane with its own viewer; the level links pair C4 levels          |
 
 Single views use the SDK's own deep links. In side by side, each pane navigates in memory (its own Back, Up
 and detail links); the URL records both panes' diagrams, so reloading or sharing it reopens the same pair.
@@ -53,7 +57,7 @@ for c4-sdk); elsewhere run `npx playwright install chromium` once.
 pages/
   index.html, src/             the viewer; src/sdk.ts is the ONLY module that touches c4-sdk
   public/catalog.json          { entries: [{ id, title, url }] }; entry id = bundle id
-  public/architectures/        tsdb-current.json, tsdb-ffi-proposal.json (ArchitectureBundle v1)
+  public/architectures/        tsdb-current.json, tsdb-lanes-proposal.json (ArchitectureBundle v1)
   content/<dataset>/           inventory.md: source node/edge → JSON id → documents, discrepancies, decisions
   tests/                       *.test.ts (vitest), smoke.spec.ts (Playwright)
   vendor/c4-sdk/               the interim c4-sdk copy (delete at the swap); PROVENANCE.md, sync.sh

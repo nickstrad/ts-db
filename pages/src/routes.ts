@@ -3,7 +3,7 @@ import type { Diagram, ValidatedArchitecture } from "./sdk.ts";
 
 /** Catalog entry ids, which equal the bundle ids (checked when the site loads). */
 export const CURRENT_ID = "tsdb-current";
-export const PROPOSED_ID = "tsdb-ffi-proposal";
+export const PROPOSED_ID = "tsdb-lanes-proposal";
 
 /**
  * The site's URL grammar. Single views use the SDK's own deep links unchanged

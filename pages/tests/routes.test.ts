@@ -22,10 +22,10 @@ describe("parseSiteRoute", () => {
         diagramId: "components-server",
       },
     ],
-    ["#/compare/context/ffi-context", {
+    ["#/compare/context/lanes-context", {
       kind: "compare",
       currentDiagramId: "context",
-      proposedDiagramId: "ffi-context",
+      proposedDiagramId: "lanes-context",
     }],
   ])("%j", (hash, expected) => {
     expect(parseSiteRoute(hash)).toEqual(expected);
@@ -34,8 +34,8 @@ describe("parseSiteRoute", () => {
   // Never a silent fallback: each of these is Not Found.
   it.each([
     "#/compare/context",
-    "#/compare/a%2Fb/ffi-context",
-    "#/compare/context/ffi-context/x",
+    "#/compare/a%2Fb/lanes-context",
+    "#/compare/context/lanes-context/x",
     "#/somewhere",
   ])(
     "%j is Not Found",
@@ -45,8 +45,8 @@ describe("parseSiteRoute", () => {
   );
 
   it("formats compare links that parse back", () => {
-    expect(compareHash("containers-platform", "ffi-containers")).toBe(
-      "#/compare/containers-platform/ffi-containers",
+    expect(compareHash("containers-platform", "lanes-containers")).toBe(
+      "#/compare/containers-platform/lanes-containers",
     );
   });
 });
@@ -105,17 +105,17 @@ describe("levels shared by both datasets", () => {
 
   it("pairs the first diagram of each C4 level drawn on both sides", () => {
     expect(sharedLevels(current, proposed)).toEqual([
-      { kind: "context", currentId: "context", proposedId: "ffi-context" },
+      { kind: "context", currentId: "context", proposedId: "lanes-context" },
       {
         kind: "container",
         currentId: "containers-platform",
-        proposedId: "ffi-containers",
+        proposedId: "lanes-containers",
       },
     ]);
   });
 
   it("falls back to the default diagram when a level is not drawn", () => {
-    expect(counterpart(proposed, "component")).toBe("ffi-context");
+    expect(counterpart(proposed, "component")).toBe("lanes-context");
     expect(counterpart(current, "container")).toBe("containers-platform");
   });
 });

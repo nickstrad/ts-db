@@ -24,7 +24,7 @@ test("the site opens on the current system context and lays it out", async ({ pa
 });
 
 test("side by side renders the current and the proposed context as two canvases", async ({ page }) => {
-  await page.goto("./#/compare/context/ffi-context");
+  await page.goto("./#/compare/context/lanes-context");
   await expect(page.locator(canvas)).toHaveCount(2);
   await expect(
     page.getByRole("heading", {
@@ -35,21 +35,21 @@ test("side by side renders the current and the proposed context as two canvases"
   await expect(
     page.getByRole("heading", {
       level: 1,
-      name: "System context: proposed FFI lanes and placement",
+      name: "System context: proposed statement lanes and placement",
     }),
   )
     .toBeVisible();
 });
 
 test("drilling down in one side-by-side pane is recorded in the URL and survives a reload", async ({ page }) => {
-  await page.goto("./#/compare/context/ffi-context");
+  await page.goto("./#/compare/context/lanes-context");
   await expect(page.locator(canvas)).toHaveCount(2);
   // Open the proposed platform's container view from the right-hand pane's canvas only.
   const proposedPane = page.getByRole("region", { name: /^Proposed/ });
   await proposedPane.locator(
     `${canvas} >> role=link[name="Open detail for Document DB platform"]`,
   ).click();
-  await expect(page).toHaveURL(/#\/compare\/context\/ffi-containers$/);
+  await expect(page).toHaveURL(/#\/compare\/context\/lanes-containers$/);
   await expect(
     page.getByRole("heading", {
       level: 1,
@@ -70,7 +70,7 @@ test("drilling down in one side-by-side pane is recorded in the URL and survives
     name: "Containers",
   }).click();
   await expect(page).toHaveURL(
-    /#\/compare\/containers-platform\/ffi-containers$/,
+    /#\/compare\/containers-platform\/lanes-containers$/,
   );
   await expect(
     page.getByRole("heading", { level: 1, name: "Containers: request path" }),
@@ -79,7 +79,7 @@ test("drilling down in one side-by-side pane is recorded in the URL and survives
 
 test("a deep link to a proposed diagram reloads to the same diagram", async ({ page }) => {
   await page.goto(
-    "./#/architectures/tsdb-ffi-proposal/diagrams/ffi-containers",
+    "./#/architectures/tsdb-lanes-proposal/diagrams/lanes-containers",
   );
   await expect(
     page.getByRole("heading", {
@@ -119,7 +119,7 @@ test("mode links and the skip link are keyboard reachable", async ({ page }) => 
   await proposed.focus();
   await page.keyboard.press("Enter");
   await expect(page).toHaveURL(
-    /#\/architectures\/tsdb-ffi-proposal\/diagrams\/ffi-context$/,
+    /#\/architectures\/tsdb-lanes-proposal\/diagrams\/lanes-context$/,
   );
   await expect(page.locator(canvas)).toHaveCount(1);
 });
