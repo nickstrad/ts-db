@@ -4,8 +4,9 @@ Bundle: [`public/architectures/tsdb-current.json`](../../public/architectures/ts
 four audited C4 pairs in `docs/architecture/` on `main` at
 [`2d30330`](https://github.com/nickstrad/ts-db/tree/2d30330ed2c0aa967fb737827e43a7cbb8714e59/docs/architecture)
 (their audit stamp is `0b82504`, the FFI-08 merge; `2d30330` changes no file under `docs/architecture/`).
-Converted by PG-01 (`opus-pg-01`) on 2026-10-15. Status: every element and relationship is `existing`, as the
-sources state ("All boxes describe landed code").
+Converted by PG-01 (`opus-pg-01`) on 2026-10-15; PG-02 (`opus-pg-02`) added the landscape and the code view
+the same day (sections at the end). Status: every element and relationship is `existing`, as the sources state
+("All boxes describe landed code").
 
 How to read this file: each source box (Mermaid node id, in declaration order) maps to one model element id;
 each numbered source relationship maps to one relationship id and keeps its number as `displayNumber`.
@@ -30,6 +31,11 @@ bundle test (`tests/bundles.test.ts`) fails if any element or relationship id is
 | `src-components-server-py`              | [docs/architecture/diagrams/c4-component-server.py](https://github.com/nickstrad/ts-db/blob/2d30330ed2c0aa967fb737827e43a7cbb8714e59/docs/architecture/diagrams/c4-component-server.py)               |
 | `src-arch-readme`                       | [docs/architecture/README.md](https://github.com/nickstrad/ts-db/blob/2d30330ed2c0aa967fb737827e43a7cbb8714e59/docs/architecture/README.md)                                                           |
 | `src-arch-agents`                       | [docs/architecture/AGENTS.md](https://github.com/nickstrad/ts-db/blob/2d30330ed2c0aa967fb737827e43a7cbb8714e59/docs/architecture/AGENTS.md)                                                           |
+| `src-document-reader`                   | [platform/document_reader.ts](https://github.com/nickstrad/ts-db/blob/2d30330ed2c0aa967fb737827e43a7cbb8714e59/platform/document_reader.ts)                                                           |
+| `src-classify`                          | [platform/sqlite_ffi/classify.ts](https://github.com/nickstrad/ts-db/blob/2d30330ed2c0aa967fb737827e43a7cbb8714e59/platform/sqlite_ffi/classify.ts)                                                   |
+| `src-sqlite-ts`                         | [platform/sqlite.ts](https://github.com/nickstrad/ts-db/blob/2d30330ed2c0aa967fb737827e43a7cbb8714e59/platform/sqlite.ts)                                                                             |
+| `src-sqlite-ffi-effect`                 | [platform/sqlite_ffi/effect.ts](https://github.com/nickstrad/ts-db/blob/2d30330ed2c0aa967fb737827e43a7cbb8714e59/platform/sqlite_ffi/effect.ts)                                                       |
+| `src-sqlite-ffi-database`               | [platform/sqlite_ffi/database.ts](https://github.com/nickstrad/ts-db/blob/2d30330ed2c0aa967fb737827e43a7cbb8714e59/platform/sqlite_ffi/database.ts)                                                   |
 
 ## System Context → diagram `context`
 
@@ -194,6 +200,62 @@ Source: `docs/architecture/c4-component-server.github.md` and `.terminal.md`. Di
 | (37)        | AppRegistry / AppServices → FFI SQLite binding   | `comp-37`       | Deno.dlopen              |
 | (38)        | FFI SQLite binding → Application documents       | `comp-38`       | SQLite C API             |
 
+## System Landscape → diagram `landscape` (PG-02)
+
+No source draws a landscape; c4-sdk Milestone B asks for one of the modelled people and systems, inventing no
+running system. Members and edges are exactly the system context's (`context`, source
+`c4-context-document-db`), with no system in focus: `developer`, `caller`, `operator`, `platform`, `objects`,
+`analytics`, `k6`; relationships `ctx-1` to `ctx-6` keep their context numbers. Document: `doc-landscape`.
+`platform` drills into `context`, whose parent is now the landscape. Decision D10.
+
+## Code — platform/document_reader.ts → diagram `code-document-reader` (PG-02)
+
+Source: `platform/document_reader.ts` on `main` at `2d30330` (unchanged through `b789441`), plus the imported
+symbols' declarations. Scope: component `document-reader` (DocumentReaderClient), which now drills into this
+view. Documents: `doc-code-document-reader`, `doc-code-query-sqlite`, `doc-code-make-client`. Decisions D11,
+D12.
+
+### Elements
+
+| Element id                | Symbol                       | Kind              | Owner component   | Source lines                                                                     | Members                                                                                      |
+| ------------------------- | ---------------------------- | ----------------- | ----------------- | -------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `dr-module`               | document_reader.ts           | module            | `document-reader` | L1 to L515 (constants L77, L112, L512)                                           | DOCUMENT_READ_CONCURRENCY_CAP, DocumentReaderClientLive, QUERY_ERROR_TAGS                    |
+| `dr-make-client`          | makeDocumentReaderClient     | function          | `document-reader` | L411 to L510                                                                     | makeDocumentReaderClient, call, semaphore, pending                                           |
+| `dr-query-sqlite`         | querySqlite                  | function          | `document-reader` | L143 to L409 (locals L168, L191, L195, L219, L234, L264, L305, L316, L327, L361) | querySqlite, envelope, poisoned, stuck, admit, runSelect, select, executeIn, begin, end, run |
+| `dr-native`               | native                       | function          | `document-reader` | L79 to L84                                                                       | native                                                                                       |
+| `dr-native-now`           | nativeNow                    | function          | `document-reader` | L86 to L102                                                                      | nativeNow                                                                                    |
+| `dr-query-context`        | QueryContext                 | interface         | `document-reader` | L104 to L109                                                                     | active, operations, startNanos, queueWaitMs                                                  |
+| `dr-document-query-error` | DocumentQueryError           | type              | `document-reader` | L124 to L125                                                                     | DocumentQueryError                                                                           |
+| `dr-is-query-error`       | isQueryError                 | function          | `document-reader` | L127 to L132                                                                     | isQueryError                                                                                 |
+| `dr-message-of`           | messageOf                    | function          | `document-reader` | L134 to L137                                                                     | messageOf                                                                                    |
+| `dr-elapsed-ms`           | elapsedMs                    | function          | `document-reader` | L139 to L141                                                                     | elapsedMs                                                                                    |
+| `dr-ext-sqlite-ffi`       | sqlite_ffi/mod.ts (imported) | module (external) | `ffi-binding`     | imports L19; `effect.ts` L76, L330, L444; `database.ts` L392                     | Database.open, prepareCached, allAsync, isSqliteFfiError                                     |
+| `dr-ext-classify`         | classify.ts (imported)       | module (external) | `classifier`      | import L20; `classify.ts` L42, L56                                               | classify, pathOf                                                                             |
+| `dr-ext-connection-gate`  | ConnectionGate               | class (external)  | `storage`         | import L21 to L29; `sqlite.ts` L317, L324, L333, L348                            | constructor, poisoned, blocking, nonblocking                                                 |
+
+### Relationships
+
+| Relationship id | From → to                                     | Kind        | Source lines                       |
+| --------------- | --------------------------------------------- | ----------- | ---------------------------------- |
+| `code-1` (1)    | document_reader.ts → makeDocumentReaderClient | dependency  | L512 to L515                       |
+| `code-2` (2)    | makeDocumentReaderClient → document_reader.ts | dependency  | L417                               |
+| `code-3` (3)    | makeDocumentReaderClient → querySqlite        | dependency  | L454                               |
+| `code-4` (4)    | makeDocumentReaderClient → messageOf          | dependency  | L463                               |
+| `code-5` (5)    | querySqlite → sqlite_ffi/mod.ts (imported)    | dependency  | L156, L240, L246, L401             |
+| `code-6` (6)    | querySqlite → classify.ts (imported)          | dependency  | L236, L270                         |
+| `code-7` (7)    | querySqlite → ConnectionGate                  | dependency  | L162, L237, L243, L319, L337, L379 |
+| `code-8` (8)    | querySqlite → QueryContext                    | association | L219, L234, L316                   |
+| `code-9` (9)    | querySqlite → native                          | dependency  | L154                               |
+| `code-10` (10)  | querySqlite → nativeNow                       | dependency  | L240, L319, L338, L386             |
+| `code-11` (11)  | querySqlite → isQueryError                    | dependency  | L367                               |
+| `code-12` (12)  | querySqlite → elapsedMs                       | dependency  | L273, L355                         |
+| `code-13` (13)  | querySqlite → messageOf                       | dependency  | L257, L375, L403                   |
+| `code-14` (14)  | native → messageOf                            | dependency  | L82                                |
+| `code-15` (15)  | nativeNow → messageOf                         | dependency  | L100                               |
+| `code-16` (16)  | isQueryError → document_reader.ts             | dependency  | L131                               |
+| `code-17` (17)  | isQueryError → DocumentQueryError             | association | L127                               |
+| `code-18` (18)  | messageOf → sqlite_ffi/mod.ts (imported)      | dependency  | L135                               |
+
 ## Mermaid and terminal discrepancies (review notes)
 
 Compared on 2026-10-15 for all four pairs: the title, the prose above the picture, the numbered relationship
@@ -264,3 +326,23 @@ differs. The pictures carry the same boxes in the same reading order. Difference
 - **D9. Notation mirrored from the source key.** Each key lists the source's three Mermaid classes (person,
   external, planned) plus the boundary and the numbered arrow. Planned is listed for completeness although
   nothing here is planned.
+- **D10. One shared landscape, here.** ts-db builds one software system, so the landscape is the context's
+  people and systems without a focus. The typed client SDK is left out (a library with no landscape-level
+  relationship, D4). The proposed dataset adds no person or system (its separate "Central registry and
+  placement" system is the same Postgres, P4 of that inventory), so it has no landscape of its own and shares
+  this one. Adding the view added navigation only to existing diagrams: `context.parent` (the landscape) and
+  the `document-reader` node's `detail` (the code view); no element, relationship, status or label of PG-01
+  changed. The bundle `revision` is now `main-2d30330-pg02`.
+- **D11. The code view is landed code only.** Every function, interface and type alias `document_reader.ts`
+  declares is a symbol; the module symbol carries its three module-level constants as members. Local closures
+  of `querySqlite` (declared `const name = (params): result =>`) are its private members, written
+  `name(params):
+  result`; return types appear only where the source writes them. Exported means `public`,
+  everything else `private`. Three imported symbols that decide how a read runs (the FFI binding's entry
+  points, the classifier and `ConnectionGate`) are tagged `external` under their owning components
+  (`ffi-binding`, `classifier`, `storage`). Other imports (core compile and decode, events, errors) are not
+  drawn. No lane or FFI class is invented.
+- **D12. Code-view numbering is this conversion's.** No Markdown source draws Level 4, so edges are numbered 1
+  to 18 in the order listed above, and relationship kinds are `dependency` (a call) or `association` (a type
+  use). Each relationship cites the source lines that make the call. The grounding check (member signatures
+  against the pinned files, whitespace-insensitive) passed for every member when PG-02 converted it.

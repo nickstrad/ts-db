@@ -7,7 +7,8 @@ and components. It is not a replacement for the Markdown diagrams in
 it renders converted copies of them, with every element traceable to a commit-pinned source.
 
 The proposed dataset covers only the unbuilt scale-out design (statement lanes, the placement table, the
-forwarder, the lane supervisor, the peer node and WAL frames). The FFI execution layer (FFI-01 to FFI-08:
+forwarder, the lane supervisor, the peer node and WAL frames): its context, containers, the inside of one
+lane, the four key flows and an illustrative two-node deployment. The FFI execution layer (FFI-01 to FFI-08:
 binding, classifier, deadline and 504) has landed on `main` and is part of `tsdb-current`.
 
 Future URL: <https://nickstrad.github.io/ts-db/> (GitHub Pages is **not enabled yet**; see
@@ -15,11 +16,31 @@ Future URL: <https://nickstrad.github.io/ts-db/> (GitHub Pages is **not enabled 
 
 ## What it shows
 
-| Mode         | URL                                                                 | Content                                                                      |
-| ------------ | ------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| Current      | `#/architectures/tsdb-current/diagrams/<id>[/elements/<id>]`        | `tsdb-current`: the four audited pairs of `docs/architecture/`               |
-| Proposed     | `#/architectures/tsdb-lanes-proposal/diagrams/<id>[/elements/<id>]` | `tsdb-lanes-proposal`: statement lanes and placement, context and containers |
-| Side by side | `#/compare/<current diagram id>/<proposed diagram id>`              | Both, each pane with its own viewer; the level links pair C4 levels          |
+| Mode         | URL                                                                 | Content                                                                                                       |
+| ------------ | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| Current      | `#/architectures/tsdb-current/diagrams/<id>[/elements/<id>]`        | `tsdb-current`: the four audited pairs of `docs/architecture/`, a landscape and a code view                   |
+| Proposed     | `#/architectures/tsdb-lanes-proposal/diagrams/<id>[/elements/<id>]` | `tsdb-lanes-proposal`: statement lanes and placement: context, containers, lane components, flows, deployment |
+| Side by side | `#/compare/<current diagram id>/<proposed diagram id>`              | Both, each pane with its own viewer; the level links pair C4 levels                                           |
+
+### Diagram kinds per dataset
+
+All seven C4 kinds are drawn across the two datasets (`tests/views.test.ts` checks it):
+
+| Kind       | `tsdb-current`                                    | `tsdb-lanes-proposal`                                              |
+| ---------- | ------------------------------------------------- | ------------------------------------------------------------------ |
+| Landscape  | `landscape` (shared by both)                      | none: the proposal adds no person or system                        |
+| Context    | `context`                                         | `lanes-context`                                                    |
+| Container  | `containers-platform`, `containers-observability` | `lanes-containers`                                                 |
+| Component  | `components-server`                               | `lanes-components` (one statement lane)                            |
+| Code       | `code-document-reader`                            | none: no code-level elements are drawn for unbuilt code            |
+| Dynamic    | none                                              | the four key flows and their named alternatives (`flow-*`)         |
+| Deployment | none                                              | `lanes-deployment` (illustrative two-node layout, not the droplet) |
+
+Side by side pairs the first diagram of each kind drawn on **both** sides, so its level links are context,
+container and component (`components-server` with `lanes-components`). Landscape and code exist only in the
+current set, dynamic and deployment only in the proposed set; those views open from the single-dataset modes
+(each is linked from its parent view) and have no side-by-side partner. In those cases the mode links fall
+back to the other dataset's default diagram.
 
 Single views use the SDK's own deep links. In side by side, each pane navigates in memory (its own Back, Up
 and detail links); the URL records both panes' diagrams, so reloading or sharing it reopens the same pair.
@@ -98,6 +119,13 @@ c4-sdk is the oracle) plus a conversion inventory.
 `tsdb-current` is pinned to `main` at `2d30330` (audit stamp `0b82504`). When the Markdown diagrams change,
 refresh it from the new commit: diff the pairs, update elements, relationships, documents and sources, and
 re-run the checks.
+
+Views with no Markdown source follow the same rules. A **dynamic** view reuses model relationships (its edge
+numbers are their static numbers), uses `reverse` only for a response, uses `parallel` only for things that
+both happen in no given order, and draws each alternative outcome as its own named diagram
+(`tests/views.test.ts` checks that every step's relationship has both endpoints in the view). The **code**
+view copies declarations from `platform/document_reader.ts` at the pinned commit as text; refresh it when that
+file changes. The **deployment** is illustrative and every part of it is `planned`.
 
 ## The interim c4-sdk copy
 

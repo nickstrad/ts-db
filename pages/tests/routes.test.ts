@@ -111,11 +111,26 @@ describe("levels shared by both datasets", () => {
         currentId: "containers-platform",
         proposedId: "lanes-containers",
       },
+      {
+        kind: "component",
+        currentId: "components-server",
+        proposedId: "lanes-components",
+      },
     ]);
   });
 
-  it("falls back to the default diagram when a level is not drawn", () => {
-    expect(counterpart(proposed, "component")).toBe("lanes-context");
+  it("picks the first diagram of the same kind", () => {
+    expect(counterpart(proposed, "component")).toBe("lanes-components");
+    expect(counterpart(proposed, "dynamic")).toBe("flow-point-read");
     expect(counterpart(current, "container")).toBe("containers-platform");
+    expect(counterpart(current, "code")).toBe("code-document-reader");
+  });
+
+  it("falls back to the default diagram when a level is not drawn", () => {
+    // Landscape and code are drawn only in the current dataset; dynamic and deployment only in the proposed one.
+    expect(counterpart(proposed, "landscape")).toBe("lanes-context");
+    expect(counterpart(proposed, "code")).toBe("lanes-context");
+    expect(counterpart(current, "dynamic")).toBe("context");
+    expect(counterpart(current, "deployment")).toBe("context");
   });
 });

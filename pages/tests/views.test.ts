@@ -1,0 +1,148 @@
+import { describe, expect, it } from "vitest";
+import type { ArchitectureBundle, Step } from "c4-sdk/core";
+import { bundles } from "./fixtures.ts";
+
+type Interaction = Extract<Step, { kind: "interaction" }>;
+type DiagramOf<K extends ArchitectureBundle["diagrams"][number]["kind"]> = Extract<
+  ArchitectureBundle["diagrams"][number],
+  { kind: K }
+>;
+
+const all = bundles.map(({ entry, json }) => ({ id: entry.id, bundle: json as ArchitectureBundle }));
+
+/** Every step of a scenario tree, depth first. */
+function steps(step: Step): Step[] {
+  if (step.kind === "interaction") return [step];
+  const children = step.kind === "sequence" ? step.children : step.branches;
+  return [step, ...children.flatMap(steps)];
+}
+
+const interactions = (step: Step) => steps(step).filter((s): s is Interaction => s.kind === "interaction");
+
+describe("C4 kinds", () => {
+  it("draws all seven C4 diagram kinds across the current and the proposed dataset", () => {
+    const kinds = new Set(all.flatMap(({ bundle }) => bundle.diagrams.map((diagram) => diagram.kind)));
+    expect([...kinds].sort()).toEqual(
+      ["code", "component", "container", "context", "deployment", "dynamic", "landscape"],
+    );
+  });
+});
+
+describe("dynamic views of tsdb-lanes-proposal", () => {
+  const proposed = all.find(({ id }) => id === "tsdb-lanes-proposal")!.bundle;
+  const relationships = new Map(proposed.model.relationships.map((r) => [r.id, r]));
+  const dynamics = proposed.diagrams.filter((d): d is DiagramOf<"dynamic"> => d.kind === "dynamic");
+  const cases = dynamics.map((d) => [d.id, d] as const);
+
+  it("draws the four key flows", () => {
+    for (
+      const id of [
+        "flow-point-read",
+        "flow-long-query-interrupt",
+        "flow-forwarded-mutation",
+        "flow-lane-kill-restart",
+      ]
+    ) {
+      expect(dynamics.map((d) => d.id)).toContain(id);
+    }
+  });
+
+  it.each(cases)(
+    "%s: every interaction uses a relationship whose endpoints are members of the diagram",
+    (_, diagram) => {
+      const members = new Set(diagram.nodes.map((node) => node.elementId));
+      const declared = new Set(diagram.edges.map((edge) => edge.relationshipId));
+      const outside = interactions(diagram.scenario).flatMap((step) => {
+        const relationship = relationships.get(step.relationshipId);
+        if (!relationship) return [`${step.id}: unknown relationship ${step.relationshipId}`];
+        const problems: string[] = [];
+        if (!declared.has(relationship.id)) problems.push(`${step.id}: ${relationship.id} is not an edge`);
+        for (const end of [relationship.sourceId, relationship.targetId]) {
+          if (!members.has(end)) problems.push(`${step.id}: ${end} is not a member`);
+        }
+        return problems;
+      });
+      expect(outside).toEqual([]);
+    },
+  );
+
+  it.each(cases)(
+    "%s: step ids are unique, every edge is used by a step and every member takes part",
+    (_, diagram) => {
+      const ids = steps(diagram.scenario).map((step) => step.id);
+      expect(new Set(ids).size).toBe(ids.length);
+      const used = new Set(interactions(diagram.scenario).map((step) => step.relationshipId));
+      expect(diagram.edges.map((edge) => edge.relationshipId).filter((id) => !used.has(id))).toEqual([]);
+      const ends = new Set(
+        [...used].flatMap((id) => [relationships.get(id)!.sourceId, relationships.get(id)!.targetId]),
+      );
+      expect(diagram.nodes.map((node) => node.elementId).filter((id) => !ends.has(id))).toEqual([]);
+    },
+  );
+
+  it.each(cases)("%s: every parallel group has at least two branches", (_, diagram) => {
+    const thin = steps(diagram.scenario).filter((s) => s.kind === "parallel" && s.branches.length < 2);
+    expect(thin.map((s) => s.id)).toEqual([]);
+  });
+});
+
+describe("the proposed deployment", () => {
+  const proposed = all.find(({ id }) => id === "tsdb-lanes-proposal")!.bundle;
+  const elements = new Map(proposed.model.elements.map((e) => [e.id, e]));
+  const deployments = proposed.diagrams.filter((d): d is DiagramOf<"deployment"> => d.kind === "deployment");
+
+  it("is one illustrative view whose members and edges are all planned", () => {
+    expect(deployments.map((d) => [d.environment, d.status])).toEqual([["illustrative", "planned"]]);
+    const [deployment] = deployments;
+    const statuses = [
+      ...deployment.nodes.map((node) => elements.get(node.elementId)!.status),
+      ...deployment.edges.map((edge) =>
+        proposed.model.relationships.find((r) => r.id === edge.relationshipId)!.status
+      ),
+    ];
+    expect(new Set(statuses)).toEqual(new Set(["planned"]));
+  });
+
+  it("has two data nodes, each holding lane instances", () => {
+    const lanesByNode = new Map<string, number>();
+    for (const element of proposed.model.elements) {
+      if (element.kind === "instance" && element.instanceOf === "lanes") {
+        lanesByNode.set(element.parentId, (lanesByNode.get(element.parentId) ?? 0) + 1);
+      }
+    }
+    expect(lanesByNode.size).toBe(2);
+    expect([...lanesByNode.values()].every((count) => count >= 1)).toBe(true);
+  });
+
+  it("says in its document that it is illustrative and not the actual droplet", () => {
+    const docIds = deployments[0].docIds ?? [];
+    const text = proposed.documents.filter((d) => docIds.includes(d.id)).map((d) => d.plain).join("\n");
+    expect(text).toMatch(/illustrative/i);
+    expect(text).toMatch(/not a claim about the actual droplet/);
+  });
+});
+
+describe("the current code view", () => {
+  const current = all.find(({ id }) => id === "tsdb-current")!.bundle;
+  const elements = new Map(current.model.elements.map((e) => [e.id, e]));
+  const code = current.diagrams.filter((d): d is DiagramOf<"code"> => d.kind === "code");
+
+  it("is one view of document_reader.ts under the DocumentReaderClient component", () => {
+    expect(code.map((d) => d.scopeId)).toEqual(["document-reader"]);
+    const sources = new Map(current.sources.map((s) => [s.id, s]));
+    expect(code[0].sourceIds?.map((id) => sources.get(id)!.path)).toContain("platform/document_reader.ts");
+  });
+
+  it("draws only existing, source-linked symbols; imported ones are tagged external", () => {
+    for (const node of code[0].nodes) {
+      const element = elements.get(node.elementId)!;
+      expect(element.kind, element.id).toBe("code");
+      expect(element.status, element.id).toBe("existing");
+      expect(element.sourceIds.length, element.id).toBeGreaterThan(0);
+      if (element.kind !== "code") continue;
+      const local = element.parentId === "document-reader";
+      expect(element.tags.includes("external"), element.id).toBe(!local);
+      expect(element.members.length, element.id).toBeGreaterThan(0);
+    }
+  });
+});
