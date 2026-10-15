@@ -2,6 +2,23 @@
 
 Dated decisions with rationale. Plans carry the _what_; this page carries the _why_. Newest first.
 
+## 2026-10-15 — Architecture diagrams site in `pages/` on an interim c4-sdk copy
+
+Decision (Nick, relayed by Twin on 2026-10-14; plan `docs/plans/pages-diagrams.md` on `plan/c4-react`; built
+by PG-01): ts-db gets an interactive C4 site in `pages/`, a separate npm project, showing what runs on `main`
+next to proposed designs, for use while designing features. Until c4-sdk 0.1.0 is on npm, the site renders
+through a copy of the c4-sdk source in `pages/vendor/c4-sdk/`. Why this shape: the swap must be "delete the
+directory and add the dependency", so the copy is reached only through the package's own specifiers (`c4-sdk`,
+`c4-sdk/core`, `c4-sdk/styles.css`, as Vite aliases and TS paths) and only from `pages/src/sdk.ts`.
+`deno.json` is frozen and the root `deno fmt`/`deno lint` scan `pages/`, so the copy is made compliant by
+`sync.sh` (fmt plus per-file lint-ignore headers), never by hand, and `sync.sh --check` proves it matches the
+recorded upstream commit.
+
+The datasets are converted copies pinned to commits, not a second source of truth: `docs/architecture/` stays
+the audited current architecture, and its maintenance protocol is unchanged. A proposed dataset re-checks the
+source's "planned" claims against `main` and converts what has landed as `existing`, with a note in its
+inventory (`pages/content/<dataset>/inventory.md`). See [pages/README.md](../../pages/README.md).
+
 ## 2026-10-14 — Statement execution through the FFI binding, not `node:sqlite`
 
 Decision (plan `docs/plans/ffi-implementation.md`, ADR 0008): the API process opens every application SQLite
