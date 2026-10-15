@@ -2,6 +2,16 @@
 
 Dated decisions with rationale. Plans carry the _what_; this page carries the _why_. Newest first.
 
+## 2026-10-15 — `pages/` consumes the published c4-sdk npm package
+
+Decision (Nick's standing direction, relayed by Twin; plan item PG-03): once `c4-sdk` 0.1.0 was published to
+npm, the interim copy in `pages/vendor/c4-sdk/` (with `sync.sh` and `PROVENANCE.md`) was deleted and the site
+now depends on `c4-sdk@0.1.0`, pinned exactly. Why: the copy existed only until the package was published, and
+its design (reached only through the package's own specifiers, only from `pages/src/sdk.ts`) made the swap a
+dependency change plus the worker factory. The package bundles its runtime dependencies, so the site dropped
+`@base-ui/react`, `@xyflow/react`, `elkjs`, `react-markdown` and `zod`. The package is never patched; the site
+adapts to its public surface.
+
 ## 2026-10-15 — Supporting containers carry the `external` tag in both diagram datasets
 
 Decision (PG-01 D3, applied again in PG-02 P12; landed `f52c817`): in `pages/`, any container that appears on
@@ -12,9 +22,9 @@ element, so the tag spreads to the container views: `reader`, `files`, `registry
 although they sit inside the platform boundary. Each dataset's container-view keys say so and the boundary
 groups show membership. This is wrong for the model (the scope system's own sibling containers are not
 external), so the standing c4-sdk hand-off asks upstream to allow sibling containers of the scope's system on
-a component view without the tag. When it lands, bump the vendored copy
-(`pages/vendor/c4-sdk/sync.sh <commit>`) and drop the tags from both inventories (D3, P12) in the same change.
-Details: `pages/content/*/inventory.md`.
+a component view without the tag. When it lands, bump the `c4-sdk` dependency
+(`npm install --save-exact c4-sdk@<version>` in `pages/`) and drop the tags from both inventories (D3, P12) in
+the same change. Details: `pages/content/*/inventory.md`.
 
 ## 2026-10-15 — Architecture diagrams site in `pages/` on an interim c4-sdk copy
 

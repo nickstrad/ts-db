@@ -91,15 +91,14 @@ npm ci
 npm run dev          # http://localhost:5173/
 npm run build        # dist/ at base /ts-db/ (gitignored)
 npm run preview      # serve dist/ at http://localhost:4173/ts-db/
-npm run check        # typecheck + unit tests + build + vendor sync check + browser smoke
+npm run check        # typecheck + unit tests + build + browser smoke
 ```
 
 | Script         | What it does                                                                                             |
 | -------------- | -------------------------------------------------------------------------------------------------------- |
-| `typecheck`    | `tsc -b` over the viewer, the tests and (through the aliases) the c4-sdk copy                            |
+| `typecheck`    | `tsc -b` over the viewer and the tests, against the c4-sdk package's declarations                        |
 | `test`         | vitest: every bundle decodes with `decodeArchitecture` and **zero** diagnostics; catalog, routes, views  |
 | `build`        | `vite build --base /ts-db/`                                                                              |
-| `sync:check`   | `vendor/c4-sdk/sync.sh --check` (needs deno and the upstream commit, see the provenance file)            |
 | `test:browser` | Playwright against `vite preview` of `dist/`: dropdown, three entries, sticky bar, deep links, Not Found |
 
 The browser smoke reuses Playwright 1.64.0's Chromium from `~/.cache/ms-playwright` (already installed on vm-1
@@ -115,14 +114,13 @@ pages/
   content/<dataset>/           inventory.md: source node/edge → JSON id → documents, discrepancies, decisions
   tests/                       *.test.ts (vitest), smoke.spec.ts (Playwright)
   tests/fixtures/              the three-entry test catalog and its tiny third bundle (never published)
-  vendor/c4-sdk/               the interim c4-sdk copy (delete at the swap); PROVENANCE.md, sync.sh
 ```
 
 Root toolchain constraints that shape this folder: `deno fmt --check` and `deno lint` at the repo root scan
 everything under `pages/` except `node_modules/` and gitignored paths, and `deno.json` is frozen, so every
-committed file here is fmt- and lint-clean (the vendored copy is made so by `sync.sh`). `.gitignore` ignores
-directories named `dist/`, `build/`, `data/`, `store/`, `objects/`, `snapshots/`, `logs/`, `tmp/` and similar
-**at any depth**: never use those names for content (bundles live in `public/architectures/`).
+committed file here is fmt- and lint-clean. `.gitignore` ignores directories named `dist/`, `build/`, `data/`,
+`store/`, `objects/`, `snapshots/`, `logs/`, `tmp/` and similar **at any depth**: never use those names for
+content (bundles live in `public/architectures/`).
 
 ## Authoring and verifying a dataset
 
@@ -161,32 +159,17 @@ both happen in no given order, and draws each alternative outcome as its own nam
 view copies declarations from `platform/document_reader.ts` at the pinned commit as text; refresh it when that
 file changes. The **deployment** is illustrative and every part of it is `planned`.
 
-## The interim c4-sdk copy
+## The c4-sdk dependency
 
-`vendor/c4-sdk/` holds c4-sdk source copied from one upstream commit, post-processed only by `deno fmt` and
-per-file lint-ignore headers so the root checks pass. Never edit it by hand: re-run
-`vendor/c4-sdk/sync.sh <commit>` and update [`PROVENANCE.md`](vendor/c4-sdk/PROVENANCE.md). The site reaches
-it only through the package specifiers `c4-sdk`, `c4-sdk/core` and `c4-sdk/styles.css` (aliases in
-`vite.config.ts` and `paths` in `tsconfig.app.json` and `tsconfig.node.json`), and only from `src/sdk.ts`
-(tests import `c4-sdk/core` the same way). Nothing outside `pages/` refers to it.
-
-## Swap to the npm package
-
-Do this when Twin relays that `c4-sdk` 0.1.0 is published (plan item PG-03), in one commit:
-
-1. `rm -rf pages/vendor/c4-sdk`
-2. In `pages/vite.config.ts`, delete the three `resolve.alias` entries and the `vendored` helper. In
-   `pages/tsconfig.app.json` and `pages/tsconfig.node.json`, delete the `paths` blocks.
-3. `cd pages && npm install --save-exact c4-sdk@0.1.0`. If its `package.json` still lists only `react` and
-   `react-dom` as peers (the rest is bundled),
-   `npm uninstall @base-ui/react @xyflow/react elkjs react-markdown zod`.
-4. In `pages/src/sdk.ts`, add `import layoutWorkerUrl from "c4-sdk/layout-worker.js?url";` and change the
-   layout port to `createElkLayoutPort(() => new Worker(layoutWorkerUrl, { type: "module" }))`. Keep
-   `import "c4-sdk/styles.css"`.
-5. In `pages/package.json`, remove the `sync:check` script and its step from `check`.
-6. Remove the interim-copy sections from this README and the `pages/vendor` references in `docs/knowledge/`,
-   then run `npm run check` in `pages/` and `deno task fmt:check`, `deno task lint` and `deno task check` at
-   the root. `grep -rn "vendor/c4-sdk" pages --exclude-dir=node_modules` must print nothing.
+The site consumes the published [`c4-sdk`](https://www.npmjs.com/package/c4-sdk) package from npm, pinned
+exactly (`0.1.0`) in `package.json` and locked in `package-lock.json`. Its only peers are `react` and
+`react-dom`; React Flow, ELK, Markdown, zod and the dialog are bundled inside it, so the site does not list
+them. Only `src/sdk.ts` imports it, through the package's exports: `c4-sdk` (React components and adapters),
+`c4-sdk/core` (decode, routes, types; tests import it too), `c4-sdk/styles.css`, and
+`c4-sdk/layout-worker.js?url`, which Vite fingerprints and serves under `/ts-db/` for
+`createElkLayoutPort(() => new Worker(layoutWorkerUrl, { type: "module" }))`. Never patch the package; adapt
+`src/sdk.ts` to it. To upgrade, `npm install --save-exact c4-sdk@<version>`, check its README for changed
+exports or peers, then run `npm run check`.
 
 ## Deploying
 
