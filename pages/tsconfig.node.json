@@ -1,0 +1,27 @@
+{
+  // Build configuration and the Node-side tests (vitest, Playwright); tests may import src/ modules.
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
+    "target": "es2023",
+    "lib": ["ES2023", "DOM"],
+    "module": "esnext",
+    "types": ["node", "vite/client"],
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true,
+    "paths": {
+      "c4-sdk": ["./vendor/c4-sdk/src/index.ts"],
+      "c4-sdk/core": ["./vendor/c4-sdk/src/core/index.ts"]
+    }
+  },
+  "include": ["vite.config.ts", "playwright.config.ts", "tests"]
+}

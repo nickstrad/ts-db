@@ -1,0 +1,14 @@
+{
+  "entries": [
+    {
+      "id": "tsdb-current",
+      "title": "ts-db today (main 2d30330)",
+      "url": "architectures/tsdb-current.json"
+    },
+    {
+      "id": "tsdb-ffi-proposal",
+      "title": "Proposed: FFI statement lanes and tenant placement",
+      "url": "architectures/tsdb-ffi-proposal.json"
+    }
+  ]
+}

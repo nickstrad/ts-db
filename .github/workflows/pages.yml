@@ -1,0 +1,50 @@
+# Builds the architecture diagrams site in pages/ and deploys it to GitHub Pages
+# (https://nickstrad.github.io/ts-db/). GitHub Pages must first be enabled for the repository with
+# "GitHub Actions" as the source; that is a human step (see pages/README.md). Until then the deploy job fails.
+name: Deploy architecture diagrams to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    defaults:
+      run:
+        working-directory: pages
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: pages/package-lock.json
+      - run: npm ci
+      - name: Typecheck and validate the architecture bundles
+        run: |
+          npm run typecheck
+          npm test
+      - name: Build at the Pages base path
+        run: npm run build
+      - name: SPA fallback for unknown paths
+        run: cp dist/index.html dist/404.html
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: pages/dist
+      - id: deployment
+        uses: actions/deploy-pages@v4

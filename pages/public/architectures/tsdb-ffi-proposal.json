@@ -1,0 +1,1265 @@
+{
+  "schemaVersion": 1,
+  "id": "tsdb-ffi-proposal",
+  "title": "Proposed: FFI statement lanes and tenant placement",
+  "revision": "docs-ffi-c4-81d9936-on-main-2d30330-pg01",
+  "defaultDiagramId": "ffi-context",
+  "model": {
+    "elements": [
+      {
+        "id": "developer",
+        "kind": "person",
+        "name": "App developer",
+        "description": "app/; sdk/ — Declares schemas and Effect handlers",
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-ctx-github",
+          "src-ctx-terminal",
+          "src-ctx-py"
+        ]
+      },
+      {
+        "id": "caller",
+        "kind": "person",
+        "name": "Application caller",
+        "description": "sdk/client.ts — Players and authenticated tenant users",
+        "status": "existing",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-ctx-github",
+          "src-ctx-terminal",
+          "src-ctx-py"
+        ]
+      },
+      {
+        "id": "operator",
+        "kind": "person",
+        "name": "Platform operator",
+        "description": "scripts/ — Tenants, auth, backups",
+        "status": "mixed",
+        "tags": [],
+        "plannedNotes": [
+          "Placement moves."
+        ],
+        "docIds": [],
+        "sourceIds": [
+          "src-ctx-github",
+          "src-ctx-terminal",
+          "src-ctx-py"
+        ]
+      },
+      {
+        "id": "platform",
+        "kind": "softwareSystem",
+        "name": "Document DB platform",
+        "description": "platform/ — Deno API node that executes SQLite through Deno FFI to the system libsqlite3 (landed, FFI-01 to FFI-08); DuckDB event-log child",
+        "status": "mixed",
+        "tags": [],
+        "plannedNotes": [
+          "Statement lanes: child processes that take over SQLite execution from the API process.",
+          "Several placement-routed data nodes instead of one."
+        ],
+        "docIds": [
+          "doc-platform"
+        ],
+        "sourceIds": [
+          "src-ctx-github",
+          "src-ctx-terminal",
+          "src-ctx-py",
+          "src-ffi-plan"
+        ]
+      },
+      {
+        "id": "registry",
+        "kind": "softwareSystem",
+        "name": "Central registry and placement",
+        "description": "platform/tenants/ — Postgres: tenants, hashed keys, sessions. Part of the platform's organisation.",
+        "status": "mixed",
+        "technology": "Postgres 17 process/store",
+        "tags": [],
+        "plannedNotes": [
+          "Placement table: tenant-to-node placement with leases and epochs."
+        ],
+        "docIds": [
+          "doc-registry"
+        ],
+        "sourceIds": [
+          "src-ctx-github",
+          "src-ctx-terminal",
+          "src-ctx-py",
+          "src-ctr-github",
+          "src-ctr-terminal",
+          "src-ctr-py"
+        ]
+      },
+      {
+        "id": "objects",
+        "kind": "softwareSystem",
+        "name": "Object storage",
+        "description": "S3_BASE_URL or LOCAL_OBJECT_DIR — Immutable snapshots and manifests",
+        "status": "mixed",
+        "tags": [
+          "external"
+        ],
+        "plannedNotes": [
+          "WAL frames (phase two)."
+        ],
+        "docIds": [
+          "doc-objects"
+        ],
+        "sourceIds": [
+          "src-ctx-github",
+          "src-ctx-terminal",
+          "src-ctx-py",
+          "src-ctr-github",
+          "src-ctr-terminal",
+          "src-ctr-py"
+        ]
+      },
+      {
+        "id": "analytics",
+        "kind": "softwareSystem",
+        "name": "Analytics consumer",
+        "description": "scripts/logs.ts; scripts/duckdb/ — Named catalog or offline SQL",
+        "status": "existing",
+        "tags": [
+          "external"
+        ],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-ctx-github",
+          "src-ctx-terminal",
+          "src-ctx-py"
+        ]
+      },
+      {
+        "id": "client-sdk",
+        "kind": "softwareSystem",
+        "name": "Typed client SDK",
+        "description": "sdk/client.ts — Named handlers, bearer, X-Trace-Id. A library inside the caller's process.",
+        "status": "existing",
+        "technology": "Library in caller process",
+        "tags": [
+          "external"
+        ],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-ctr-github",
+          "src-ctr-terminal",
+          "src-ctr-py"
+        ]
+      },
+      {
+        "id": "api",
+        "kind": "container",
+        "name": "API process",
+        "description": "platform/server.ts; platform/http/ — HTTP auth and tenant context; today also executes every SQLite statement itself through the FFI binding, the statement classifier and the deadline/interrupt path (landed, FFI-01 to FFI-08)",
+        "status": "mixed",
+        "technology": "Deno process; Deno FFI to system libsqlite3",
+        "parentId": "platform",
+        "containerType": "application",
+        "tags": [],
+        "plannedNotes": [
+          "Placement router: finds the node that owns the request's tenant.",
+          "Forwarder: sends the request to that node with the trusted tenant id, epoch and request id.",
+          "Lane supervisor: spawns lanes, kills a lane on a missed deadline and starts its replacement.",
+          "Stops opening tenant files once the lanes land."
+        ],
+        "docIds": [
+          "doc-api"
+        ],
+        "sourceIds": [
+          "src-ctr-github",
+          "src-ctr-terminal",
+          "src-ctr-py",
+          "src-ffi-plan",
+          "src-adr-0008",
+          "src-sqlite-ffi",
+          "src-classify",
+          "src-current-platform"
+        ]
+      },
+      {
+        "id": "lanes",
+        "kind": "container",
+        "name": "Statement lanes",
+        "description": "platform/lane.ts — Sticky tenant-to-lane; bounded statement pool with deadlines; handle LRU; write-first scheduler",
+        "status": "planned",
+        "technology": "Deno child processes; FFI to system libsqlite3, one copy per lane",
+        "parentId": "platform",
+        "containerType": "application",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [
+          "doc-lanes"
+        ],
+        "sourceIds": [
+          "src-ctr-github",
+          "src-ctr-terminal",
+          "src-ctr-py",
+          "src-ffi-readme",
+          "src-ffi-plan"
+        ]
+      },
+      {
+        "id": "files",
+        "kind": "container",
+        "name": "Tenant documents",
+        "description": "TENANTS_DIR/tenantId.db — One file per tenant",
+        "status": "existing",
+        "technology": "SQLite 3 WAL files",
+        "parentId": "platform",
+        "containerType": "datastore",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [
+          "doc-files"
+        ],
+        "sourceIds": [
+          "src-ctr-github",
+          "src-ctr-terminal",
+          "src-ctr-py"
+        ]
+      },
+      {
+        "id": "reader",
+        "kind": "container",
+        "name": "Reader process",
+        "description": "platform/reader.ts — Event-log DuckDB; ingest and named analysis",
+        "status": "existing",
+        "technology": "Deno child process",
+        "parentId": "platform",
+        "containerType": "application",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-ctr-github",
+          "src-ctr-terminal",
+          "src-ctr-py"
+        ]
+      },
+      {
+        "id": "peer",
+        "kind": "container",
+        "name": "Peer data node",
+        "description": "Same containers as this node, on another host — Owner of the tenants not placed here",
+        "status": "planned",
+        "technology": "Deno process on another host",
+        "parentId": "platform",
+        "containerType": "application",
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [
+          "doc-peer"
+        ],
+        "sourceIds": [
+          "src-ctr-github",
+          "src-ctr-terminal",
+          "src-ctr-py"
+        ]
+      }
+    ],
+    "relationships": [
+      {
+        "id": "ctx-1",
+        "sourceId": "developer",
+        "targetId": "platform",
+        "label": "Schema and named handlers (TypeScript)",
+        "status": "existing",
+        "technology": "TypeScript",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-ctx-github",
+          "src-ctx-terminal",
+          "src-ctx-py"
+        ]
+      },
+      {
+        "id": "ctx-2",
+        "sourceId": "caller",
+        "targetId": "platform",
+        "label": "HTTP JSON; bearer credentials; X-Trace-Id; served by the owning node or forwarded",
+        "status": "mixed",
+        "technology": "HTTP JSON",
+        "plannedNotes": [
+          "Forwarding: a node that does not own the tenant forwards the request to the owner."
+        ],
+        "docIds": [],
+        "sourceIds": [
+          "src-ctx-github",
+          "src-ctx-terminal",
+          "src-ctx-py"
+        ]
+      },
+      {
+        "id": "ctx-3",
+        "sourceId": "operator",
+        "targetId": "platform",
+        "label": "Admin HTTP / CLI; tenant, backup and placement-move operations",
+        "status": "mixed",
+        "technology": "HTTP / CLI",
+        "plannedNotes": [
+          "Placement-move operations."
+        ],
+        "docIds": [],
+        "sourceIds": [
+          "src-ctx-github",
+          "src-ctx-terminal",
+          "src-ctx-py"
+        ]
+      },
+      {
+        "id": "ctx-4",
+        "sourceId": "platform",
+        "targetId": "registry",
+        "label": "Postgres protocol; auth and tenant SQL; placement lookup and lease heartbeat",
+        "status": "mixed",
+        "technology": "Postgres protocol",
+        "plannedNotes": [
+          "Placement lookup and lease heartbeat."
+        ],
+        "docIds": [],
+        "sourceIds": [
+          "src-ctx-github",
+          "src-ctx-terminal",
+          "src-ctx-py"
+        ]
+      },
+      {
+        "id": "ctx-5",
+        "sourceId": "platform",
+        "targetId": "objects",
+        "label": "S3 HTTPS or local files; snapshots and manifests; WAL frames",
+        "status": "mixed",
+        "technology": "S3 HTTPS or local files",
+        "plannedNotes": [
+          "WAL frames (phase two)."
+        ],
+        "docIds": [],
+        "sourceIds": [
+          "src-ctx-github",
+          "src-ctx-terminal",
+          "src-ctx-py"
+        ]
+      },
+      {
+        "id": "ctx-6",
+        "sourceId": "platform",
+        "targetId": "analytics",
+        "label": "Query results; derived event-log rows",
+        "status": "existing",
+        "technology": "DuckDB SQL (named catalog or offline)",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-ctx-github",
+          "src-ctx-terminal",
+          "src-ctx-py"
+        ]
+      },
+      {
+        "id": "ctr-1",
+        "sourceId": "client-sdk",
+        "targetId": "api",
+        "label": "HTTP JSON + bearer + trace",
+        "status": "existing",
+        "technology": "HTTP JSON",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-ctr-github",
+          "src-ctr-terminal",
+          "src-ctr-py"
+        ]
+      },
+      {
+        "id": "ctr-2",
+        "sourceId": "api",
+        "targetId": "registry",
+        "label": "Postgres protocol; auth and registry SQL; placement lookup and lease heartbeat",
+        "status": "mixed",
+        "technology": "Postgres protocol",
+        "plannedNotes": [
+          "Placement lookup and lease heartbeat."
+        ],
+        "docIds": [],
+        "sourceIds": [
+          "src-ctr-github",
+          "src-ctr-terminal",
+          "src-ctr-py"
+        ]
+      },
+      {
+        "id": "ctr-3",
+        "sourceId": "api",
+        "targetId": "peer",
+        "label": "Forwarded request over HTTP: trusted tenant id, epoch, request id",
+        "status": "planned",
+        "technology": "HTTP",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-ctr-github",
+          "src-ctr-terminal",
+          "src-ctr-py"
+        ]
+      },
+      {
+        "id": "ctr-4",
+        "sourceId": "api",
+        "targetId": "lanes",
+        "label": "JSON-lines IPC: compiled SQL, binds, deadline, request id; cancel; SIGKILL on a missed deadline",
+        "status": "planned",
+        "technology": "JSON-lines IPC over stdio; SIGKILL",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-ctr-github",
+          "src-ctr-terminal",
+          "src-ctr-py"
+        ]
+      },
+      {
+        "id": "ctr-6",
+        "sourceId": "lanes",
+        "targetId": "files",
+        "label": "WAL reads and writes; BEGIN IMMEDIATE per mutation; VACUUM INTO from a read-only connection",
+        "status": "planned",
+        "technology": "Deno.dlopen symbols: blocking step; nonblocking step; sqlite3_interrupt",
+        "plannedNotes": [],
+        "docIds": [
+          "doc-lanes"
+        ],
+        "sourceIds": [
+          "src-ctr-github",
+          "src-ctr-terminal",
+          "src-ctr-py"
+        ]
+      },
+      {
+        "id": "ctr-7",
+        "sourceId": "api",
+        "targetId": "files",
+        "label": "Reads and serialized mutations through the FFI binding (today; moves into the lanes)",
+        "status": "mixed",
+        "technology": "Deno FFI to system libsqlite3",
+        "plannedNotes": [
+          "Retired when the lanes land: the lanes then own every open of a tenant file."
+        ],
+        "docIds": [
+          "doc-api"
+        ],
+        "sourceIds": [
+          "src-ctr-github",
+          "src-ctr-terminal",
+          "src-ctr-py",
+          "src-current-platform",
+          "src-ffi-plan"
+        ]
+      },
+      {
+        "id": "ctr-8",
+        "sourceId": "api",
+        "targetId": "reader",
+        "label": "JSONL IPC ping/ingest/analysis",
+        "status": "existing",
+        "technology": "JSONL IPC",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-ctr-github",
+          "src-ctr-terminal",
+          "src-ctr-py"
+        ]
+      },
+      {
+        "id": "ctr-9",
+        "sourceId": "api",
+        "targetId": "objects",
+        "label": "Snapshot verification/hash and publication; WAL frames",
+        "status": "mixed",
+        "technology": "S3 HTTPS or local files",
+        "plannedNotes": [
+          "WAL frames (phase two).",
+          "Snapshots taken from a read-only connection."
+        ],
+        "docIds": [],
+        "sourceIds": [
+          "src-ctr-github",
+          "src-ctr-terminal",
+          "src-ctr-py",
+          "src-ffi-readme"
+        ]
+      }
+    ]
+  },
+  "diagrams": [
+    {
+      "id": "ffi-context",
+      "kind": "context",
+      "title": "System context: proposed FFI lanes and placement",
+      "status": "mixed",
+      "scopeId": "platform",
+      "related": [],
+      "nodes": [
+        {
+          "elementId": "platform",
+          "detail": {
+            "diagramId": "ffi-containers"
+          }
+        },
+        {
+          "elementId": "registry"
+        },
+        {
+          "elementId": "developer"
+        },
+        {
+          "elementId": "caller"
+        },
+        {
+          "elementId": "operator"
+        },
+        {
+          "elementId": "objects"
+        },
+        {
+          "elementId": "analytics"
+        }
+      ],
+      "edges": [
+        {
+          "relationshipId": "ctx-1",
+          "displayNumber": 1
+        },
+        {
+          "relationshipId": "ctx-2",
+          "displayNumber": 2
+        },
+        {
+          "relationshipId": "ctx-3",
+          "displayNumber": 3
+        },
+        {
+          "relationshipId": "ctx-4",
+          "displayNumber": 4
+        },
+        {
+          "relationshipId": "ctx-5",
+          "displayNumber": 5
+        },
+        {
+          "relationshipId": "ctx-6",
+          "displayNumber": 6
+        }
+      ],
+      "groups": [
+        {
+          "id": "g-organisation",
+          "label": "Document DB platform",
+          "memberIds": [
+            "platform",
+            "registry"
+          ],
+          "status": "existing"
+        }
+      ],
+      "docIds": [
+        "doc-context",
+        "doc-measurements"
+      ],
+      "sourceIds": [
+        "src-ctx-github",
+        "src-ctx-terminal",
+        "src-ctx-py",
+        "src-ffi-readme",
+        "src-lang-switch"
+      ],
+      "layout": {
+        "mode": "auto",
+        "direction": "TB"
+      },
+      "legend": {
+        "title": "Key",
+        "entries": [
+          {
+            "id": "person",
+            "label": "Person",
+            "description": "A human role.",
+            "swatch": {
+              "shape": "person",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "system",
+            "label": "System in scope",
+            "description": "The Document DB platform, highlighted as the subject.",
+            "swatch": {
+              "shape": "box",
+              "tone": "accent",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "box",
+            "label": "Software system",
+            "description": "The central registry: part of the platform's organisation, drawn as a separate system by the source.",
+            "swatch": {
+              "shape": "box",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "external",
+            "label": "External system",
+            "description": "A system outside the platform's organisation.",
+            "swatch": {
+              "shape": "box",
+              "tone": "external",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "boundary",
+            "label": "Boundary",
+            "description": "A boundary drawn by the source; a dashed boundary contains planned structure.",
+            "swatch": {
+              "shape": "boundary",
+              "tone": "muted",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "dashed",
+            "label": "Planned or changing",
+            "description": "Dashed outline or line: planned, or existing with planned changes. The card says which (planned, or Existing + planned changes) and the explanation panel lists each planned note.",
+            "swatch": {
+              "shape": "box",
+              "tone": "default",
+              "stroke": "dashed"
+            }
+          },
+          {
+            "id": "relationship",
+            "label": "Existing relationship",
+            "description": "Solid, directed, labelled; the number is the source edge number.",
+            "swatch": {
+              "shape": "line",
+              "tone": "default",
+              "stroke": "solid",
+              "arrow": "forward"
+            }
+          },
+          {
+            "id": "planned-relationship",
+            "label": "Planned or changing relationship",
+            "description": "Dashed line: planned, or existing with planned notes.",
+            "swatch": {
+              "shape": "line",
+              "tone": "default",
+              "stroke": "dashed",
+              "arrow": "forward"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "ffi-containers",
+      "kind": "container",
+      "title": "Containers: proposed data node with statement lanes",
+      "status": "mixed",
+      "scopeId": "platform",
+      "parent": {
+        "diagramId": "ffi-context",
+        "elementId": "platform"
+      },
+      "related": [],
+      "nodes": [
+        {
+          "elementId": "api"
+        },
+        {
+          "elementId": "lanes"
+        },
+        {
+          "elementId": "files"
+        },
+        {
+          "elementId": "reader"
+        },
+        {
+          "elementId": "client-sdk"
+        },
+        {
+          "elementId": "registry"
+        },
+        {
+          "elementId": "peer"
+        },
+        {
+          "elementId": "objects"
+        }
+      ],
+      "edges": [
+        {
+          "relationshipId": "ctr-1",
+          "displayNumber": 1
+        },
+        {
+          "relationshipId": "ctr-2",
+          "displayNumber": 2
+        },
+        {
+          "relationshipId": "ctr-3",
+          "displayNumber": 3
+        },
+        {
+          "relationshipId": "ctr-4",
+          "displayNumber": 4
+        },
+        {
+          "relationshipId": "ctr-6",
+          "displayNumber": 6
+        },
+        {
+          "relationshipId": "ctr-7",
+          "displayNumber": 7
+        },
+        {
+          "relationshipId": "ctr-8",
+          "displayNumber": 8
+        },
+        {
+          "relationshipId": "ctr-9",
+          "displayNumber": 9
+        }
+      ],
+      "groups": [
+        {
+          "id": "g-data-node",
+          "label": "Data node (one of N, placement-routed)",
+          "memberIds": [
+            "api",
+            "lanes",
+            "files",
+            "reader"
+          ],
+          "status": "mixed"
+        }
+      ],
+      "docIds": [
+        "doc-containers",
+        "doc-measurements"
+      ],
+      "sourceIds": [
+        "src-ctr-github",
+        "src-ctr-terminal",
+        "src-ctr-py",
+        "src-ffi-readme",
+        "src-lang-switch",
+        "src-ffi-plan"
+      ],
+      "layout": {
+        "mode": "auto",
+        "direction": "TB"
+      },
+      "legend": {
+        "title": "Key",
+        "entries": [
+          {
+            "id": "container",
+            "label": "Container or system",
+            "description": "A process, data store or system, typed as in the source.",
+            "swatch": {
+              "shape": "box",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "external",
+            "label": "External system",
+            "description": "The typed client SDK and object storage.",
+            "swatch": {
+              "shape": "box",
+              "tone": "external",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "numbering",
+            "label": "Edge 5 folded into 6",
+            "description": "The source drew libsqlite3 as a container (edges 5 and 6). It is a library loaded inside each lane, so its two edges are one lane-to-file relationship numbered 6.",
+            "swatch": {
+              "shape": "line",
+              "tone": "muted",
+              "stroke": "dotted"
+            }
+          },
+          {
+            "id": "boundary",
+            "label": "Boundary",
+            "description": "A boundary drawn by the source; a dashed boundary contains planned structure.",
+            "swatch": {
+              "shape": "boundary",
+              "tone": "muted",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "dashed",
+            "label": "Planned or changing",
+            "description": "Dashed outline or line: planned, or existing with planned changes. The card says which (planned, or Existing + planned changes) and the explanation panel lists each planned note.",
+            "swatch": {
+              "shape": "box",
+              "tone": "default",
+              "stroke": "dashed"
+            }
+          },
+          {
+            "id": "relationship",
+            "label": "Existing relationship",
+            "description": "Solid, directed, labelled; the number is the source edge number.",
+            "swatch": {
+              "shape": "line",
+              "tone": "default",
+              "stroke": "solid",
+              "arrow": "forward"
+            }
+          },
+          {
+            "id": "planned-relationship",
+            "label": "Planned or changing relationship",
+            "description": "Dashed line: planned, or existing with planned notes.",
+            "swatch": {
+              "shape": "line",
+              "tone": "default",
+              "stroke": "dashed",
+              "arrow": "forward"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "documents": [
+    {
+      "id": "doc-context",
+      "title": "System context: what the proposal changes",
+      "plain": "The proposal keeps the system's people and external systems. Inside the platform's organisation boundary, statement\nlanes (child processes) take over SQLite execution, the Postgres registry gains a `placement` table (tenant to node,\nwith leases and epochs) so any node can forward a request to the tenant's owner, and object storage later gains WAL\nframes (phase two). No new external system is introduced: the forwarded hop is node-to-node inside the platform, and\nthe caller contract (`createClient(baseURL, appId, token)`) is unchanged. k6 and the migration and tenant CLIs are\nunchanged and omitted for focus; the current dataset draws them.\n\n**Since the source was drawn** (2026-10-12, baseline `e808983`), the FFI execution layer it marked planned has landed\non `main` (FFI-01 to FFI-08, 2026-10-14): the API process already executes SQLite through Deno FFI to the system\n`libsqlite3`, classifies each statement from its plan and bounds unbounded reads with a deadline and\n`sqlite3_interrupt` (HTTP 504 on expiry). Lanes, placement, forwarding and WAL shipping remain proposals; FFI plan §6\nnames lanes and placement as explicitly not built.",
+      "ste": {
+        "text": "The proposal does not change the people or the external systems. The proposal adds three things to the platform.\nStatement lanes execute the SQLite statements. A placement table in the registry shows the owner node of each tenant.\nA node forwards a request to the owner node of its tenant. In phase two, object storage also keeps WAL frames.\n\nThe FFI binding is now installed on main. The API process uses it today. The lanes and the placement table are not\ninstalled.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [
+        "t-lane",
+        "t-placement",
+        "t-forward",
+        "t-ffi",
+        "t-wal"
+      ],
+      "sourceIds": [
+        "src-ctx-github",
+        "src-ctx-terminal",
+        "src-ctx-py",
+        "src-ffi-readme",
+        "src-ffi-plan"
+      ]
+    },
+    {
+      "id": "doc-containers",
+      "title": "Containers: one data node with statement lanes",
+      "plain": "One data node of N, placement-routed. The API process keeps HTTP, auth, the reader client and the backup pipeline,\nand gains a placement router, a forwarder (edges 2 and 3) and a lane supervisor (edge 4). A lane is a supervised child\nprocess in the pattern of the reader child (`platform/ipc.ts`, `platform/layers.ts`): JSON lines over stdio, killed\nand respawned by the supervisor. Lanes exist because a child process is the only unit that can be killed\nmid-statement, that isolates a native crash from the API, and that has its own descriptor table. They are not the\ncancellation mechanism; that is `sqlite3_interrupt` inside the lane. The hot write never waits behind reads: a\nmutation takes only its own file's writer lock, and snapshots run on a read-only connection (edge 6). Placement is\nthe scale-out pick F: a `placement` table beside the tenant row, lease-fenced and epoch-versioned; a node that\nreceives a tenant it does not own answers WrongOwner and the forwarder refreshes once.\n\n**Corrections against `main`.** (1) Source edge 7 says the API process reaches tenant files through `node:sqlite`\ntoday. Since FFI-04 it opens them through the landed FFI binding (`platform/sqlite_ffi/`) over the system\n`libsqlite3`, with the statement classifier and the deadline/interrupt path of FFI-05; the relationship is converted\nas existing with that wording, and it is still retired when lanes land. (2) The source's \"System libsqlite3\n(planned)\" box at `platform/ffi/sqlite.ts (planned)` is a shared library loaded into a process, not a container. The\nbinding it describes exists today at `platform/sqlite_ffi/` inside the API process; inside lanes it is planned. It is\nfolded into the `technology` of both containers, and its edges 5 (lane to library) and 6 (library to files) become\none planned lane-to-file relationship numbered 6. The lane's internal components are a Level 3 view, deferred to\nPG-02.",
+      "ste": {
+        "text": "This diagram shows one data node. The API process exists today. It receives the requests and identifies the tenant.\nToday it opens the tenant files itself through the FFI binding.\n\nIn the proposal, a placement router finds the owner node of the tenant. A forwarder sends the request to the owner\nnode. A lane supervisor starts and stops the lanes. A lane is a child process. It executes the SQLite statements of\nits tenants. The interrupt in the lane stops a long statement. The supervisor kills a lane only as the last step.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [
+        "t-lane",
+        "t-placement",
+        "t-forward",
+        "t-interrupt",
+        "t-ffi"
+      ],
+      "sourceIds": [
+        "src-ctr-github",
+        "src-ctr-terminal",
+        "src-ctr-py",
+        "src-ffi-readme",
+        "src-ffi-plan",
+        "src-current-platform",
+        "src-sqlite-ffi"
+      ]
+    },
+    {
+      "id": "doc-measurements",
+      "title": "Measured values and their limits",
+      "plain": "The source diagrams quote proof-of-concept measurements from vm-1 on 2026-10-12 (language-switch study §3; raw data\nin `docs/architecture/lang-switch-fable-data/` on `research/fable-lang-switch`). They are historical observations on\none host, not guarantees, and no label in this dataset carries them:\n\n- Point read, `node:sqlite` on the main thread, p50: 8.7 to 8.9 µs.\n- Point read, FFI blocking step, p50: 6.3 to 6.8 µs.\n- Point read, FFI nonblocking step, p50: 44 to 69 µs; p99 240 to 2,180 µs.\n- Interrupt latency, FFI nonblocking step: 0.41 ms (0.34 to 8.8 ms across runs). The study's summary rounds it to\n  about 0.3 ms; the diagrams say about 0.4 ms.\n- Lane kill, SIGKILL to exit: 3.8 ms; restart, spawn to first answer: 51 ms (about 55 ms in all).\n- `Worker.terminate()` on a running statement: waited 24.9 s.\n- File descriptors: 3 per writer handle, 2 per read-only handle (from the scale-out study, reproduced by the\n  language-switch harnesses).\n\nA bounded plan is a classification, not a timing proof: a point read does not by itself guarantee a wall-clock bound\nunder I/O stalls, and the blocking step cannot be interrupted. The study's own limits (§9): the FFI probe used one\nconnection, and the blocking pool's size and back-pressure under hundreds of long statements were not measured.",
+      "ste": {
+        "text": "These values come from tests on one VM on 2026-10-12. They are not guarantees. A point read with the blocking step\ntook approximately 7 µs. A point read with the nonblocking step took approximately 44 to 69 µs. An interrupt stopped\na statement in approximately 0.4 ms. A lane kill and restart took approximately 55 ms. A bounded plan does not give a\ntime limit.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [
+        "t-interrupt",
+        "t-lane"
+      ],
+      "sourceIds": [
+        "src-lang-switch",
+        "src-ffi-readme",
+        "src-ffi-ste"
+      ]
+    },
+    {
+      "id": "doc-platform",
+      "title": "Document DB platform: today and proposed",
+      "plain": "Exists on `main`: one API process that opens every SQLite file through the FFI binding over the system `libsqlite3`\n(FFI-04 replaced `node:sqlite`), the Postgres registry for tenants, keys and sessions, the DuckDB reader child, and\nsnapshot backups to object storage. Planned inside the same boundary: statement lanes (child processes) that execute\nSQLite, a placement table so any node can forward a request to the tenant's owner, and WAL frames shipped to object\nstorage after the snapshot path.",
+      "ste": {
+        "text": "Today, one API process opens each SQLite file through the FFI binding. The registry keeps the tenants, keys, and\nsessions. The reader child keeps the event log. In the proposal, lanes execute the statements. A placement table\nshows the owner node of each tenant.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [
+        "t-lane",
+        "t-placement",
+        "t-ffi"
+      ],
+      "sourceIds": [
+        "src-ctx-github",
+        "src-ctx-terminal",
+        "src-ctx-py",
+        "src-ffi-plan"
+      ]
+    },
+    {
+      "id": "doc-api",
+      "title": "API process",
+      "plain": "Exists today as the one server process (`platform/server.ts`, `platform/http/`): HTTP, authentication and tenant\ncontext, the reader client and the backup pipeline. It already executes SQLite itself through the landed FFI layer:\nthe binding over the system `libsqlite3` (`platform/sqlite_ffi/`, FFI-01 to FFI-04b), the statement classifier and\nthe deadline-bounded nonblocking path with `sqlite3_interrupt` (FFI-05). A long statement now fails\n`StatementDeadlineError` (HTTP 504) instead of blocking the event loop.\n\nPlanned: a placement router, a forwarder and a lane supervisor. Once lanes land, the API process stops touching\ntenant files and sends each statement to the tenant's lane with the compiled SQL, the bind values, the deadline and\nthe request id.",
+      "ste": {
+        "text": "The API process exists today. It receives the HTTP requests and identifies the tenant. Today it executes the SQLite\nstatements through the FFI binding. If a long statement passes its deadline, the API process stops it.\n\nIn the proposal, the API process does not open the tenant files. It sends each statement to a lane. It also gets a\nplacement router, a forwarder, and a lane supervisor.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [
+        "t-ffi",
+        "t-deadline",
+        "t-interrupt",
+        "t-lane"
+      ],
+      "sourceIds": [
+        "src-ctr-github",
+        "src-ctr-terminal",
+        "src-ctr-py",
+        "src-ffi-plan",
+        "src-adr-0008",
+        "src-sqlite-ffi",
+        "src-classify",
+        "src-current-platform"
+      ]
+    },
+    {
+      "id": "doc-lanes",
+      "title": "Statement lanes (planned)",
+      "plain": "Supervised Deno child processes. Each tenant is sticky to one lane, which owns that tenant's files. A lane has a\nbounded statement pool with deadlines and a per-tenant sub-cap (a tenant over its cap gets a typed QueueFull for that\ntenant only), a handle LRU and read pool, a write-first scheduler and a request-id store. Each lane would load the\nsystem `libsqlite3` with `Deno.dlopen`, one copy per lane, and use a blocking step for bounded statements and a\nnonblocking step plus `sqlite3_interrupt` for the rest.\n\n**Planned instantiation, existing code.** The binding, classifier and deadline/interrupt path a lane would run\nalready exist in the API process (`platform/sqlite_ffi/`), written so they move into a lane without change (FFI plan\n§6). The lane process, its scheduler, statement pool, handle pool, request-id store and the supervisor do not exist.\nThe lane's internal components (Level 3) and its flows are deferred to PG-02.",
+      "ste": {
+        "text": "A lane is a child process of the API process. It is not installed. Each tenant goes to one lane. The lane executes\nthe statements of its tenants. A pool limits the number of long statements of each tenant. The lane loads the SQLite\nlibrary through FFI. The FFI binding code exists today in the API process.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [
+        "t-lane",
+        "t-ffi",
+        "t-interrupt",
+        "t-deadline",
+        "t-request-id"
+      ],
+      "sourceIds": [
+        "src-ctr-github",
+        "src-ctr-terminal",
+        "src-ctr-py",
+        "src-ffi-readme",
+        "src-ffi-ste",
+        "src-ffi-plan",
+        "src-sqlite-ffi"
+      ]
+    },
+    {
+      "id": "doc-files",
+      "title": "Tenant documents",
+      "plain": "One SQLite file per tenant at `TENANTS_DIR/tenantId.db`; this exists today. In the proposal only the tenant's lane\nopens it: a mutation takes only its own file's writer lock (`BEGIN IMMEDIATE`), and snapshots use `VACUUM INTO` from\na read-only connection. The source box quotes descriptor costs (3 per writer handle, 2 per read-only handle); they\nare measurements, listed with their provenance in \"Measured values and their limits\".",
+      "ste": {
+        "text": "Each tenant has one SQLite file. The file exists today. In the proposal, only the lane of the tenant opens the file.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [
+        "t-tenant",
+        "t-lane",
+        "t-wal"
+      ],
+      "sourceIds": [
+        "src-ctr-github",
+        "src-ctr-terminal",
+        "src-ctr-py",
+        "src-lang-switch"
+      ]
+    },
+    {
+      "id": "doc-registry",
+      "title": "Central registry and placement",
+      "plain": "The existing Postgres registry (`platform/tenants/`): tenants, hashed keys and sessions. Planned: a `placement` table\nbeside the tenant row with the owner node, a lease and an epoch that increases at each move. The source context draws\nit as a separate software system inside the platform's organisation boundary, and this dataset follows that\nabstraction; the current dataset models the same database as a container of the platform.",
+      "ste": {
+        "text": "The central registry exists today. It keeps the tenants, the hashed keys, and the sessions. In the proposal, a\nplacement table shows the owner node of each tenant. Each row has a lease and an epoch.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [
+        "t-placement",
+        "t-lease",
+        "t-epoch"
+      ],
+      "sourceIds": [
+        "src-ctx-github",
+        "src-ctx-terminal",
+        "src-ctx-py",
+        "src-ctr-github",
+        "src-ctr-terminal",
+        "src-ctr-py"
+      ]
+    },
+    {
+      "id": "doc-peer",
+      "title": "Peer data node (planned)",
+      "plain": "Another data node with the same containers, which owns the tenants not placed on this node. A request for such a\ntenant is forwarded over HTTP with the trusted tenant id, the placement epoch and a request id. A stale epoch answers\nWrongOwner and the forwarder refreshes the placement once. A retry after a forward timeout presents the same request\nid, and the owner's lane answers from its request-id store instead of running the handler again. The source draws\nthe peer as one box at container level; an illustrative deployment view with instances is deferred to PG-02.",
+      "ste": {
+        "text": "A peer data node is a different node with the same containers. It is not installed. It owns the tenants that are not\non this node. The forwarder sends the requests for these tenants to the peer node.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [
+        "t-forward",
+        "t-epoch",
+        "t-request-id"
+      ],
+      "sourceIds": [
+        "src-ctr-github",
+        "src-ctr-terminal",
+        "src-ctr-py",
+        "src-ffi-readme"
+      ]
+    },
+    {
+      "id": "doc-objects",
+      "title": "Object storage",
+      "plain": "Exists today: immutable snapshots and manifests under `S3_BASE_URL` or `LOCAL_OBJECT_DIR`. Planned for phase two:\nWAL frames shipped after the snapshot path.",
+      "ste": {
+        "text": "Object storage keeps the snapshots and the manifests today. In phase two, it also keeps WAL frames.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [
+        "t-wal"
+      ],
+      "sourceIds": [
+        "src-ctx-github",
+        "src-ctx-terminal",
+        "src-ctx-py",
+        "src-ctr-github",
+        "src-ctr-terminal",
+        "src-ctr-py"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "id": "src-ctx-github",
+      "title": "FFI System Context (Mermaid)",
+      "url": "https://github.com/nickstrad/ts-db/blob/81d9936df084763c1577f37bd844b4ff00b95fdc/docs/plans/ffi/c4-context-ffi.github.md",
+      "revision": "81d9936df084763c1577f37bd844b4ff00b95fdc",
+      "path": "docs/plans/ffi/c4-context-ffi.github.md"
+    },
+    {
+      "id": "src-ctx-terminal",
+      "title": "FFI System Context (terminal box drawing)",
+      "url": "https://github.com/nickstrad/ts-db/blob/81d9936df084763c1577f37bd844b4ff00b95fdc/docs/plans/ffi/c4-context-ffi.terminal.md",
+      "revision": "81d9936df084763c1577f37bd844b4ff00b95fdc",
+      "path": "docs/plans/ffi/c4-context-ffi.terminal.md"
+    },
+    {
+      "id": "src-ctx-py",
+      "title": "FFI System Context (generator source)",
+      "url": "https://github.com/nickstrad/ts-db/blob/81d9936df084763c1577f37bd844b4ff00b95fdc/docs/plans/ffi/diagrams/c4-context-ffi.py",
+      "revision": "81d9936df084763c1577f37bd844b4ff00b95fdc",
+      "path": "docs/plans/ffi/diagrams/c4-context-ffi.py"
+    },
+    {
+      "id": "src-ctr-github",
+      "title": "FFI Container: data node with lanes (Mermaid)",
+      "url": "https://github.com/nickstrad/ts-db/blob/81d9936df084763c1577f37bd844b4ff00b95fdc/docs/plans/ffi/c4-container-ffi.github.md",
+      "revision": "81d9936df084763c1577f37bd844b4ff00b95fdc",
+      "path": "docs/plans/ffi/c4-container-ffi.github.md"
+    },
+    {
+      "id": "src-ctr-terminal",
+      "title": "FFI Container: data node with lanes (terminal box drawing)",
+      "url": "https://github.com/nickstrad/ts-db/blob/81d9936df084763c1577f37bd844b4ff00b95fdc/docs/plans/ffi/c4-container-ffi.terminal.md",
+      "revision": "81d9936df084763c1577f37bd844b4ff00b95fdc",
+      "path": "docs/plans/ffi/c4-container-ffi.terminal.md"
+    },
+    {
+      "id": "src-ctr-py",
+      "title": "FFI Container (generator source)",
+      "url": "https://github.com/nickstrad/ts-db/blob/81d9936df084763c1577f37bd844b4ff00b95fdc/docs/plans/ffi/diagrams/c4-container-ffi.py",
+      "revision": "81d9936df084763c1577f37bd844b4ff00b95fdc",
+      "path": "docs/plans/ffi/diagrams/c4-container-ffi.py"
+    },
+    {
+      "id": "src-ffi-readme",
+      "title": "FFI execution layer: diagram set, status table and key flows",
+      "url": "https://github.com/nickstrad/ts-db/blob/81d9936df084763c1577f37bd844b4ff00b95fdc/docs/plans/ffi/README.md",
+      "revision": "81d9936df084763c1577f37bd844b4ff00b95fdc",
+      "path": "docs/plans/ffi/README.md"
+    },
+    {
+      "id": "src-ffi-ste",
+      "title": "FFI execution layer in Simplified Technical English",
+      "url": "https://github.com/nickstrad/ts-db/blob/81d9936df084763c1577f37bd844b4ff00b95fdc/docs/plans/ffi/architecture-ste100.md",
+      "revision": "81d9936df084763c1577f37bd844b4ff00b95fdc",
+      "path": "docs/plans/ffi/architecture-ste100.md"
+    },
+    {
+      "id": "src-lang-switch",
+      "title": "Language-switch study: measurements and the FFI recommendation",
+      "url": "https://github.com/nickstrad/ts-db/blob/d97bcf8f145e94279b882665c70412eabdaba775/docs/architecture/lang-switch-fable.md",
+      "revision": "d97bcf8f145e94279b882665c70412eabdaba775",
+      "path": "docs/architecture/lang-switch-fable.md",
+      "notes": "On research/fable-lang-switch; not on main. Section 3 holds the measurements, section 9 their limits."
+    },
+    {
+      "id": "src-ffi-plan",
+      "title": "FFI implementation plan: FFI-01 to FFI-08 landed",
+      "url": "https://github.com/nickstrad/ts-db/blob/2d30330ed2c0aa967fb737827e43a7cbb8714e59/docs/plans/ffi-implementation.md",
+      "revision": "2d30330ed2c0aa967fb737827e43a7cbb8714e59",
+      "path": "docs/plans/ffi-implementation.md",
+      "notes": "What landed on main and what explicitly did not (section 6: lanes and placement)."
+    },
+    {
+      "id": "src-adr-0008",
+      "title": "ADR 0008: statement execution via FFI",
+      "url": "https://github.com/nickstrad/ts-db/blob/2d30330ed2c0aa967fb737827e43a7cbb8714e59/docs/adr/0008-statement-execution-via-ffi.md",
+      "revision": "2d30330ed2c0aa967fb737827e43a7cbb8714e59",
+      "path": "docs/adr/0008-statement-execution-via-ffi.md"
+    },
+    {
+      "id": "src-sqlite-ffi",
+      "title": "The landed FFI binding (platform/sqlite_ffi/)",
+      "url": "https://github.com/nickstrad/ts-db/blob/2d30330ed2c0aa967fb737827e43a7cbb8714e59/platform/sqlite_ffi/README.md",
+      "revision": "2d30330ed2c0aa967fb737827e43a7cbb8714e59",
+      "path": "platform/sqlite_ffi/README.md"
+    },
+    {
+      "id": "src-classify",
+      "title": "The landed statement classifier",
+      "url": "https://github.com/nickstrad/ts-db/blob/2d30330ed2c0aa967fb737827e43a7cbb8714e59/platform/sqlite_ffi/classify.ts",
+      "revision": "2d30330ed2c0aa967fb737827e43a7cbb8714e59",
+      "path": "platform/sqlite_ffi/classify.ts"
+    },
+    {
+      "id": "src-current-platform",
+      "title": "Current container view: request path (audited)",
+      "url": "https://github.com/nickstrad/ts-db/blob/2d30330ed2c0aa967fb737827e43a7cbb8714e59/docs/architecture/c4-container-platform.github.md",
+      "revision": "2d30330ed2c0aa967fb737827e43a7cbb8714e59",
+      "path": "docs/architecture/c4-container-platform.github.md"
+    },
+    {
+      "id": "src-current-context",
+      "title": "Current system context (audited)",
+      "url": "https://github.com/nickstrad/ts-db/blob/2d30330ed2c0aa967fb737827e43a7cbb8714e59/docs/architecture/c4-context-document-db.github.md",
+      "revision": "2d30330ed2c0aa967fb737827e43a7cbb8714e59",
+      "path": "docs/architecture/c4-context-document-db.github.md"
+    }
+  ],
+  "terms": [
+    {
+      "id": "t-tenant",
+      "text": "tenant",
+      "definition": "A customer of the platform. Each tenant has its own SQLite file.",
+      "category": "technicalNoun"
+    },
+    {
+      "id": "t-lane",
+      "text": "lane",
+      "definition": "A child process of the API process that executes the SQLite statements of its tenants.",
+      "category": "technicalNoun"
+    },
+    {
+      "id": "t-placement",
+      "text": "placement",
+      "definition": "The record of the node that owns a tenant, kept in the central registry.",
+      "category": "technicalNoun"
+    },
+    {
+      "id": "t-lease",
+      "text": "lease",
+      "definition": "A time-limited right of a node to serve a tenant.",
+      "category": "technicalNoun"
+    },
+    {
+      "id": "t-epoch",
+      "text": "epoch",
+      "definition": "A number in the placement row that increases at each move of the tenant.",
+      "category": "technicalNoun"
+    },
+    {
+      "id": "t-request-id",
+      "text": "request id",
+      "definition": "An identifier that the lane stores with the result of a mutation.",
+      "category": "technicalNoun"
+    },
+    {
+      "id": "t-ffi",
+      "text": "FFI",
+      "definition": "Foreign function interface: Deno calls the C functions of the system libsqlite3.",
+      "category": "technicalNoun"
+    },
+    {
+      "id": "t-interrupt",
+      "text": "interrupt",
+      "definition": "The sqlite3_interrupt call that stops a running SQLite statement.",
+      "category": "technicalVerb"
+    },
+    {
+      "id": "t-deadline",
+      "text": "deadline",
+      "definition": "The time limit of one statement.",
+      "category": "technicalNoun"
+    },
+    {
+      "id": "t-wal",
+      "text": "WAL",
+      "definition": "Write-ahead log: the SQLite journal. WAL frames are its units.",
+      "category": "technicalNoun"
+    },
+    {
+      "id": "t-forward",
+      "text": "forward",
+      "definition": "Send a request to the node that owns its tenant.",
+      "category": "technicalVerb"
+    }
+  ]
+}
