@@ -337,6 +337,11 @@ code.
   `pages/playwright.config.ts` sets `outputDir` under `node_modules/`.
 - **c4-sdk component views reject sibling containers without the `external` tag.** Tags are per element, so
   such containers also render grey on container views. `tsdb-current` tags `reader`, `files`, `registry` and
-  `jsonl` and says so in the keys (inventory decision D3).
+  `jsonl` and says so in the keys (inventory decision D3); `tsdb-lanes-proposal` does the same for `api`,
+  `files` and `lane-jsonl` (P12; see the decision of 2026-10-15 on supporting containers).
 - **Never hand-edit `pages/vendor/c4-sdk/`.** Re-run `sync.sh <commit>` and update `PROVENANCE.md`;
   `npm run check` runs `sync.sh --check`.
+- **`pkill -f '<pattern>'` can kill the agent's own shell (exit 144).** `-f` matches full command lines, and
+  an agent's `bash -c '... pkill -f "vite preview" ...'` contains the pattern itself, so the shell kills
+  itself. Stop a preview or dev server by PID (`kill $!` after starting it, or `kill $(lsof -ti :4173)`) or by
+  port, never by a pattern that also appears in your own command (PG-02, 2026-10-15).

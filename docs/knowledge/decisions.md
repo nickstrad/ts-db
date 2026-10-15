@@ -2,6 +2,20 @@
 
 Dated decisions with rationale. Plans carry the _what_; this page carries the _why_. Newest first.
 
+## 2026-10-15 — Supporting containers carry the `external` tag in both diagram datasets
+
+Decision (PG-01 D3, applied again in PG-02 P12; landed `f52c817`): in `pages/`, any container that appears on
+a component view next to the component being drawn is tagged `external`. Why: c4-sdk rejects a non-component,
+non-person member of a component view without that tag, and the site must build. The cost is that tags are per
+element, so the tag spreads to the container views: `reader`, `files`, `registry` and `jsonl` in
+`tsdb-current`, and `api`, `files` and `lane-jsonl` in `tsdb-lanes-proposal`, render grey on every view
+although they sit inside the platform boundary. Each dataset's container-view keys say so and the boundary
+groups show membership. This is wrong for the model (the scope system's own sibling containers are not
+external), so the standing c4-sdk hand-off asks upstream to allow sibling containers of the scope's system on
+a component view without the tag. When it lands, bump the vendored copy
+(`pages/vendor/c4-sdk/sync.sh <commit>`) and drop the tags from both inventories (D3, P12) in the same change.
+Details: `pages/content/*/inventory.md`.
+
 ## 2026-10-15 — Architecture diagrams site in `pages/` on an interim c4-sdk copy
 
 Decision (Nick, relayed by Twin on 2026-10-14; plan `docs/plans/pages-diagrams.md` on `plan/c4-react`; built
