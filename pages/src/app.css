@@ -13,6 +13,10 @@
 * {
   box-sizing: border-box;
 }
+html {
+  /* Focused or linked content scrolls into view below the sticky bar, not under it. */
+  scroll-padding-top: 96px;
+}
 body {
   margin: 0;
   background: var(--site-page);
@@ -82,27 +86,71 @@ code {
   margin: 0;
   font-size: 14px;
 }
-.mode-nav,
-.level-nav {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+.site-bar {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: var(--site-surface);
+  border-block: 1px solid var(--site-border);
+  box-shadow: 0 2px 8px rgb(31 51 69 / 0.08);
 }
-.mode-nav a,
-.level-nav a {
-  padding: 8px 14px;
+/* One row: the picker, then the diagram navigation, which scrolls sideways rather than growing the bar. */
+.site-bar-inner {
+  display: flex;
+  align-items: center;
+  gap: 8px 20px;
+  max-width: 1760px;
+  margin: 0 auto;
+  padding: 4px 24px;
+}
+.architecture-picker {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.architecture-picker label {
+  font-weight: 700;
+  white-space: nowrap;
+}
+.architecture-picker select {
+  min-width: 0;
+  max-width: 400px;
+  padding: 5px 8px;
   border: 1px solid var(--site-border);
-  border-radius: 999px;
+  border-radius: 7px;
   background: var(--site-surface);
   color: var(--site-ink);
-  text-decoration: none;
-  font-weight: 600;
+  font: inherit;
 }
-.mode-nav a[aria-current="page"],
-.level-nav a[aria-current="page"] {
-  background: var(--site-accent);
-  border-color: var(--site-accent);
-  color: #ffffff;
+.site-bar .c4-navigation {
+  flex: 1 1 0;
+  flex-wrap: nowrap;
+  min-width: 0;
+  margin: 0;
+  /* Room for the focus outline inside the scroll box. */
+  padding: 8px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.site-bar .c4-navigation ol {
+  flex-wrap: nowrap;
+}
+.site-bar .c4-navigation a,
+.site-bar .c4-navigation button {
+  padding: 4px 10px;
+  white-space: nowrap;
+}
+@media (max-width: 760px) {
+  .site-bar-inner {
+    flex-wrap: wrap;
+    padding-top: 8px;
+  }
+  .site-bar .c4-navigation {
+    flex-basis: 100%;
+    padding-inline: 0;
+  }
 }
 .site-main {
   max-width: 1760px;
@@ -129,41 +177,12 @@ code {
   background: var(--site-surface);
   border-radius: 4px;
 }
-.dataset-note-proposed {
+.dataset-note-planned {
   border-left-color: var(--site-planned);
 }
-.compare-toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px 24px;
-  margin-bottom: 16px;
-}
-.compare-toolbar h2 {
-  margin: 0;
-  font-size: 20px;
-}
-.compare-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 24px;
-  align-items: start;
-}
-.compare-pane {
-  min-width: 0;
-}
-.pane-label {
-  margin: 0 0 10px;
-  padding: 8px 12px;
-  border-radius: 6px;
-  background: var(--site-surface);
-  border: 1px solid var(--site-border);
-}
-@media (max-width: 1100px) {
-  .compare-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
+/* Keep a whole diagram visible under the sticky bar; the SDK's fixed 620px canvas is the upper bound. */
+.c4-sdk .site-main .c4-flow-canvas {
+  height: clamp(360px, calc(100dvh - 140px), 620px);
 }
 @media (max-width: 600px) {
   .site-header {
@@ -171,6 +190,9 @@ code {
   }
   .site-main {
     padding: 8px 16px 32px;
+  }
+  .site-bar-inner {
+    padding-inline: 16px;
   }
   .site-title {
     font-size: 26px;

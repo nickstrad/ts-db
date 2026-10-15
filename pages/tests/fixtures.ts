@@ -6,6 +6,8 @@ export const readText = (path: string): string => readFileSync(new URL(path, roo
 export const readJson = (path: string): unknown => JSON.parse(readText(path));
 
 export interface CatalogFile {
+  /** The entry the site opens when the URL names none; without it, the first entry. */
+  readonly defaultId?: string;
   readonly entries: readonly {
     readonly id: string;
     readonly title: string;

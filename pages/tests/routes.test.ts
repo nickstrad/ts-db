@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decodeArchitecture } from "c4-sdk/core";
-import type { ValidatedArchitecture } from "c4-sdk/core";
-import { compareHash, counterpart, parseSiteRoute, sharedLevels } from "../src/routes.ts";
-import { createMemoryRoutePort } from "../src/sdk.ts";
-import { bundles } from "./fixtures.ts";
+import { chooseDefault, parseSiteRoute, shownArchitectureId } from "../src/routes.ts";
 
 describe("parseSiteRoute", () => {
   it.each([
@@ -22,10 +18,10 @@ describe("parseSiteRoute", () => {
         diagramId: "components-server",
       },
     ],
-    ["#/compare/context/lanes-context", {
-      kind: "compare",
-      currentDiagramId: "context",
-      proposedDiagramId: "lanes-context",
+    ["#/architectures/fixture-third/diagrams/fixture-context", {
+      kind: "single",
+      architectureId: "fixture-third",
+      diagramId: "fixture-context",
     }],
   ])("%j", (hash, expected) => {
     expect(parseSiteRoute(hash)).toEqual(expected);
@@ -33,104 +29,57 @@ describe("parseSiteRoute", () => {
 
   // Never a silent fallback: each of these is Not Found.
   it.each([
-    "#/compare/context",
-    "#/compare/a%2Fb/lanes-context",
-    "#/compare/context/lanes-context/x",
     "#/somewhere",
-  ])(
-    "%j is Not Found",
-    (hash) => {
-      expect(parseSiteRoute(hash).kind).toBe("not-found");
-    },
-  );
-
-  it("formats compare links that parse back", () => {
-    expect(compareHash("containers-platform", "lanes-containers")).toBe(
-      "#/compare/containers-platform/lanes-containers",
-    );
+    "#/architectures/tsdb-current",
+    "#/architectures/tsdb-current/diagrams/context/extra",
+  ])("%j is Not Found", (hash) => {
+    expect(parseSiteRoute(hash).kind).toBe("not-found");
   });
 });
 
-describe("createMemoryRoutePort", () => {
-  const route = (diagramId: string) => ({
-    architectureId: "tsdb-current",
-    diagramId,
+describe("chooseDefault", () => {
+  // Three peer entries; none is special to the code.
+  const ids = ["tsdb-current", "tsdb-lanes-proposal", "fixture-third"];
+
+  it("uses defaultId when it names an entry", () => {
+    expect(chooseDefault(ids, "fixture-third")).toEqual({ ok: true, id: "fixture-third" });
+    expect(chooseDefault(ids, "tsdb-current")).toEqual({ ok: true, id: "tsdb-current" });
   });
 
-  it("keeps a history stack without touching the URL", () => {
-    const port = createMemoryRoutePort(route("context"));
-    let notified = 0;
-    const unsubscribe = port.subscribe(() => notified++);
-    expect(port.getSnapshot()).toEqual({
-      hash: "#/architectures/tsdb-current/diagrams/context",
-      canGoBack: false,
+  it("falls back to the first entry when the catalog has no defaultId", () => {
+    expect(chooseDefault(ids, undefined)).toEqual({ ok: true, id: "tsdb-current" });
+    expect(chooseDefault(["fixture-third", "tsdb-current"], undefined)).toEqual({
+      ok: true,
+      id: "fixture-third",
     });
+  });
 
-    port.push(route("containers-platform"));
-    expect(port.getSnapshot()).toEqual({
-      hash: "#/architectures/tsdb-current/diagrams/containers-platform",
-      canGoBack: true,
+  it("reports a defaultId that names no entry instead of replacing it", () => {
+    expect(chooseDefault(ids, "nope")).toEqual({
+      ok: false,
+      message: 'The catalog\'s defaultId "nope" names no catalog entry.',
     });
-    expect(notified).toBe(1);
-
-    // Writing the route already shown is a no-op, and the snapshot object stays the same.
-    const before = port.getSnapshot();
-    port.push(route("containers-platform"));
-    expect(port.getSnapshot()).toBe(before);
-    expect(notified).toBe(1);
-
-    port.replace(route("components-server"));
-    expect(port.route()).toEqual(route("components-server"));
-    expect(port.getSnapshot().canGoBack).toBe(true);
-    expect(notified).toBe(2);
-
-    port.back();
-    expect(port.route()).toEqual(route("context"));
-    expect(port.getSnapshot().canGoBack).toBe(false);
-    port.back();
-    expect(notified).toBe(3);
-
-    unsubscribe();
-    port.push(route("containers-observability"));
-    expect(notified).toBe(3);
+    expect(chooseDefault(ids, 3)).toEqual({
+      ok: false,
+      message: "The catalog's defaultId 3 names no catalog entry.",
+    });
+    expect(chooseDefault([], undefined)).toEqual({
+      ok: false,
+      message: "The catalog lists no architectures.",
+    });
   });
 });
 
-describe("levels shared by both datasets", () => {
-  const [current, proposed] = bundles.map(({ json }) => {
-    const decoded = decodeArchitecture(json);
-    if (!decoded.ok) throw new Error("bundle does not decode");
-    return decoded.value as ValidatedArchitecture;
-  });
-
-  it("pairs the first diagram of each C4 level drawn on both sides", () => {
-    expect(sharedLevels(current, proposed)).toEqual([
-      { kind: "context", currentId: "context", proposedId: "lanes-context" },
-      {
-        kind: "container",
-        currentId: "containers-platform",
-        proposedId: "lanes-containers",
-      },
-      {
-        kind: "component",
-        currentId: "components-server",
-        proposedId: "lanes-components",
-      },
-    ]);
-  });
-
-  it("picks the first diagram of the same kind", () => {
-    expect(counterpart(proposed, "component")).toBe("lanes-components");
-    expect(counterpart(proposed, "dynamic")).toBe("flow-point-read");
-    expect(counterpart(current, "container")).toBe("containers-platform");
-    expect(counterpart(current, "code")).toBe("code-document-reader");
-  });
-
-  it("falls back to the default diagram when a level is not drawn", () => {
-    // Landscape and code are drawn only in the current dataset; dynamic and deployment only in the proposed one.
-    expect(counterpart(proposed, "landscape")).toBe("lanes-context");
-    expect(counterpart(proposed, "code")).toBe("lanes-context");
-    expect(counterpart(current, "dynamic")).toBe("context");
-    expect(counterpart(current, "deployment")).toBe("context");
+describe("shownArchitectureId", () => {
+  it("shows the default on an empty hash, the routed entry otherwise, nothing for Not Found", () => {
+    expect(shownArchitectureId({ kind: "home" }, "fixture-third")).toBe("fixture-third");
+    expect(
+      shownArchitectureId(
+        { kind: "single", architectureId: "tsdb-lanes-proposal", diagramId: "lanes-context" },
+        "tsdb-current",
+      ),
+    ).toBe("tsdb-lanes-proposal");
+    expect(shownArchitectureId({ kind: "not-found", message: "x" }, "tsdb-current"))
+      .toBeUndefined();
   });
 });

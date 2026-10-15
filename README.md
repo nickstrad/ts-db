@@ -510,13 +510,14 @@ index accelerates every query.
 
 ## Architecture diagrams site
 
-[`pages/`](pages/README.md) is an interactive C4 viewer of this repo's architecture, for designing features:
-what runs on `main` today (converted from the audited Markdown diagrams in
-[`docs/architecture/`](docs/architecture/README.md)) and proposed designs (currently the statement lanes and
-tenant placement scale-out; the FFI execution layer has landed and is drawn in the current set), each on its
-own or side by side at the same C4 level. It is a separate npm project (Node 22.23.2); run it with
-`cd pages && npm ci && npm run dev`, and see its README for checks and dataset authoring. It renders through
-an interim copy of c4-sdk until that package is published to npm. It will be served at
+[`pages/`](pages/README.md) is an interactive C4 viewer of this repo's architecture, for designing features: N
+architectures in a dropdown, the current one by default. The current one is what runs on `main` today
+(converted from the audited Markdown diagrams in [`docs/architecture/`](docs/architecture/README.md)); the
+others are design proposals (today the statement lanes and tenant placement scale-out; the FFI execution layer
+has landed and is drawn in the current one). One architecture is shown at a time, with the dropdown and the
+diagram navigation in a bar pinned to the top of the page. It is a separate npm project (Node 22.23.2); run it
+with `cd pages && npm ci && npm run dev`, and see its README for checks and dataset authoring. It renders
+through an interim copy of c4-sdk until that package is published to npm. It will be served at
 <https://nickstrad.github.io/ts-db/> once GitHub Pages is enabled for the repository.
 
 ## Primary references
