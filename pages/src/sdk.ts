@@ -1,9 +1,9 @@
 /**
  * The ONLY module of the site that touches c4-sdk. Everything else imports SDK components, ports and
- * types from here, so the swap from the interim copy (vendor/c4-sdk, reached through Vite/TS aliases) to the
- * published npm package edits this file alone. See README.md, "Swap to the npm package".
+ * types from here, so a change to the c4-sdk dependency (the published npm package) touches this file alone.
  */
 import "c4-sdk/styles.css";
+import layoutWorkerUrl from "c4-sdk/layout-worker.js?url";
 import {
   ArchitectureProvider,
   ArchitectureViewer,
@@ -37,12 +37,10 @@ export {
 export type { CatalogEntry, Diagnostic, Diagram, Route, RoutePort, ValidatedArchitecture };
 
 /**
- * One layout port for every viewer on the page. In source mode the SDK bundles its ELK worker itself.
- * At the npm swap this becomes
- * `createElkLayoutPort(() => new Worker(layoutWorkerUrl, { type: "module" }))` with
- * `import layoutWorkerUrl from "c4-sdk/layout-worker.js?url"`.
+ * One layout port for every viewer on the page. The package ships its ELK worker as a separate file; Vite
+ * fingerprints it through `?url` and resolves it under the `/ts-db/` base.
  */
-export const layoutPort = createElkLayoutPort();
+export const layoutPort = createElkLayoutPort(() => new Worker(layoutWorkerUrl, { type: "module" }));
 
 let browserPort: RoutePort | undefined;
 /** The URL-hash route port, created on first use so importing this module touches no browser state. */

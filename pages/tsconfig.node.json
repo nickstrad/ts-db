@@ -17,11 +17,7 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "erasableSyntaxOnly": true,
-    "noFallthroughCasesInSwitch": true,
-    "paths": {
-      "c4-sdk": ["./vendor/c4-sdk/src/index.ts"],
-      "c4-sdk/core": ["./vendor/c4-sdk/src/core/index.ts"]
-    }
+    "noFallthroughCasesInSwitch": true
   },
   "include": ["vite.config.ts", "playwright.config.ts", "tests"]
 }

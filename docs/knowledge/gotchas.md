@@ -329,8 +329,7 @@ code.
 - **`deno fmt <path under pages/>` ignores the root config.** With `pages/package.json` present, an explicit
   path below `pages/` resolves its own (empty) config and formats at the default width 80, while
   `deno task fmt:check` (no paths) applies `deno.json`'s 110 and then fails on those files. Format with
-  `deno fmt` from the repo root without paths, or pass `--config deno.json`. `pages/vendor/c4-sdk/sync.sh`
-  passes `--config` for this reason.
+  `deno fmt` from the repo root without paths, or pass `--config deno.json`.
 - **Explicit paths bypass `.gitignore`.** `deno fmt --check`/`deno lint` without paths skip ignored build
   output such as `pages/dist/`; `deno fmt --check pages/dist` does not.
 - **Playwright's `test-results/` is not gitignored** and the root fmt check then fails on `.last-run.json`.
@@ -339,8 +338,6 @@ code.
   such containers also render grey on container views. `tsdb-current` tags `reader`, `files`, `registry` and
   `jsonl` and says so in the keys (inventory decision D3); `tsdb-lanes-proposal` does the same for `api`,
   `files` and `lane-jsonl` (P12; see the decision of 2026-10-15 on supporting containers).
-- **Never hand-edit `pages/vendor/c4-sdk/`.** Re-run `sync.sh <commit>` and update `PROVENANCE.md`;
-  `npm run check` runs `sync.sh --check`.
 - **`pkill -f '<pattern>'` can kill the agent's own shell (exit 144).** `-f` matches full command lines, and
   an agent's `bash -c '... pkill -f "vite preview" ...'` contains the pattern itself, so the shell kills
   itself. Stop a preview or dev server by PID (`kill $!` after starting it, or `kill $(lsof -ti :4173)`) or by
