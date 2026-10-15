@@ -508,6 +508,17 @@ analysis. This split reuses SQLite SQL for ordinary document reads and keeps the
 load-bearing for ingest and analysis. Benchmark actual workloads rather than assuming every declared SQLite
 index accelerates every query.
 
+## Architecture diagrams site
+
+[`pages/`](pages/README.md) is an interactive C4 viewer of this repo's architecture, for designing features:
+what runs on `main` today (converted from the audited Markdown diagrams in
+[`docs/architecture/`](docs/architecture/README.md)) and proposed designs (currently the statement lanes and
+tenant placement scale-out; the FFI execution layer has landed and is drawn in the current set), each on its
+own or side by side at the same C4 level. It is a separate npm project (Node 22.23.2); run it with
+`cd pages && npm ci && npm run dev`, and see its README for checks and dataset authoring. It renders through
+an interim copy of c4-sdk until that package is published to npm. It will be served at
+<https://nickstrad.github.io/ts-db/> once GitHub Pages is enabled for the repository.
+
 ## Primary references
 
 - Deno SQLite API: https://docs.deno.com/api/node/sqlite/

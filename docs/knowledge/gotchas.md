@@ -321,3 +321,22 @@ code.
 - **The deadline is validated against the reader timeout, not the other way round.** `STATEMENT_DEADLINE_MS`
   must be below `READER_CALL_TIMEOUT_MS`, or the outer call gives up first and the statement is left running
   until the interrupt. Config validation refuses the combination (`platform/config.ts`).
+
+## Deno tooling and the `pages/` npm project (2026-10-15)
+
+`pages/` (PG-01) is an npm project inside the Deno repo. The root tasks still cover it.
+
+- **`deno fmt <path under pages/>` ignores the root config.** With `pages/package.json` present, an explicit
+  path below `pages/` resolves its own (empty) config and formats at the default width 80, while
+  `deno task fmt:check` (no paths) applies `deno.json`'s 110 and then fails on those files. Format with
+  `deno fmt` from the repo root without paths, or pass `--config deno.json`. `pages/vendor/c4-sdk/sync.sh`
+  passes `--config` for this reason.
+- **Explicit paths bypass `.gitignore`.** `deno fmt --check`/`deno lint` without paths skip ignored build
+  output such as `pages/dist/`; `deno fmt --check pages/dist` does not.
+- **Playwright's `test-results/` is not gitignored** and the root fmt check then fails on `.last-run.json`.
+  `pages/playwright.config.ts` sets `outputDir` under `node_modules/`.
+- **c4-sdk component views reject sibling containers without the `external` tag.** Tags are per element, so
+  such containers also render grey on container views. `tsdb-current` tags `reader`, `files`, `registry` and
+  `jsonl` and says so in the keys (inventory decision D3).
+- **Never hand-edit `pages/vendor/c4-sdk/`.** Re-run `sync.sh <commit>` and update `PROVENANCE.md`;
+  `npm run check` runs `sync.sh --check`.

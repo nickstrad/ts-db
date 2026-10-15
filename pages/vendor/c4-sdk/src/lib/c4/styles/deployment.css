@@ -1,0 +1,39 @@
+.c4-deployment-tree {
+  margin-block: 1rem;
+  padding: 1rem;
+  border: 1px solid var(--c4-border, #cbd5e1);
+  border-radius: .5rem;
+}
+.c4-deployment-tree ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.c4-deployment-tree li {
+  padding-block: .5rem;
+  border-top: 1px solid var(--c4-border, #cbd5e1);
+  overflow-wrap: anywhere;
+}
+.c4-deployment-tree li[data-selected=true] {
+  background: #e0f2fe;
+  color: #0c4a6e;
+}
+.c4-deployment-tree small {
+  display: block;
+}
+.c4-deployment-tree p {
+  margin-block: .4rem;
+}
+.c4-deployment-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem;
+  align-items: center;
+}
+.c4-deployment-actions button,
+.c4-deployment-actions a {
+  min-height: 44px;
+  padding: .5rem;
+  border: 1px solid #64748b;
+  border-radius: .25rem;
+}

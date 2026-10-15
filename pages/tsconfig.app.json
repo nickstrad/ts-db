@@ -1,0 +1,29 @@
+{
+  // The viewer. c4-sdk resolves through the same specifiers the npm package will export; the interim
+  // copy under vendor/ is reached only through these paths (and the matching Vite aliases).
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
+    "target": "es2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "esnext",
+    "types": ["vite/client"],
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "allowArbitraryExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true,
+    "paths": {
+      "c4-sdk": ["./vendor/c4-sdk/src/index.ts"],
+      "c4-sdk/core": ["./vendor/c4-sdk/src/core/index.ts"]
+    }
+  },
+  "include": ["src"]
+}

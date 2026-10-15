@@ -1,0 +1,69 @@
+.c4-docs-responsive {
+  min-width: 0;
+}
+.c4-docs-mobile {
+  display: none;
+}
+.c4-documentation {
+  overflow-wrap: anywhere;
+}
+.c4-documentation select {
+  display: block;
+  max-width: 100%;
+  padding: .5rem;
+  margin: .5rem 0;
+}
+.c4-prose,
+.c4-prose p {
+  white-space: normal;
+}
+.c4-prose pre,
+.c4-prose code {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.c4-docs-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgb(0 0 0 / .45);
+}
+.c4-docs-sheet {
+  position: fixed;
+  z-index: 51;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: min(100%, 32rem);
+  background: white;
+  color: #182333;
+  overflow: auto;
+  padding: 1rem;
+  box-sizing: border-box;
+}
+.c4-docs-trigger,
+.c4-docs-close {
+  padding: .65rem 1rem;
+  border: 1px solid #52657b;
+  border-radius: .4rem;
+  background: white;
+  color: #182333;
+}
+.c4-docs-close {
+  margin-bottom: 1rem;
+}
+@media (max-width: 760px) {
+  .c4-docs-inline {
+    display: none;
+  }
+  .c4-docs-mobile {
+    display: block;
+  }
+}
+
+/* Put the narrow-screen explanation entry before the long canvas and key. */
+@media (max-width: 760px) {
+  .c4-viewer-grid > .c4-docs-responsive {
+    order: -1;
+  }
+}
