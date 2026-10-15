@@ -22,7 +22,6 @@ import type {
   Result,
   Route,
   RoutePort,
-  RouteSnapshot,
   ValidatedArchitecture,
 } from "c4-sdk/core";
 
@@ -45,63 +44,11 @@ export type { CatalogEntry, Diagnostic, Diagram, Route, RoutePort, ValidatedArch
  */
 export const layoutPort = createElkLayoutPort();
 
-const loader = createFetchLoader();
-
 let browserPort: RoutePort | undefined;
 /** The URL-hash route port, created on first use so importing this module touches no browser state. */
 export function browserRoutePort(): RoutePort {
   browserPort ??= createHashRoutePort();
   return browserPort;
-}
-
-/** A route port that keeps its history in memory: the second (and first) viewer of the side-by-side mode. */
-export interface MemoryRoutePort extends RoutePort {
-  /** The route currently shown. */
-  readonly route: () => Route;
-}
-
-/**
- * Implements the public `RoutePort` contract without touching the URL: a stack of routes, `push` adds an
- * entry, `replace` rewrites the top, `back` pops while more than one entry remains. Like the SDK's hash
- * port, writing the route already shown is a no-op, and the snapshot object stays stable until it changes.
- */
-export function createMemoryRoutePort(initial: Route): MemoryRoutePort {
-  const stack: Route[] = [initial];
-  const listeners = new Set<() => void>();
-  const snapshotOf = (): RouteSnapshot => ({
-    hash: formatRoute(stack.at(-1)!),
-    canGoBack: stack.length > 1,
-  });
-  let snapshot = snapshotOf();
-  const publish = () => {
-    snapshot = snapshotOf();
-    listeners.forEach((listener) => listener());
-  };
-  return {
-    route: () => stack.at(-1)!,
-    getSnapshot: () => snapshot,
-    subscribe: (listener) => {
-      listeners.add(listener);
-      return () => {
-        listeners.delete(listener);
-      };
-    },
-    push: (route) => {
-      if (formatRoute(route) === snapshot.hash) return;
-      stack.push(route);
-      publish();
-    },
-    replace: (route) => {
-      if (formatRoute(route) === snapshot.hash) return;
-      stack[stack.length - 1] = route;
-      publish();
-    },
-    back: () => {
-      if (stack.length < 2) return;
-      stack.pop();
-      publish();
-    },
-  };
 }
 
 /** A catalog entry with its decoded bundle, or the reason it could not be shown. */
@@ -113,12 +60,15 @@ export interface LoadedArchitecture {
 /**
  * Loads the catalog and every bundle it lists through the SDK's bounded fetch loader. Like the SDK's
  * CatalogViewer, a bundle whose `id` differs from its catalog entry `id` is rejected, so a deep link's
- * architecture id always names the bundle it shows.
+ * architecture id always names the bundle it shows. `fetchResource` is the loader's fetch (the site passes one
+ * that lifts its own `defaultId` key off the catalog, see catalog.ts).
  */
 export async function loadArchitectures(
   catalogUrl: string,
   signal: AbortSignal,
+  fetchResource: typeof fetch = fetch,
 ): Promise<readonly LoadedArchitecture[]> {
+  const loader = createFetchLoader(fetchResource);
   const catalog = await loader.loadCatalog(catalogUrl, signal);
   return await Promise.all(
     catalog.entries.map(async (entry): Promise<LoadedArchitecture> => {

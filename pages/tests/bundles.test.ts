@@ -4,11 +4,12 @@ import type { ArchitectureBundle } from "c4-sdk/core";
 import { bundles, catalog, readText } from "./fixtures.ts";
 
 describe("catalog", () => {
-  it("lists the current and the proposed dataset", () => {
+  it("lists every architecture and opens the current one by default", () => {
     expect(catalog.entries.map((entry) => entry.id)).toEqual([
       "tsdb-current",
       "tsdb-lanes-proposal",
     ]);
+    expect(catalog.defaultId).toBe("tsdb-current");
   });
 });
 

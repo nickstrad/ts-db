@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "id": "fixture-third",
+  "title": "Fixture: a third architecture",
+  "revision": "fixture-1",
+  "defaultDiagramId": "fixture-context",
+  "model": {
+    "elements": [
+      {
+        "id": "fixture-user",
+        "kind": "person",
+        "name": "Fixture user",
+        "description": "Uses the fixture system",
+        "status": "existing"
+      },
+      {
+        "id": "fixture-system",
+        "kind": "softwareSystem",
+        "name": "Fixture system",
+        "description": "Stands in for a third catalog entry in tests",
+        "status": "planned"
+      }
+    ],
+    "relationships": [
+      {
+        "id": "fixture-rel-1",
+        "sourceId": "fixture-user",
+        "targetId": "fixture-system",
+        "label": "Sends requests",
+        "technology": "HTTPS",
+        "status": "planned"
+      }
+    ]
+  },
+  "diagrams": [
+    {
+      "id": "fixture-context",
+      "kind": "context",
+      "title": "System context: fixture system",
+      "status": "planned",
+      "scopeId": "fixture-system",
+      "nodes": [{ "elementId": "fixture-user" }, { "elementId": "fixture-system" }],
+      "edges": [{ "relationshipId": "fixture-rel-1", "displayNumber": 1 }],
+      "legend": {
+        "title": "Key",
+        "entries": [
+          {
+            "id": "key-person",
+            "label": "Person",
+            "description": "A person",
+            "swatch": { "shape": "person", "tone": "default", "stroke": "solid" }
+          },
+          {
+            "id": "key-planned",
+            "label": "Planned system",
+            "description": "Not built yet",
+            "swatch": { "shape": "box", "tone": "accent", "stroke": "dashed" }
+          },
+          {
+            "id": "key-request",
+            "label": "Planned relationship",
+            "description": "Not built yet",
+            "swatch": { "shape": "line", "tone": "default", "stroke": "dashed", "arrow": "forward" }
+          }
+        ]
+      }
+    }
+  ],
+  "documents": [],
+  "sources": []
+}

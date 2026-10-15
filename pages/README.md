@@ -1,30 +1,73 @@
 # ts-db architecture diagrams site
 
-An interactive C4 viewer for ts-db, meant to be used **while designing a feature**: open what runs on `main`
-today next to a proposed design, at the same C4 level, and drill from the system context down to containers
-and components. It is not a replacement for the Markdown diagrams in
+An interactive C4 viewer for ts-db, meant to be used **while designing a feature**: N architectures in one
+dropdown, the current one (what runs on `main`) by default, each drilled from the system context down to
+containers, components and code. It is not a replacement for the Markdown diagrams in
 [`docs/architecture/`](../docs/architecture/README.md) (the audited source of truth for the current system);
 it renders converted copies of them, with every element traceable to a commit-pinned source.
 
-The proposed dataset covers only the unbuilt scale-out design (statement lanes, the placement table, the
-forwarder, the lane supervisor, the peer node and WAL frames): its context, containers, the inside of one
-lane, the four key flows and an illustrative two-node deployment. The FFI execution layer (FFI-01 to FFI-08:
-binding, classifier, deadline and 504) has landed on `main` and is part of `tsdb-current`.
+The `tsdb-lanes-proposal` entry covers only the unbuilt scale-out design (statement lanes, the placement
+table, the forwarder, the lane supervisor, the peer node and WAL frames): its context, containers, the inside
+of one lane, the four key flows and an illustrative two-node deployment. The FFI execution layer (FFI-01 to
+FFI-08: binding, classifier, deadline and 504) has landed on `main` and is part of `tsdb-current`.
 
 Future URL: <https://nickstrad.github.io/ts-db/> (GitHub Pages is **not enabled yet**; see
 [Deploying](#deploying)).
 
 ## What it shows
 
-| Mode         | URL                                                                 | Content                                                                                                       |
-| ------------ | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| Current      | `#/architectures/tsdb-current/diagrams/<id>[/elements/<id>]`        | `tsdb-current`: the four audited pairs of `docs/architecture/`, a landscape and a code view                   |
-| Proposed     | `#/architectures/tsdb-lanes-proposal/diagrams/<id>[/elements/<id>]` | `tsdb-lanes-proposal`: statement lanes and placement: context, containers, lane components, flows, deployment |
-| Side by side | `#/compare/<current diagram id>/<proposed diagram id>`              | Both, each pane with its own viewer; the level links pair C4 levels                                           |
+Today the catalog lists two architectures:
+
+| Catalog entry         | Content                                                                                     |
+| --------------------- | ------------------------------------------------------------------------------------------- |
+| `tsdb-current`        | The default: the four audited pairs of `docs/architecture/`, a landscape and a code view    |
+| `tsdb-lanes-proposal` | Statement lanes and placement: context, containers, lane components, flows and a deployment |
+
+### The architecture dropdown and the sticky bar
+
+A bar pinned to the top of the window (`position: sticky`) holds a labelled dropdown (a native `<select>`,
+reachable with Tab) that lists every catalog entry by its `title`, in catalog order, and the SDK's diagram
+navigation (Back, Up, breadcrumbs and related views). Switching architecture or going back therefore works
+from anywhere in a tall diagram page. When the navigation is wider than the bar it scrolls sideways inside the
+bar instead of making the bar taller.
+
+Choosing an entry opens its bundle's `defaultDiagramId` through the SDK hash route port, so it is a normal
+history entry: Back (the bar's button or the browser's) returns to the previous architecture. One architecture
+is shown at a time. **There is no comparison view for now** (Nick, 2026-10-14): entries are peers, and no code
+names a "current" or a "proposed" entry; "current" is only the catalog default.
+
+URLs are the SDK's own deep links, `#/architectures/<entry id>/diagrams/<diagram id>[/elements/<id>]`. An
+empty hash opens the catalog default. Unknown architectures, unknown diagrams and malformed links show Not
+Found (with a link to each architecture); nothing falls back silently.
+
+### `defaultId`
+
+`public/catalog.json` is the SDK catalog plus one optional site-level key:
+
+```json
+{ "defaultId": "tsdb-current", "entries": [{ "id": "…", "title": "…", "url": "architectures/….json" }] }
+```
+
+`defaultId` names the entry shown when the URL names none; without it the first entry is the default. A
+`defaultId` that names no entry stops the site with an error. The SDK's catalog schema is strict, so the site
+lifts `defaultId` off the catalog response before the SDK loader reads it (`src/catalog.ts`); any other
+unknown key is still rejected.
+
+### Adding an architecture
+
+No code changes (the tests prove it with a three-entry fixture catalog):
+
+1. Write the bundle as `public/architectures/<id>.json` and its conversion inventory as
+   `content/<id>/inventory.md` (see [Authoring and verifying a dataset](#authoring-and-verifying-a-dataset)).
+   The bundle `id` must equal the catalog entry `id`.
+2. Add `{ "id": "<id>", "title": "<dropdown label>", "url": "architectures/<id>.json" }` to `entries` in
+   `public/catalog.json`, at the position it should take in the dropdown. Change `defaultId` only if the new
+   entry should open by default.
+3. Add the new id to the catalog test in `tests/bundles.test.ts`, then run `npm run check`.
 
 ### Diagram kinds per dataset
 
-All seven C4 kinds are drawn across the two datasets (`tests/views.test.ts` checks it):
+All seven C4 kinds are drawn across today's two entries (`tests/views.test.ts` checks it):
 
 | Kind       | `tsdb-current`                                    | `tsdb-lanes-proposal`                                              |
 | ---------- | ------------------------------------------------- | ------------------------------------------------------------------ |
@@ -35,16 +78,6 @@ All seven C4 kinds are drawn across the two datasets (`tests/views.test.ts` chec
 | Code       | `code-document-reader`                            | none: no code-level elements are drawn for unbuilt code            |
 | Dynamic    | none                                              | the four key flows and their named alternatives (`flow-*`)         |
 | Deployment | none                                              | `lanes-deployment` (illustrative two-node layout, not the droplet) |
-
-Side by side pairs the first diagram of each kind drawn on **both** sides, so its level links are context,
-container and component (`components-server` with `lanes-components`). Landscape and code exist only in the
-current set, dynamic and deployment only in the proposed set; those views open from the single-dataset modes
-(each is linked from its parent view) and have no side-by-side partner. In those cases the mode links fall
-back to the other dataset's default diagram.
-
-Single views use the SDK's own deep links. In side by side, each pane navigates in memory (its own Back, Up
-and detail links); the URL records both panes' diagrams, so reloading or sharing it reopens the same pair.
-Unknown architectures, diagrams and malformed links show Not Found; nothing falls back silently.
 
 ## Run, build, check
 
@@ -64,10 +97,10 @@ npm run check        # typecheck + unit tests + build + vendor sync check + brow
 | Script         | What it does                                                                                             |
 | -------------- | -------------------------------------------------------------------------------------------------------- |
 | `typecheck`    | `tsc -b` over the viewer, the tests and (through the aliases) the c4-sdk copy                            |
-| `test`         | vitest: both bundles and the catalog decode with `decodeArchitecture` and **zero** diagnostics, and more |
+| `test`         | vitest: every bundle decodes with `decodeArchitecture` and **zero** diagnostics; catalog, routes, views  |
 | `build`        | `vite build --base /ts-db/`                                                                              |
 | `sync:check`   | `vendor/c4-sdk/sync.sh --check` (needs deno and the upstream commit, see the provenance file)            |
-| `test:browser` | Playwright against `vite preview` of `dist/`: rendering, side by side, deep links, Not Found, keyboard   |
+| `test:browser` | Playwright against `vite preview` of `dist/`: dropdown, three entries, sticky bar, deep links, Not Found |
 
 The browser smoke reuses Playwright 1.64.0's Chromium from `~/.cache/ms-playwright` (already installed on vm-1
 for c4-sdk); elsewhere run `npx playwright install chromium` once.
@@ -77,10 +110,11 @@ for c4-sdk); elsewhere run `npx playwright install chromium` once.
 ```text
 pages/
   index.html, src/             the viewer; src/sdk.ts is the ONLY module that touches c4-sdk
-  public/catalog.json          { entries: [{ id, title, url }] }; entry id = bundle id
+  public/catalog.json          { defaultId?, entries: [{ id, title, url }] }; entry id = bundle id
   public/architectures/        tsdb-current.json, tsdb-lanes-proposal.json (ArchitectureBundle v1)
   content/<dataset>/           inventory.md: source node/edge → JSON id → documents, discrepancies, decisions
   tests/                       *.test.ts (vitest), smoke.spec.ts (Playwright)
+  tests/fixtures/              the three-entry test catalog and its tiny third bundle (never published)
   vendor/c4-sdk/               the interim c4-sdk copy (delete at the swap); PROVENANCE.md, sync.sh
 ```
 

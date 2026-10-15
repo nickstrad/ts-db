@@ -1,9 +1,31 @@
+import { readFileSync } from "node:fs";
 import { expect, test } from "@playwright/test";
+import type { Page } from "@playwright/test";
 
 // A diagram is rendered once the SDK's canvas reports a finished layout.
 const canvas = "[data-layout-ready]";
 
-test("the site opens on the current system context and lays it out", async ({ page }) => {
+const picker = (page: Page) => page.getByRole("combobox", { name: "Architecture" });
+const back = (page: Page) =>
+  page.getByRole("navigation", { name: "Diagram navigation" }).getByRole("button", { name: "Back" });
+
+/**
+ * Serves the three-entry fixture catalog (the two real bundles plus tests/fixtures/fixture-third.json, which is
+ * never published) in place of catalog.json. The site code is the production build, unchanged.
+ */
+async function serveThreeEntryCatalog(page: Page) {
+  const fixture = (name: string) => readFileSync(new URL(`fixtures/${name}`, import.meta.url), "utf8");
+  await page.route(
+    "**/catalog.json",
+    (route) => route.fulfill({ contentType: "application/json", body: fixture("catalog-three.json") }),
+  );
+  await page.route(
+    "**/architectures/fixture-third.json",
+    (route) => route.fulfill({ contentType: "application/json", body: fixture("fixture-third.json") }),
+  );
+}
+
+test("the site opens on the default architecture and lists every catalog entry", async ({ page }) => {
   await page.goto("./");
   await expect(page).toHaveURL(
     /#\/architectures\/tsdb-current\/diagrams\/context$/,
@@ -15,69 +37,34 @@ test("the site opens on the current system context and lays it out", async ({ pa
     }),
   ).toBeVisible();
   await expect(page.locator(canvas)).toHaveCount(1);
-  await expect(
-    page.getByRole("navigation", { name: "View mode" }).getByRole("link", {
-      name: "Current",
-    }),
-  )
-    .toHaveAttribute("aria-current", "page");
+  await expect(picker(page)).toHaveValue("tsdb-current");
+  await expect(picker(page).getByRole("option")).toHaveText([
+    "ts-db today (main 2d30330)",
+    "Proposed: statement lanes and tenant placement (scale-out)",
+  ]);
 });
 
-test("side by side renders the current and the proposed context as two canvases", async ({ page }) => {
-  await page.goto("./#/compare/context/lanes-context");
-  await expect(page.locator(canvas)).toHaveCount(2);
-  await expect(
-    page.getByRole("heading", {
-      level: 1,
-      name: "System context: Document DB platform",
-    }),
-  ).toBeVisible();
+test("choosing an architecture opens its default diagram, and Back returns", async ({ page }) => {
+  await page.goto("./");
+  await expect(page.locator(canvas)).toHaveCount(1);
+  await picker(page).selectOption("tsdb-lanes-proposal");
+  await expect(page).toHaveURL(
+    /#\/architectures\/tsdb-lanes-proposal\/diagrams\/lanes-context$/,
+  );
   await expect(
     page.getByRole("heading", {
       level: 1,
       name: "System context: proposed statement lanes and placement",
     }),
-  )
-    .toBeVisible();
+  ).toBeVisible();
+  await expect(page.locator(canvas)).toHaveCount(1);
+  await back(page).click();
+  await expect(page).toHaveURL(/#\/architectures\/tsdb-current\/diagrams\/context$/);
+  await expect(picker(page)).toHaveValue("tsdb-current");
+  await expect(page.locator(canvas)).toHaveCount(1);
 });
 
-test("drilling down in one side-by-side pane is recorded in the URL and survives a reload", async ({ page }) => {
-  await page.goto("./#/compare/context/lanes-context");
-  await expect(page.locator(canvas)).toHaveCount(2);
-  // Open the proposed platform's container view from the right-hand pane's canvas only.
-  const proposedPane = page.getByRole("region", { name: /^Proposed/ });
-  await proposedPane.locator(
-    `${canvas} >> role=link[name="Open detail for Document DB platform"]`,
-  ).click();
-  await expect(page).toHaveURL(/#\/compare\/context\/lanes-containers$/);
-  await expect(
-    page.getByRole("heading", {
-      level: 1,
-      name: "System context: Document DB platform",
-    }),
-  ).toBeVisible();
-  await page.reload();
-  await expect(
-    page.getByRole("heading", {
-      level: 1,
-      name: "Containers: proposed data node with statement lanes",
-    }),
-  )
-    .toBeVisible();
-  await expect(page.locator(canvas)).toHaveCount(2);
-  // The level links pair the same C4 level on both sides.
-  await page.getByRole("navigation", { name: "C4 level" }).getByRole("link", {
-    name: "Containers",
-  }).click();
-  await expect(page).toHaveURL(
-    /#\/compare\/containers-platform\/lanes-containers$/,
-  );
-  await expect(
-    page.getByRole("heading", { level: 1, name: "Containers: request path" }),
-  ).toBeVisible();
-});
-
-test("a deep link to a proposed diagram reloads to the same diagram", async ({ page }) => {
+test("a deep link to a diagram of another entry reloads to the same diagram", async ({ page }) => {
   await page.goto(
     "./#/architectures/tsdb-lanes-proposal/diagrams/lanes-containers",
   );
@@ -88,6 +75,7 @@ test("a deep link to a proposed diagram reloads to the same diagram", async ({ p
     }),
   )
     .toBeVisible();
+  await expect(picker(page)).toHaveValue("tsdb-lanes-proposal");
   await page.reload();
   await expect(
     page.getByRole("heading", {
@@ -102,39 +90,69 @@ test("a deep link to a proposed diagram reloads to the same diagram", async ({ p
 test("unknown routes show Not Found instead of falling back", async ({ page }) => {
   await page.goto("./#/architectures/nope/diagrams/context");
   await expect(page.getByRole("heading", { name: "Not Found" })).toBeVisible();
-  await page.goto("./#/compare/context/no-such-diagram");
+  await expect(picker(page)).toHaveValue("");
+  await expect(page.getByRole("link", { name: "Open ts-db today (main 2d30330)" })).toBeVisible();
+  await page.goto("./#/somewhere");
   await expect(page.getByRole("heading", { name: "Not Found" })).toBeVisible();
   await page.goto("./#/architectures/tsdb-current/diagrams/no-such-diagram");
   await expect(page.getByText(/Not Found: unknown diagram/)).toBeVisible();
 });
 
-test("mode links and the skip link are keyboard reachable", async ({ page }) => {
+test("the skip link and the architecture dropdown are keyboard reachable", async ({ page }) => {
   await page.goto("./");
   await expect(page.locator(canvas)).toHaveCount(1);
   await page.keyboard.press("Tab");
   await expect(page.getByRole("link", { name: "Skip to the diagrams" }))
     .toBeFocused();
-  const proposed = page.getByRole("navigation", { name: "View mode" })
-    .getByRole("link", { name: "Proposed" });
-  await proposed.focus();
-  await page.keyboard.press("Enter");
+  // The two intro links come next, then the dropdown.
+  for (let i = 0; i < 3; i++) await page.keyboard.press("Tab");
+  await expect(picker(page)).toBeFocused();
+  await page.keyboard.press("ArrowDown");
   await expect(page).toHaveURL(
     /#\/architectures\/tsdb-lanes-proposal\/diagrams\/lanes-context$/,
   );
   await expect(page.locator(canvas)).toHaveCount(1);
 });
 
-test("side by side pairs the current server components with the proposed lane components", async ({ page }) => {
-  await page.goto("./#/compare/context/lanes-context");
-  await expect(page.locator(canvas)).toHaveCount(2);
-  await page.getByRole("navigation", { name: "C4 level" }).getByRole("link", {
-    name: "Components",
-  }).click();
-  await expect(page).toHaveURL(/#\/compare\/components-server\/lanes-components$/);
-  await expect(page.locator(canvas)).toHaveCount(2);
+test("a three-entry catalog works with no code change and opens its defaultId", async ({ page }) => {
+  await serveThreeEntryCatalog(page);
+  await page.goto("./");
+  // The fixture's defaultId is its last entry.
+  await expect(page).toHaveURL(/#\/architectures\/fixture-third\/diagrams\/fixture-context$/);
   await expect(
-    page.getByRole("heading", { level: 1, name: "Components: proposed statement lane process" }),
+    page.getByRole("heading", { level: 1, name: "System context: fixture system" }),
   ).toBeVisible();
+  await expect(page.locator(canvas)).toHaveCount(1);
+  await expect(picker(page)).toHaveValue("fixture-third");
+  await expect(picker(page).getByRole("option")).toHaveText([
+    "ts-db today (main 2d30330)",
+    "Proposed: statement lanes and tenant placement (scale-out)",
+    "Fixture: a third architecture",
+  ]);
+  await picker(page).selectOption("tsdb-current");
+  await expect(page).toHaveURL(/#\/architectures\/tsdb-current\/diagrams\/context$/);
+  await expect(page.locator(canvas)).toHaveCount(1);
+  await back(page).click();
+  await expect(page).toHaveURL(/#\/architectures\/fixture-third\/diagrams\/fixture-context$/);
+});
+
+test("the top bar stays in the viewport while a tall diagram page scrolls", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.goto("./#/architectures/tsdb-lanes-proposal/diagrams/lanes-components");
+  await expect(page.locator(canvas)).toHaveCount(1);
+  const height = await page.evaluate(() => document.documentElement.scrollHeight);
+  expect(height).toBeGreaterThan(3 * 720);
+  await page.evaluate(() => globalThis.scrollTo(0, document.documentElement.scrollHeight));
+  await expect.poll(() => page.evaluate(() => globalThis.scrollY)).toBeGreaterThan(2 * 720);
+  await expect(picker(page)).toBeInViewport();
+  await expect(back(page)).toBeInViewport();
+  // Both still work from the bottom of the page (a covered control would fail the click's hit test).
+  await picker(page).selectOption("tsdb-current");
+  await expect(page).toHaveURL(/#\/architectures\/tsdb-current\/diagrams\/context$/);
+  await page.evaluate(() => globalThis.scrollTo(0, document.documentElement.scrollHeight));
+  await expect(back(page)).toBeInViewport();
+  await back(page).click();
+  await expect(page).toHaveURL(/#\/architectures\/tsdb-lanes-proposal\/diagrams\/lanes-components$/);
 });
 
 // One view of each kind PG-02 added; each must lay out on its own canvas.
