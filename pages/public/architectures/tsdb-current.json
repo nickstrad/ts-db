@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "tsdb-current",
   "title": "ts-db today (main 2d30330)",
-  "revision": "main-2d30330-pg01",
+  "revision": "main-2d30330-pg02",
   "defaultDiagramId": "context",
   "model": {
     "elements": [
@@ -619,6 +619,444 @@
           "src-components-server-github",
           "src-components-server-terminal",
           "src-components-server-py"
+        ]
+      },
+      {
+        "id": "dr-module",
+        "kind": "code",
+        "name": "document_reader.ts",
+        "description": "platform/document_reader.ts — Server-side document reads: one read-only SQLite connection and read transaction per query handler; its module-level constants",
+        "status": "existing",
+        "technology": "TypeScript",
+        "parentId": "document-reader",
+        "symbolKind": "module",
+        "members": [
+          {
+            "name": "DOCUMENT_READ_CONCURRENCY_CAP",
+            "signature": "export const DOCUMENT_READ_CONCURRENCY_CAP = 32",
+            "visibility": "public"
+          },
+          {
+            "name": "DocumentReaderClientLive",
+            "signature": "export const DocumentReaderClientLive = Layer.effect(ReaderClient, Effect.flatMap(ReaderClient, makeDocumentReaderClient))",
+            "visibility": "public"
+          },
+          {
+            "name": "QUERY_ERROR_TAGS",
+            "signature": "const QUERY_ERROR_TAGS: Record<QueryError[\"_tag\"], true>",
+            "visibility": "private"
+          }
+        ],
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-document-reader"
+        ]
+      },
+      {
+        "id": "dr-make-client",
+        "kind": "code",
+        "name": "makeDocumentReaderClient",
+        "description": "L412 — Decorates the supervised reader client: query requests run in-process (admission cap 1000, 32 permits, reader.callTimeoutMs as the last-resort guard); every other request goes to the IPC client",
+        "status": "existing",
+        "technology": "TypeScript",
+        "parentId": "document-reader",
+        "symbolKind": "function",
+        "members": [
+          {
+            "name": "makeDocumentReaderClient",
+            "signature": "makeDocumentReaderClient(ipc: ServerReaderClientService)",
+            "visibility": "public"
+          },
+          {
+            "name": "call",
+            "signature": "call: (request) => ...",
+            "visibility": "public"
+          },
+          {
+            "name": "semaphore",
+            "signature": "Effect.makeSemaphore(DOCUMENT_READ_CONCURRENCY_CAP)",
+            "visibility": "private"
+          },
+          {
+            "name": "pending",
+            "signature": "let pending = 0",
+            "visibility": "private"
+          }
+        ],
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [
+          "doc-code-make-client"
+        ],
+        "sourceIds": [
+          "src-document-reader"
+        ]
+      },
+      {
+        "id": "dr-query-sqlite",
+        "kind": "code",
+        "name": "querySqlite",
+        "description": "L144 — Runs one registered query handler against a trusted, writer-prepared file: opens the read-only connection, BEGIN, the handler's selects on their classified paths, COMMIT or ROLLBACK, the tx event, closeAsync",
+        "status": "existing",
+        "technology": "TypeScript",
+        "parentId": "document-reader",
+        "symbolKind": "function",
+        "members": [
+          {
+            "name": "querySqlite",
+            "signature": "querySqlite(app: Pick<App, \"id\" | \"file\" | \"schema\">, definition: AnyDefinition, args: unknown)",
+            "visibility": "public"
+          },
+          {
+            "name": "envelope",
+            "signature": "envelope(level: Level): Effect.Effect<EventEnvelope>",
+            "visibility": "private"
+          },
+          {
+            "name": "poisoned",
+            "signature": "poisoned(operation: ReaderError[\"operation\"], table?: string)",
+            "visibility": "private"
+          },
+          {
+            "name": "stuck",
+            "signature": "stuck(plan: SelectPlan, sqlText: string): Effect.Effect<void>",
+            "visibility": "private"
+          },
+          {
+            "name": "admit",
+            "signature": "admit(context: QueryContext, plan: SelectPlan): ContextExpiredError | ReaderError | undefined",
+            "visibility": "private"
+          },
+          {
+            "name": "runSelect",
+            "signature": "runSelect(context: QueryContext, plan: SelectPlan, sql: SQL)",
+            "visibility": "private"
+          },
+          {
+            "name": "select",
+            "signature": "select(context: QueryContext, plan: SelectPlan): Effect.Effect<unknown, DocumentQueryError>",
+            "visibility": "private"
+          },
+          {
+            "name": "executeIn",
+            "signature": "executeIn(context: QueryContext): Execute",
+            "visibility": "private"
+          },
+          {
+            "name": "begin",
+            "signature": "begin(queueWaitMs: number): Effect.Effect<QueryContext, ReaderError>",
+            "visibility": "private"
+          },
+          {
+            "name": "end",
+            "signature": "end(context: QueryContext, exit: Exit.Exit<unknown, DocumentQueryError>): Effect.Effect<void>",
+            "visibility": "private"
+          },
+          {
+            "name": "run",
+            "signature": "run(definition: AnyDefinition, args: unknown, context: QueryContext)",
+            "visibility": "private"
+          }
+        ],
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [
+          "doc-code-query-sqlite"
+        ],
+        "sourceIds": [
+          "src-document-reader"
+        ]
+      },
+      {
+        "id": "dr-native",
+        "kind": "code",
+        "name": "native",
+        "description": "L79 — Wraps a driver call in Effect.try; a throw becomes a ReaderError",
+        "status": "existing",
+        "technology": "TypeScript",
+        "parentId": "document-reader",
+        "symbolKind": "function",
+        "members": [
+          {
+            "name": "native",
+            "signature": "native<A>(operation: ReaderError[\"operation\"], run: () => A, table?: string, file?: string)",
+            "visibility": "private"
+          }
+        ],
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-document-reader"
+        ]
+      },
+      {
+        "id": "dr-native-now",
+        "kind": "code",
+        "name": "nativeNow",
+        "description": "L91 — Runs the driver call now, in the caller's step; only its outcome is an Effect (what ConnectionGate.blocking requires)",
+        "status": "existing",
+        "technology": "TypeScript",
+        "parentId": "document-reader",
+        "symbolKind": "function",
+        "members": [
+          {
+            "name": "nativeNow",
+            "signature": "nativeNow<A>(operation: ReaderError[\"operation\"], run: () => A, table?: string, file?: string): Effect.Effect<A, ReaderError>",
+            "visibility": "private"
+          }
+        ],
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-document-reader"
+        ]
+      },
+      {
+        "id": "dr-query-context",
+        "kind": "code",
+        "name": "QueryContext",
+        "description": "L104 — The state of one read transaction: whether it is still open, how many selects it admitted, when it started and how long it queued",
+        "status": "existing",
+        "technology": "TypeScript",
+        "parentId": "document-reader",
+        "symbolKind": "interface",
+        "members": [
+          {
+            "name": "active",
+            "signature": "active: boolean",
+            "visibility": "private"
+          },
+          {
+            "name": "operations",
+            "signature": "operations: number",
+            "visibility": "private"
+          },
+          {
+            "name": "startNanos",
+            "signature": "readonly startNanos: bigint",
+            "visibility": "private"
+          },
+          {
+            "name": "queueWaitMs",
+            "signature": "readonly queueWaitMs: number",
+            "visibility": "private"
+          }
+        ],
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-document-reader"
+        ]
+      },
+      {
+        "id": "dr-document-query-error",
+        "kind": "code",
+        "name": "DocumentQueryError",
+        "description": "L125 — A query handler's failures: the read-path union plus a deadline it let propagate (FFI-05)",
+        "status": "existing",
+        "technology": "TypeScript",
+        "parentId": "document-reader",
+        "symbolKind": "type",
+        "members": [
+          {
+            "name": "DocumentQueryError",
+            "signature": "type DocumentQueryError = QueryError | StatementDeadlineError",
+            "visibility": "private"
+          }
+        ],
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-document-reader"
+        ]
+      },
+      {
+        "id": "dr-is-query-error",
+        "kind": "code",
+        "name": "isQueryError",
+        "description": "L127 — Narrows a handler's untyped failure to DocumentQueryError by its _tag",
+        "status": "existing",
+        "technology": "TypeScript",
+        "parentId": "document-reader",
+        "symbolKind": "function",
+        "members": [
+          {
+            "name": "isQueryError",
+            "signature": "isQueryError(error: unknown): error is DocumentQueryError",
+            "visibility": "private"
+          }
+        ],
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-document-reader"
+        ]
+      },
+      {
+        "id": "dr-message-of",
+        "kind": "code",
+        "name": "messageOf",
+        "description": "L134 — Failure text: the SQLite failure message for a binding error, else the error's message",
+        "status": "existing",
+        "technology": "TypeScript",
+        "parentId": "document-reader",
+        "symbolKind": "function",
+        "members": [
+          {
+            "name": "messageOf",
+            "signature": "messageOf(cause: unknown, file?: string): string",
+            "visibility": "private"
+          }
+        ],
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-document-reader"
+        ]
+      },
+      {
+        "id": "dr-elapsed-ms",
+        "kind": "code",
+        "name": "elapsedMs",
+        "description": "L139 — Milliseconds between two Clock.currentTimeNanos readings",
+        "status": "existing",
+        "technology": "TypeScript",
+        "parentId": "document-reader",
+        "symbolKind": "function",
+        "members": [
+          {
+            "name": "elapsedMs",
+            "signature": "elapsedMs(startNanos: bigint, endNanos: bigint): number",
+            "visibility": "private"
+          }
+        ],
+        "tags": [],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-document-reader"
+        ]
+      },
+      {
+        "id": "dr-ext-sqlite-ffi",
+        "kind": "code",
+        "name": "sqlite_ffi/mod.ts (imported)",
+        "description": "platform/sqlite_ffi/ — The FFI binding symbols document_reader.ts imports (FFI SQLite binding component)",
+        "status": "existing",
+        "technology": "TypeScript",
+        "parentId": "ffi-binding",
+        "symbolKind": "module",
+        "members": [
+          {
+            "name": "Database.open",
+            "signature": "static open(path: string, options: OpenOptions = {}): Database",
+            "visibility": "public"
+          },
+          {
+            "name": "prepareCached",
+            "signature": "prepareCached(db: Database, sql: string): Statement",
+            "visibility": "public"
+          },
+          {
+            "name": "allAsync",
+            "signature": "allAsync(statement: Statement, params?: BindParams, options?: AsyncOptions): Effect.Effect<Row[], SqliteFfiError>",
+            "visibility": "public"
+          },
+          {
+            "name": "isSqliteFfiError",
+            "signature": "isSqliteFfiError(e: unknown): e is SqliteFfiError",
+            "visibility": "public"
+          }
+        ],
+        "tags": [
+          "external"
+        ],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-document-reader",
+          "src-sqlite-ffi-effect",
+          "src-sqlite-ffi-database"
+        ]
+      },
+      {
+        "id": "dr-ext-classify",
+        "kind": "code",
+        "name": "classify.ts (imported)",
+        "description": "platform/sqlite_ffi/classify.ts — The statement class and its execution path (Statement classifier component)",
+        "status": "existing",
+        "technology": "TypeScript",
+        "parentId": "classifier",
+        "symbolKind": "module",
+        "members": [
+          {
+            "name": "classify",
+            "signature": "classify(operation: Operation): StatementClass",
+            "visibility": "public"
+          },
+          {
+            "name": "pathOf",
+            "signature": "pathOf(statementClass: StatementClass): ExecutionPath",
+            "visibility": "public"
+          }
+        ],
+        "tags": [
+          "external"
+        ],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-document-reader",
+          "src-classify"
+        ]
+      },
+      {
+        "id": "dr-ext-connection-gate",
+        "kind": "code",
+        "name": "ConnectionGate",
+        "description": "platform/sqlite.ts — One FFI connection's statement discipline and interrupt grace period (Storage component)",
+        "status": "existing",
+        "technology": "TypeScript",
+        "parentId": "storage",
+        "symbolKind": "class",
+        "members": [
+          {
+            "name": "constructor",
+            "signature": "constructor(readonly db: Database)",
+            "visibility": "public"
+          },
+          {
+            "name": "poisoned",
+            "signature": "get poisoned(): boolean",
+            "visibility": "public"
+          },
+          {
+            "name": "blocking",
+            "signature": "blocking<A, E>(start: () => Effect.Effect<A, E>): Effect.Effect<A, E>",
+            "visibility": "public"
+          },
+          {
+            "name": "nonblocking",
+            "signature": "nonblocking<A, E>(run: NonblockingRun<A, E>): Effect.Effect<A, E | SqliteFfiError>",
+            "visibility": "public"
+          }
+        ],
+        "tags": [
+          "external"
+        ],
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-document-reader",
+          "src-sqlite-ts"
         ]
       }
     ],
@@ -1537,10 +1975,364 @@
           "src-components-server-terminal",
           "src-components-server-py"
         ]
+      },
+      {
+        "id": "code-1",
+        "sourceId": "dr-module",
+        "targetId": "dr-make-client",
+        "label": "DocumentReaderClientLive decorates the ReaderClient with it",
+        "status": "existing",
+        "technology": "Layer.effect",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-document-reader"
+        ]
+      },
+      {
+        "id": "code-2",
+        "sourceId": "dr-make-client",
+        "targetId": "dr-module",
+        "label": "Bounds active handlers by DOCUMENT_READ_CONCURRENCY_CAP permits",
+        "status": "existing",
+        "technology": "Constant reference",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-document-reader"
+        ]
+      },
+      {
+        "id": "code-3",
+        "sourceId": "dr-make-client",
+        "targetId": "dr-query-sqlite",
+        "label": "Runs each admitted query handler on the tenant's file",
+        "status": "existing",
+        "technology": "Effect call",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-document-reader"
+        ]
+      },
+      {
+        "id": "code-4",
+        "sourceId": "dr-make-client",
+        "targetId": "dr-message-of",
+        "label": "Describes a handler defect",
+        "status": "existing",
+        "technology": "Function call",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-document-reader"
+        ]
+      },
+      {
+        "id": "code-5",
+        "sourceId": "dr-query-sqlite",
+        "targetId": "dr-ext-sqlite-ffi",
+        "label": "Opens a read-only connection; runs a cached statement's all() or allAsync under the statement deadline",
+        "status": "existing",
+        "technology": "FFI binding API",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-document-reader"
+        ]
+      },
+      {
+        "id": "code-6",
+        "sourceId": "dr-query-sqlite",
+        "targetId": "dr-ext-classify",
+        "label": "pathOf(classify(plan)) picks the blocking or nonblocking path",
+        "status": "existing",
+        "technology": "Function call",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-document-reader"
+        ]
+      },
+      {
+        "id": "code-7",
+        "sourceId": "dr-query-sqlite",
+        "targetId": "dr-ext-connection-gate",
+        "label": "Runs BEGIN, every select, COMMIT and ROLLBACK through gate.blocking or gate.nonblocking",
+        "status": "existing",
+        "technology": "Method call",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-document-reader"
+        ]
+      },
+      {
+        "id": "code-8",
+        "sourceId": "dr-query-sqlite",
+        "targetId": "dr-query-context",
+        "label": "Tracks one read transaction",
+        "status": "existing",
+        "technology": "Type use",
+        "kind": "association",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-document-reader"
+        ]
+      },
+      {
+        "id": "code-9",
+        "sourceId": "dr-query-sqlite",
+        "targetId": "dr-native",
+        "label": "Opens the connection",
+        "status": "existing",
+        "technology": "Function call",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-document-reader"
+        ]
+      },
+      {
+        "id": "code-10",
+        "sourceId": "dr-query-sqlite",
+        "targetId": "dr-native-now",
+        "label": "Runs BEGIN, COMMIT, ROLLBACK and blocking selects",
+        "status": "existing",
+        "technology": "Function call",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-document-reader"
+        ]
+      },
+      {
+        "id": "code-11",
+        "sourceId": "dr-query-sqlite",
+        "targetId": "dr-is-query-error",
+        "label": "Keeps query errors as failures; anything else becomes a defect",
+        "status": "existing",
+        "technology": "Function call",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-document-reader"
+        ]
+      },
+      {
+        "id": "code-12",
+        "sourceId": "dr-query-sqlite",
+        "targetId": "dr-elapsed-ms",
+        "label": "Durations of the sql and tx events",
+        "status": "existing",
+        "technology": "Function call",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-document-reader"
+        ]
+      },
+      {
+        "id": "code-13",
+        "sourceId": "dr-query-sqlite",
+        "targetId": "dr-message-of",
+        "label": "Failure details",
+        "status": "existing",
+        "technology": "Function call",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-document-reader"
+        ]
+      },
+      {
+        "id": "code-14",
+        "sourceId": "dr-native",
+        "targetId": "dr-message-of",
+        "label": "Failure detail of a driver throw",
+        "status": "existing",
+        "technology": "Function call",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-document-reader"
+        ]
+      },
+      {
+        "id": "code-15",
+        "sourceId": "dr-native-now",
+        "targetId": "dr-message-of",
+        "label": "Failure detail of a driver throw",
+        "status": "existing",
+        "technology": "Function call",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-document-reader"
+        ]
+      },
+      {
+        "id": "code-16",
+        "sourceId": "dr-is-query-error",
+        "targetId": "dr-module",
+        "label": "Checks the tag against QUERY_ERROR_TAGS",
+        "status": "existing",
+        "technology": "Constant reference",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-document-reader"
+        ]
+      },
+      {
+        "id": "code-17",
+        "sourceId": "dr-is-query-error",
+        "targetId": "dr-document-query-error",
+        "label": "Type guard for DocumentQueryError",
+        "status": "existing",
+        "technology": "Type use",
+        "kind": "association",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-document-reader"
+        ]
+      },
+      {
+        "id": "code-18",
+        "sourceId": "dr-message-of",
+        "targetId": "dr-ext-sqlite-ffi",
+        "label": "isSqliteFfiError(cause) selects the SQLite failure text",
+        "status": "existing",
+        "technology": "Function call",
+        "plannedNotes": [],
+        "docIds": [],
+        "sourceIds": [
+          "src-document-reader"
+        ]
       }
     ]
   },
   "diagrams": [
+    {
+      "id": "landscape",
+      "kind": "landscape",
+      "title": "System landscape: ts-db, its people and its neighbours",
+      "status": "existing",
+      "related": [],
+      "nodes": [
+        {
+          "elementId": "developer"
+        },
+        {
+          "elementId": "caller"
+        },
+        {
+          "elementId": "operator"
+        },
+        {
+          "elementId": "platform",
+          "detail": {
+            "diagramId": "context"
+          }
+        },
+        {
+          "elementId": "objects"
+        },
+        {
+          "elementId": "analytics"
+        },
+        {
+          "elementId": "k6"
+        }
+      ],
+      "edges": [
+        {
+          "relationshipId": "ctx-1",
+          "displayNumber": 1
+        },
+        {
+          "relationshipId": "ctx-2",
+          "displayNumber": 2
+        },
+        {
+          "relationshipId": "ctx-3",
+          "displayNumber": 3
+        },
+        {
+          "relationshipId": "ctx-4",
+          "displayNumber": 4
+        },
+        {
+          "relationshipId": "ctx-5",
+          "displayNumber": 5
+        },
+        {
+          "relationshipId": "ctx-6",
+          "displayNumber": 6
+        }
+      ],
+      "docIds": [
+        "doc-landscape"
+      ],
+      "sourceIds": [
+        "src-context-github",
+        "src-context-terminal",
+        "src-context-py",
+        "src-arch-readme"
+      ],
+      "layout": {
+        "mode": "auto",
+        "direction": "TB"
+      },
+      "legend": {
+        "title": "Key",
+        "entries": [
+          {
+            "id": "person",
+            "label": "Person",
+            "description": "A human role that uses or runs the platform ([Person] in the source).",
+            "swatch": {
+              "shape": "person",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "system",
+            "label": "Software system",
+            "description": "The Document DB platform: the one system this repository builds.",
+            "swatch": {
+              "shape": "box",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "external",
+            "label": "External system",
+            "description": "A system outside the platform ([External system]; grey in Mermaid).",
+            "swatch": {
+              "shape": "box",
+              "tone": "external",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "relationship",
+            "label": "Numbered relationship",
+            "description": "Directed and labelled; the number is the system context's edge number. The small line gives the protocol or call style.",
+            "swatch": {
+              "shape": "line",
+              "tone": "default",
+              "stroke": "solid",
+              "arrow": "forward"
+            }
+          }
+        ]
+      }
+    },
     {
       "id": "context",
       "kind": "context",
@@ -1694,6 +2486,10 @@
             }
           }
         ]
+      },
+      "parent": {
+        "diagramId": "landscape",
+        "elementId": "platform"
       }
     },
     {
@@ -2074,7 +2870,10 @@
           "elementId": "reader-client"
         },
         {
-          "elementId": "document-reader"
+          "elementId": "document-reader",
+          "detail": {
+            "diagramId": "code-document-reader"
+          }
         },
         {
           "elementId": "ffi-binding"
@@ -2346,6 +3145,183 @@
               "shape": "box",
               "tone": "default",
               "stroke": "dashed"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "code-document-reader",
+      "kind": "code",
+      "title": "Code: platform/document_reader.ts",
+      "status": "existing",
+      "scopeId": "document-reader",
+      "parent": {
+        "diagramId": "components-server",
+        "elementId": "document-reader"
+      },
+      "related": [],
+      "nodes": [
+        {
+          "elementId": "dr-module"
+        },
+        {
+          "elementId": "dr-make-client"
+        },
+        {
+          "elementId": "dr-query-sqlite"
+        },
+        {
+          "elementId": "dr-native"
+        },
+        {
+          "elementId": "dr-native-now"
+        },
+        {
+          "elementId": "dr-query-context"
+        },
+        {
+          "elementId": "dr-document-query-error"
+        },
+        {
+          "elementId": "dr-is-query-error"
+        },
+        {
+          "elementId": "dr-message-of"
+        },
+        {
+          "elementId": "dr-elapsed-ms"
+        },
+        {
+          "elementId": "dr-ext-sqlite-ffi"
+        },
+        {
+          "elementId": "dr-ext-classify"
+        },
+        {
+          "elementId": "dr-ext-connection-gate"
+        }
+      ],
+      "edges": [
+        {
+          "relationshipId": "code-1",
+          "displayNumber": 1
+        },
+        {
+          "relationshipId": "code-2",
+          "displayNumber": 2
+        },
+        {
+          "relationshipId": "code-3",
+          "displayNumber": 3
+        },
+        {
+          "relationshipId": "code-4",
+          "displayNumber": 4
+        },
+        {
+          "relationshipId": "code-5",
+          "displayNumber": 5
+        },
+        {
+          "relationshipId": "code-6",
+          "displayNumber": 6
+        },
+        {
+          "relationshipId": "code-7",
+          "displayNumber": 7
+        },
+        {
+          "relationshipId": "code-8",
+          "displayNumber": 8
+        },
+        {
+          "relationshipId": "code-9",
+          "displayNumber": 9
+        },
+        {
+          "relationshipId": "code-10",
+          "displayNumber": 10
+        },
+        {
+          "relationshipId": "code-11",
+          "displayNumber": 11
+        },
+        {
+          "relationshipId": "code-12",
+          "displayNumber": 12
+        },
+        {
+          "relationshipId": "code-13",
+          "displayNumber": 13
+        },
+        {
+          "relationshipId": "code-14",
+          "displayNumber": 14
+        },
+        {
+          "relationshipId": "code-15",
+          "displayNumber": 15
+        },
+        {
+          "relationshipId": "code-16",
+          "displayNumber": 16
+        },
+        {
+          "relationshipId": "code-17",
+          "displayNumber": 17
+        },
+        {
+          "relationshipId": "code-18",
+          "displayNumber": 18
+        }
+      ],
+      "docIds": [
+        "doc-code-document-reader"
+      ],
+      "sourceIds": [
+        "src-document-reader",
+        "src-classify",
+        "src-sqlite-ts",
+        "src-sqlite-ffi-effect",
+        "src-sqlite-ffi-database"
+      ],
+      "layout": {
+        "mode": "auto",
+        "direction": "TB"
+      },
+      "legend": {
+        "title": "Code key",
+        "entries": [
+          {
+            "id": "symbol",
+            "label": "Symbol of document_reader.ts",
+            "description": "A function, interface, type or the module itself. Members are declarations as text (name, signature, visibility); private means not exported or local to querySqlite.",
+            "swatch": {
+              "shape": "box",
+              "tone": "default",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "external",
+            "label": "Imported symbol",
+            "description": "Declared in another component's file and imported here: the FFI binding, the statement classifier and Storage's ConnectionGate.",
+            "swatch": {
+              "shape": "box",
+              "tone": "external",
+              "stroke": "solid"
+            }
+          },
+          {
+            "id": "relationship",
+            "label": "Numbered relationship",
+            "description": "A call or a type use, in source order. This view has no Markdown source, so the numbers are this conversion's.",
+            "swatch": {
+              "shape": "line",
+              "tone": "default",
+              "stroke": "solid",
+              "arrow": "forward"
             }
           }
         ]
@@ -2898,6 +3874,75 @@
         "src-components-server-terminal",
         "src-components-server-py"
       ]
+    },
+    {
+      "id": "doc-landscape",
+      "title": "System landscape: one system",
+      "plain": "ts-db builds one software system, the Document DB platform. This landscape shows it with every person and system the\naudited context view names: app developers, application callers and the platform operator; object storage, the\nanalytics consumer and the k6 load generator. It adds no system: the other views are the place for the platform's\nparts (Postgres, the reader child, the files). The typed client SDK is a library in the caller's process (decision\nD4) and has no landscape-level relationship, so it is not drawn here.\n\nThe landscape differs from the system context in one way: no system is in focus. Open the platform to see its\ncontext. The proposed dataset adds no person or system (its \"Central registry and placement\" is the same Postgres,\ndrawn as a system of the platform's organisation by its source), so both datasets share this landscape.",
+      "ste": {
+        "text": "ts-db is one software system: the Document DB platform. This view shows the people and the systems that use it or\nthat it uses. The proposal does not add a person or a system.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [
+        "t-tenant"
+      ],
+      "sourceIds": [
+        "src-context-github",
+        "src-context-terminal",
+        "src-context-py",
+        "src-arch-readme"
+      ]
+    },
+    {
+      "id": "doc-code-document-reader",
+      "title": "Code: the document reader",
+      "plain": "The selected implementation detail of the DocumentReaderClient component: every function, interface and type that\n`platform/document_reader.ts` declares on `main` (`2d30330`, unchanged through `b789441`), plus the three imported\nsymbols that decide how a read runs. Members are declarations copied as text, not code; line numbers lead each\ndescription.\n\n`makeDocumentReaderClient` decorates the supervised reader client: a `query` request is admitted up to 1000 pending\ncalls, runs under 32 permits (`DOCUMENT_READ_CONCURRENCY_CAP`) and `reader.callTimeoutMs`, and reaches\n`querySqlite`; every other request goes to the IPC client. `querySqlite` opens one read-only connection, begins a\nread transaction and runs the handler. Each select takes the path its plan's class gives it\n(`pathOf(classify(plan))`): a primary-key lookup runs blocking on the main thread; anything else runs `allAsync`\nunder the statement deadline and fails `StatementDeadlineError` (HTTP 504) when it passes. `ConnectionGate` keeps\none statement at a time on the connection and owns the interrupt grace period.\n\nNo FFI or lane classes are drawn for unbuilt code; this is the only code view, and it shows landed code.",
+      "ste": {
+        "text": "This view shows the code of the document reader. makeDocumentReaderClient admits a query and limits the number of\nqueries at the same time. querySqlite opens a read-only connection and starts a transaction. For each select, the\nclassifier selects the path. A point read uses the blocking path. Other selects use the nonblocking path and have a\ndeadline.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [
+        "t-blocking-path",
+        "t-nonblocking-path",
+        "t-deadline"
+      ],
+      "sourceIds": [
+        "src-document-reader",
+        "src-classify",
+        "src-sqlite-ts"
+      ]
+    },
+    {
+      "id": "doc-code-make-client",
+      "title": "makeDocumentReaderClient",
+      "plain": "\"Decorate only document calls; all other requests reach the original supervised client.\" It keeps the IPC client's\nobservable admission contract (`QueueFullError{queue:\"reader\", cap:1000}`) and bounds admitted document handlers\nseparately with a 32-permit semaphore. The query runs with the request's trace annotations, under\n`Effect.timeoutFail(reader.callTimeoutMs)`; a handler defect becomes a `ReaderError`.",
+      "ste": {
+        "text": "This function changes the reader client for document queries only. It refuses a query when 1000 queries wait. It\nexecutes a maximum of 32 queries at the same time.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "sourceIds": [
+        "src-document-reader"
+      ]
+    },
+    {
+      "id": "doc-code-query-sqlite",
+      "title": "querySqlite",
+      "plain": "\"Run a registered query against a trusted, writer-prepared file.\" One read-only connection per call, opened with\n`readBigInts`; `BEGIN TRANSACTION`, the handler, `COMMIT`, or `ROLLBACK` on any failure; one `tx` event per call and\n`sql` events when tracing or on failure; `closeAsync` cancels and waits for a read still in flight. The local\n`runSelect` puts each select on its classified path; `admit` repeats the context check where the statement starts\nand refuses on a poisoned connection.",
+      "ste": {
+        "text": "This function executes one query handler. It opens a read-only connection. It starts a transaction, executes the\nhandler, and then commits. If the handler fails, it rolls back. Then it closes the connection.",
+        "issue": "ASD-STE100 Issue 9",
+        "reviewStatus": "draft"
+      },
+      "termIds": [
+        "t-blocking-path",
+        "t-nonblocking-path"
+      ],
+      "sourceIds": [
+        "src-document-reader"
+      ]
     }
   ],
   "sources": [
@@ -2998,6 +4043,42 @@
       "url": "https://github.com/nickstrad/ts-db/blob/2d30330ed2c0aa967fb737827e43a7cbb8714e59/docs/architecture/AGENTS.md",
       "revision": "2d30330ed2c0aa967fb737827e43a7cbb8714e59",
       "path": "docs/architecture/AGENTS.md"
+    },
+    {
+      "id": "src-document-reader",
+      "title": "Document reader source (platform/document_reader.ts)",
+      "url": "https://github.com/nickstrad/ts-db/blob/2d30330ed2c0aa967fb737827e43a7cbb8714e59/platform/document_reader.ts",
+      "revision": "2d30330ed2c0aa967fb737827e43a7cbb8714e59",
+      "path": "platform/document_reader.ts",
+      "notes": "The code view's symbols, signatures and line numbers. Unchanged on main through b789441."
+    },
+    {
+      "id": "src-classify",
+      "title": "Statement classifier source (platform/sqlite_ffi/classify.ts)",
+      "url": "https://github.com/nickstrad/ts-db/blob/2d30330ed2c0aa967fb737827e43a7cbb8714e59/platform/sqlite_ffi/classify.ts",
+      "revision": "2d30330ed2c0aa967fb737827e43a7cbb8714e59",
+      "path": "platform/sqlite_ffi/classify.ts"
+    },
+    {
+      "id": "src-sqlite-ts",
+      "title": "Storage and ConnectionGate source (platform/sqlite.ts)",
+      "url": "https://github.com/nickstrad/ts-db/blob/2d30330ed2c0aa967fb737827e43a7cbb8714e59/platform/sqlite.ts",
+      "revision": "2d30330ed2c0aa967fb737827e43a7cbb8714e59",
+      "path": "platform/sqlite.ts"
+    },
+    {
+      "id": "src-sqlite-ffi-effect",
+      "title": "FFI binding Effect layer source (platform/sqlite_ffi/effect.ts)",
+      "url": "https://github.com/nickstrad/ts-db/blob/2d30330ed2c0aa967fb737827e43a7cbb8714e59/platform/sqlite_ffi/effect.ts",
+      "revision": "2d30330ed2c0aa967fb737827e43a7cbb8714e59",
+      "path": "platform/sqlite_ffi/effect.ts"
+    },
+    {
+      "id": "src-sqlite-ffi-database",
+      "title": "FFI binding Database source (platform/sqlite_ffi/database.ts)",
+      "url": "https://github.com/nickstrad/ts-db/blob/2d30330ed2c0aa967fb737827e43a7cbb8714e59/platform/sqlite_ffi/database.ts",
+      "revision": "2d30330ed2c0aa967fb737827e43a7cbb8714e59",
+      "path": "platform/sqlite_ffi/database.ts"
     }
   ],
   "terms": [

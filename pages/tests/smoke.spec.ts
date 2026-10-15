@@ -123,3 +123,40 @@ test("mode links and the skip link are keyboard reachable", async ({ page }) => 
   );
   await expect(page.locator(canvas)).toHaveCount(1);
 });
+
+test("side by side pairs the current server components with the proposed lane components", async ({ page }) => {
+  await page.goto("./#/compare/context/lanes-context");
+  await expect(page.locator(canvas)).toHaveCount(2);
+  await page.getByRole("navigation", { name: "C4 level" }).getByRole("link", {
+    name: "Components",
+  }).click();
+  await expect(page).toHaveURL(/#\/compare\/components-server\/lanes-components$/);
+  await expect(page.locator(canvas)).toHaveCount(2);
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Components: proposed statement lane process" }),
+  ).toBeVisible();
+});
+
+// One view of each kind PG-02 added; each must lay out on its own canvas.
+for (
+  const [architecture, diagram, title] of [
+    ["tsdb-current", "landscape", "System landscape: ts-db, its people and its neighbours"],
+    ["tsdb-current", "code-document-reader", "Code: platform/document_reader.ts"],
+    [
+      "tsdb-lanes-proposal",
+      "flow-long-query-interrupt",
+      "Flow: a long query stopped at its deadline (proposed)",
+    ],
+    [
+      "tsdb-lanes-proposal",
+      "lanes-deployment",
+      "Deployment (illustrative): two data nodes with statement lanes",
+    ],
+  ]
+) {
+  test(`the ${diagram} view renders`, async ({ page }) => {
+    await page.goto(`./#/architectures/${architecture}/diagrams/${diagram}`);
+    await expect(page.getByRole("heading", { level: 1, name: title })).toBeVisible();
+    await expect(page.locator(canvas)).toHaveCount(1);
+  });
+}
