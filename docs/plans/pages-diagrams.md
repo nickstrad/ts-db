@@ -16,6 +16,11 @@ builder re-verifies and records the exact SHA it copies).
   app, with no imports of that code from anywhere else in ts-db, so the later swap is exactly "delete the
   directory
   - add the npm dependency". The copy is the source until Twin relays that `c4-sdk` 0.1.0 is on npm.
+- **Selector (Nick, 2026-10-14 ~20:47 CDT, `/root/fable-pg-dropdown.md`):** the site is a dropdown of N
+  architectures defaulting to the current one, never structured as explicitly one current + one proposed. The
+  catalog is a list of peer entries (today `tsdb-current`, `tsdb-lanes-proposal`; later more variants);
+  "current" is only the default entry, not a structural role. Per-element `existing | planned | mixed`
+  statuses stay as data inside each architecture.
 - C4-09 (c4-sdk's own copy-consumer tooling) is cancelled; this is a ts-db-owned bridge
   ([c4-react.md](c4-react.md), c4-sdk `docs/plans/implementation.md` §2).
 
@@ -48,11 +53,12 @@ point read does not prove a wall-clock bound; do not invent code-level FFI class
 
 ## 3. Items
 
-| Item  | Scope                                                                                                                                                                                                                              | Model (build → review)         | Status                                                                                                                                                                                                                                                                                                                                                                            |
-| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| PG-01 | `pages/` scaffold, vendored c4-sdk copy with sync/provenance, viewer app with current/proposed/side-by-side, Pages workflow, `tsdb-current` (4 diagrams) and `tsdb-ffi-proposal` context + container, docs                         | Opus 5.5 → Astra               | **landed** on `main` 2026-10-15: merge `b789441` (Opus 5.5 build `72d1eb7` → Astra NITS `3c2d2d1` → coordinator README fixup `27d032f` → **Nick's label correction** `/root/fable-pg01-ffi-label.md`: dataset renamed `tsdb-lanes-proposal` → Sonnet fixup `8043f49` → Astra delta re-review PASS `1ee2580`). Copy = c4-sdk `a1929e4`. Human gate still open: enable GitHub Pages |
-| PG-02 | Proposed dataset completion (lane component, dynamic flows: point read, deadline/interrupt, forwarded mutation, kill/restart; illustrative deployment; landscape; one code view of `platform/document_reader.ts`), STE review pass | Opus 5.5 → Astra               | **built** 2026-10-15: head `6e0859a` (Opus 5.5 `opus-pg-02`, off `b789441`): lane component, 8 dynamic flows (failure paths as separate scenarios), illustrative deployment, landscape, code view of `document_reader.ts`; 99 vitest + 11 Playwright, root fmt/lint/check green; Astra review dispatched                                                                          |
-| PG-03 | Swap: delete `pages/vendor/c4-sdk`, add `c4-sdk@0.1.0` dependency, remove aliases, worker factory from `c4-sdk/layout-worker.js?url`, re-run checks                                                                                | Sonnet / Sol → top-tier review | only when Twin relays the npm publish                                                                                                                                                                                                                                                                                                                                             |
+| Item   | Scope                                                                                                                                                                                                                                             | Model (build → review)         | Status                                                                                                                                                                                                                                                                                                                                                                            |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| PG-01  | `pages/` scaffold, vendored c4-sdk copy with sync/provenance, viewer app with current/proposed/side-by-side, Pages workflow, `tsdb-current` (4 diagrams) and `tsdb-ffi-proposal` context + container, docs                                        | Opus 5.5 → Astra               | **landed** on `main` 2026-10-15: merge `b789441` (Opus 5.5 build `72d1eb7` → Astra NITS `3c2d2d1` → coordinator README fixup `27d032f` → **Nick's label correction** `/root/fable-pg01-ffi-label.md`: dataset renamed `tsdb-lanes-proposal` → Sonnet fixup `8043f49` → Astra delta re-review PASS `1ee2580`). Copy = c4-sdk `a1929e4`. Human gate still open: enable GitHub Pages |
+| PG-02  | Proposed dataset completion (lane component, dynamic flows: point read, deadline/interrupt, forwarded mutation, kill/restart; illustrative deployment; landscape; one code view of `platform/document_reader.ts`), STE review pass                | Opus 5.5 → Astra               | **built** 2026-10-15: head `6e0859a` (Opus 5.5 `opus-pg-02`, off `b789441`): lane component, 8 dynamic flows (failure paths as separate scenarios), illustrative deployment, landscape, code view of `document_reader.ts`; 99 vitest + 11 Playwright, root fmt/lint/check green; Astra review dispatched                                                                          |
+| PG-02b | Architecture selector: dropdown of N catalog entries defaulting to the current one; remove the two-slot current-vs-proposed framing from UI and copy; compare mode picks any two entries (pane A defaults to current); routes/tests/README follow | Opus 5.5 → Astra               | **next**, after PG-02 lands (shares `pages/tests/*` and `pages/README.md` with PG-02); recorded 2026-10-15 from `/root/fable-pg-dropdown.md`                                                                                                                                                                                                                                      |
+| PG-03  | Swap: delete `pages/vendor/c4-sdk`, add `c4-sdk@0.1.0` dependency, remove aliases, worker factory from `c4-sdk/layout-worker.js?url`, re-run checks                                                                                               | Sonnet / Sol → top-tier review | only when Twin relays the npm publish                                                                                                                                                                                                                                                                                                                                             |
 
 Human gates: enabling GitHub Pages on the repo (Nick/Twin); the first deploy is externally visible.
 
@@ -92,6 +98,27 @@ Human gates: enabling GitHub Pages on the repo (Nick/Twin); the first deploy is 
   imports from `core/`, `platform/` or `sdk/`; the viewer shows the current and proposed context diagrams side
   by side; the Pages workflow builds the same artifact CI would (`npm ci` + build + `404.html` fallback);
   every claim about a diagram element is traceable through the inventory to a commit-pinned source URL.
+
+### PG-02b — Architecture selector with N entries
+
+- **Scoping:** after PG-02. Viewer only; no data-model change (PG-01's catalog `entries` array already
+  supports N).
+- **Model:** **Opus 5.5 → Astra** (viewer routing and pairing logic).
+- **Branch / worktree:** `item/pg-02b-selector` · `/root/Software/tsdb-work/pg02b` · actor `opus-pg-02b`.
+- **Owns:** `pages/src/**` except `pages/src/sdk.ts`, `pages/tests/**`, `pages/README.md`, root `README.md`
+  site section (framing wording only), `agent-work/items/pg-02b-selector/**`.
+- **Work:** a dropdown (native `<select>` or equivalent, labelled, keyboard reachable) listing every catalog
+  entry by title, defaulting to the entry whose id the catalog marks as default (add an optional `defaultId`
+  to `catalog.json`, falling back to the first entry); the single view shows the selected architecture;
+  compare mode has two such selectors (pane A defaults to the default entry, pane B to the next entry) and
+  pairs diagrams of the same kind; the `#/compare/<a>/<b>` route carries diagram ids of any two entries;
+  remove `PROPOSED_ID`-style constants and every "current vs proposed" label from UI and copy (per-element
+  status wording inside bundles is data and stays); a catalog with one entry hides compare; adding a third
+  entry to a test catalog must work with no code change (test it).
+- **Acceptance evidence:** `cd pages && npm run check` green with updated route and smoke tests (including a
+  three-entry catalog fixture); root `deno task fmt:check`/`lint` green;
+  `command grep -rn "PROPOSED_ID\|Current · Proposed\|current vs proposed" pages/src pages/README.md README.md`
+  empty.
 
 ## 4. Risks
 
