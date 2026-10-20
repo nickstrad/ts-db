@@ -258,3 +258,101 @@ ok | 84 passed | 0 failed (2m59s)
 An earlier full-CI process ended with SIGTERM before completing and without a test-failure verdict. The
 complete rerun saved its log and exit status separately and returned 0. The ignored unit test is the existing
 suite baseline. Final Pages output is preserved in `acceptance-pages.log`.
+
+## Repair round — 2026-10-20
+
+Actor: `sol-dp-01-repair`. Read `review-astra.md` in full at review commit
+`c8883bd8efd8a500668a240eedda073b9227e719`; repaired this assigned worktree and branch. This section is
+included in the single repair commit; the completion event records its SHA. No main merge or deployment.
+
+| Tweak | Disposition and reason                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1     | **Applied.** Lookup returns on reverse `dp-route`; authorization invokes `dp-forward` locally. Rows return agent → forwarder → authorization → ingress/client. Stale refresh now includes the gateway routing RPC before metadata access.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| 2     | **Applied.** Explicit state/availability tables in router, admission and both move documents and inventory DP6/DP7 repair entries. Chosen policy requires online authority for each request; no offline lease/heartbeat permission. Decisions are single-use, bound to identity/epoch/generation/request and at most 30 seconds. Issuance is admission, with no prefetch. Revocation blocks subsequent decisions; fences override outstanding ones. Restart closes admission, terminates orphan workers and reconciles fences/ownership online. Commands serialize per database and durably check operation, expected epoch/generation and transition before effects/ACK. Superseded activation/unfence/delete is rejected; post-commit crashes reconcile the sole target owner. |
+| 3     | **Applied.** Gateway assertions are trusted only from the authenticated service and authorize execution only, with the online authority decision. Lifecycle identity alone can issue file lifecycle commands. Transfer credentials bind operation/source/target/database/generation and expiry. Validated document CRUD/query requests generate matching IR and SQL in trusted server code; customer SQL/IR and file escape features are excluded. Contracts appear in all five requested documents and on container/agent boundaries.                                                                                                                                                                                                                                           |
+| 4     | **Applied.** Retained bounded pools, queue count/bytes, read concurrency, per-database writer admission, handle eviction, tenant/VM aggregate budgets, fair scheduling, disk/WAL headroom, backup/move I/O reservations and reserved fence/cancel capacity. Numeric ceilings and fairness weights remain OPEN configuration, not a removal of backpressure.                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| 5     | **Applied.** Placement eligibility inputs, freshness and concurrent reservations are explicit; no eligible VM means rejection. New `cp-health` models agent → control-plane provisioner reports. Algorithm/weights and report/freshness intervals remain OPEN.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| 6     | **Deferred.** Complete backup-publication, VM-loss recovery and replacement cleanup flows need a separate recovery design selecting storage credentials, durable manifest ownership and acceptable isolation evidence. Recorded in backup, lifecycle, control and drop plain/STE documents and inventory DP8/DP10 repair entries. RPO/RTO remain OPEN; VM loss makes every hosted database unavailable, detection is not fencing proof, no replacement writer activates without operator-verified isolation, and lost-agent cleanup stays DROPPING with its name reserved. No successful recovery/deletion is implied.                                                                                                                                                           |
+| 7     | **Deferred: instance companion.** Pair source/target instance move/failure views with that recovery design so transfer credentials and fencing evidence receive one review. The current node participant explicitly means a logical type; labels name A/B. Proposed bytes stream directly agent-to-agent under move-scoped credentials. **Ordering correction applied:** settle requests, checkpoint through a controlled maintenance connection, close it and remaining handles, then acknowledge quiescence and copy. Both prose variants, move step s4 and inventory match.                                                                                                                                                                                                   |
+| 8     | **Applied.** Main data view reduced to ingress, authorization, authoritative lookup, local forwarder and agent admission. Related navigation links to separate `planes-agent-components` for classifier/FFI/deadlines. Comparison notes explicitly replace unspecified lanes lease/heartbeat authority with online per-request authority and retain bounded scheduling/handle budgets. Existing/mixed/planned status remains conservative. Fresh captures replace data/control/move images and add agent/mobile captures. The move capture remains a logical relationship graph, with the instance companion explicitly deferred under 7.                                                                                                                                        |
+
+Bundle JSON, plain and STE draft documents, scenario labels and generated inventory were updated together in
+`build-dataset.py`; rerun plus configured formatting reproduces both output checksums. The review is a new
+commit-pinned source. No test was removed or weakened; existing generic coverage automatically includes the
+new view and source. Registration remains the existing catalog entry; no catalog or viewer code edits.
+
+Current bundle: 44 elements, 55 relationships, 60 documents; 15 diagrams: context (1), container (1),
+component (3), dynamic (9), deployment (1). Flows remain create/query/move/drop and named
+provisioning-failure, stale-route, deadline, move-verification-failure and drop-cleanup-failure alternatives.
+Deployment remains illustrative. Deferrals add no pretend success scenarios.
+
+Visual inspection: desktop 1920×1200 and mobile 390×844 captures checked. The data overview now separates
+lookup from local dispatch and agent execution; large-view body text still needs zoom or the explanation
+panel. Mobile document client width and scroll width are both 390. Source/target instance separation is not
+claimed. Initial authoring checks caught an invalid component-to-component detail link (replaced by supported
+related navigation) and formatting defaults (fixed with `--config deno.json`); the final checks below are the
+repaired results.
+
+Learning assessment: the repaired routing/admission/trust contracts and explicit recovery deferrals are
+preserved in the inventory within ownership. Coordinator handoff: use its repair dispositions for a future
+`docs/knowledge/` update; do not treat these proposed policies as landed runtime behavior. No reusable script
+or new VM/environment finding was discovered. Leave this assigned worktree in place for coordinator
+inspection.
+
+### Repair acceptance outputs
+
+```text
+$ cd pages && npm ci
+added 51 packages, and audited 52 packages in 3s
+found 0 vulnerabilities
+
+$ npm run check
+> tsc -b
+Test Files  5 passed (5)
+     Tests  165 passed (165)
+✓ built in 970ms
+27 passed (50.6s)
+
+$ deno task fmt:check
+Checked 292 files
+$ deno task lint
+Checked 183 files
+
+$ git diff --exit-code 351a51b -- [both older bundles and content trees]
+(no output; exit 0)
+$ sha256sum pages/public/architectures/{tsdb-current,tsdb-lanes-proposal}.json
+0a736cb8d39de3df1c8d4a438d1a1c80ee0ab4a4e962ff69700b07a0298f2f77  tsdb-current.json
+04c7f6f300bdc58be126bebf7521056995d3317a079f3ba4fe995d96122089b9  tsdb-lanes-proposal.json
+
+$ sha256sum -c /tmp/dp01-repair-generated.sha256
+pages/public/architectures/tsdb-planes-proposal.json: OK
+pages/content/tsdb-planes-proposal/inventory.md: OK
+
+Repair semantic/inventory assertions: PASS
+(transport bypasses router, stale lookup RPC, five-node overview, policy tables,
+plain/STE deferrals and element/relationship/step inventory coverage)
+```
+
+The assertions validate proposal consistency, not distributed runtime correctness. Pages logs are preserved
+locally as `repair-pages.log` (including npm ci) and `repair-pages-final.log` (after the final wording
+change).
+
+Full root CI also completed with exit 0 (`repair-ci.log`, preserved locally):
+
+```text
+$ deno task ci
+Task ci deno task fmt:check && deno task lint && deno task check && deno task test && deno task test:prop
+Task fmt:check deno fmt --check
+Checked 292 files
+Task lint deno lint
+Checked 183 files
+Task check deno check core/errors.ts platform/services.ts platform/server.ts platform/reader.ts scripts/demo.ts scripts/explain.ts scripts/restore.ts tests/core_test.ts tests/types.ts tests/errors_exhaustiveness.ts tests/integration.ts
+Task test deno test --v8-flags=--expose-gc -A tests/unit/**/*.ts tests/core_test.ts
+ok | 687 passed | 0 failed | 1 ignored (5m49s)
+Task test:prop deno test --v8-flags=--expose-gc -A tests/property/**/*.ts
+ok | 84 passed | 0 failed (3m3s)
+```
+
+The ignored test is the existing baseline. Final root formatting and lint were checked again after report
+edits. One repair commit retains `Co-Authored-By: Codex Sol <noreply@openai.com>` and is pushed only to
+`item/dp-01-planes`. This is the authorized repair, not an independent PASS verdict.

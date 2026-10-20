@@ -31,8 +31,10 @@ belong to the control plane; the gateway consults them. Every VM runs **VM agent
 for all query and lifecycle file work. The control plane chooses each database’s VM, but the placement policy
 remains an explicit open question. Existing scale-out content is preserved. Its
 [inventory](content/tsdb-planes-proposal/inventory.md) records the database-aware router extension, fencing
-protocol and the distinction between landed FFI code and proposed lane processes. Registration adds one entry
-to `public/catalog.json`; no viewer code changes.
+protocol, fail-closed online admission, service trust boundaries, bounded resource budgets and the distinction
+between landed FFI code and proposed lane processes. The data overview links to agent execution detail.
+Backup/VM-loss flow expansion and source/target move instance companions are explicitly deferred in the
+inventory and documents. Registration adds one entry to `public/catalog.json`; no viewer code changes.
 
 ### The architecture dropdown and the sticky bar
 
@@ -82,7 +84,7 @@ No code changes (the tests prove it with a three-entry fixture catalog):
 ### Diagram kinds per dataset
 
 All seven C4 kinds are drawn across the catalog (`tests/views.test.ts` checks it). The new
-`tsdb-planes-proposal` entry has context, container, two component views, nine dynamic scenarios and one
+`tsdb-planes-proposal` entry has context, container, three component views, nine dynamic scenarios and one
 illustrative deployment; it adds no landscape or code view. The original two entries retain these views:
 
 | Kind       | `tsdb-current`                                    | `tsdb-lanes-proposal`                                              |

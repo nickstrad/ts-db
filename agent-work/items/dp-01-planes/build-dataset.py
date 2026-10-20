@@ -30,6 +30,7 @@ source('src-addendum', 'agent-work/items/dp-01-planes/addendum-1.md',
        'DP-01 addendum 1: VM agents and control-plane routing / placement',
        'item/dp-01-planes', notes='Same-change design source: URL is a branch reference; revision is the SHA-256 of the source bytes, not a commit pin.')
 SOURCES[-1]['revision'] = 'sha256:' + hashlib.sha256((ROOT / SOURCES[-1]['path']).read_bytes()).hexdigest()
+source('src-review', 'agent-work/items/dp-01-planes/review-astra.md', 'DP-01 independent review and repair requirements', 'c8883bd8efd8a500668a240eedda073b9227e719')
 source('src-lanes', 'pages/public/architectures/tsdb-lanes-proposal.json', 'Preserved scale-out dataset')
 source('src-lanes-inventory', 'pages/content/tsdb-lanes-proposal/inventory.md', 'Scale-out decisions P1–P17')
 source('src-router', 'platform/tenants/routing.ts', 'Landed TenantStorageRouter seam; future ControlPlaneRouter')
@@ -40,7 +41,7 @@ source('src-decisions', 'docs/knowledge/decisions.md', 'Router seam and Postgres
 
 b = dict(schemaVersion=1, id='tsdb-planes-proposal',
          title='Proposed: control plane / data plane — tenants own many databases',
-         revision='dp-01-addendum-1-2026-10-20', defaultDiagramId='planes-context',
+         revision='dp-01-repair-2026-10-20', defaultDiagramId='planes-context',
          model=dict(elements=[], relationships=[]), diagrams=[], documents=[], sources=SOURCES, terms=[])
 elements = {}
 relationships = {}
@@ -224,7 +225,7 @@ for args in [
     ('dp-auth-sql','authorization','database-registry','Consult control plane: resolve name and verify tenant ownership / grants','Authenticated internal RPC'),
     ('dp-route','authorization','placement-router','Resolve authorized database at open; refresh after relocation','Authenticated control-plane routing RPC'),
     ('dp-placement','placement-router','metadata','Read ACTIVE database → node and epoch; reject inactive state','Postgres hand-written SQL'),
-    ('dp-forward','placement-router','forwarder','Trusted database location and epoch for this request','Control-plane route response'),
+    ('dp-forward','authorization','forwarder','Invoke gateway forwarder with authorized route','In-process call'),
     ('dp-owner','forwarder','node-admission','Owner-node request or WrongOwner / inactive response','Authenticated internal RPC'),
     ('dp-classify','node-admission','classifier','Admit and classify operation IR in a selected lane','JSON-lines IPC; proposed lane placement'),
     ('dp-execute','classifier','execution','Choose bounded blocking or unbounded nonblocking step','Existing classifier path choice; planned lane dispatch'),
@@ -333,15 +334,16 @@ flow('flow-create-failed','Create database — alternative: provisioning fails',
      'Do not publish an unverified file. Record the failure. Remove partial files. Keep the name reserved until cleanup is confirmed.', 'planes-control-components')
 flow('flow-query-right-node','Query: resolve database and execute on its owner',[
     ('dp-request',F,'Session selects one tenant database by name or ID'),
-    ('dp-auth',F,'Authenticate and authorize this selection'),
+    ('dp-auth',F,'Validate request; obtain online one-request authorization for selected database'),
     ('dp-auth-sql',F,'Verify database belongs to trusted tenant and grants allow access'),
     ('dp-auth-sql',R,'Return authorized immutable database ID'),
     ('dp-route',F,'Resolve location at open for this database'),
     ('dp-placement',F,'Control-plane routing reads authoritative ACTIVE VM and epoch'),
     ('dp-placement',R,'Return node B and current epoch; client need not know node B'),
-    ('dp-forward',F,'Use trusted placement and preserve request identity'),
+    ('dp-route',R,'Return authorized owner VM and epoch to gateway; lookup ends here'),
+    ('dp-forward',F,'Invoke local forwarder with route, single-use authority decision and request identity'),
     ('dp-owner',F,'Forward tenant/database IDs, epoch, plan IR, SQL/binds and deadline to node B'),
-    ('dp-classify',F,'Admit only current ACTIVE epoch and send IR to node-local lane'),
+    ('dp-classify',F,'Check one-request decision, local ACTIVE epoch and durable fence; send trusted IR to lane'),
     ('dp-execute',F,'Choose the execution path from the operation IR'),
     ('dp-deadline',F,'Apply execution deadline policy'),
     ('dp-files',F,'Execute against this database file'),
@@ -349,8 +351,7 @@ flow('flow-query-right-node','Query: resolve database and execute on its owner',
     ('dp-execute',R,'Return completed execution result'),
     ('dp-classify',R,'Return lane result to node admission'),
     ('dp-owner',R,'Return rows to forwarding gateway'),
-    ('dp-forward',R,'Return result through router'),
-    ('dp-route',R,'Return result through authorization'),
+    ('dp-forward',R,'Return rows locally to gateway authorization; no router in result path'),
     ('dp-auth',R,'Return result to query ingress'),
     ('dp-request',R,'Return rows to the same client session'),
 ], 'Success scenario. A later request in the same session can select another database on node A through the same URL. Authorization is per selected database. Statements carry operation IR as well as SQL/binds. Unbounded-read deadline failure and stale-owner failure are separate named scenarios; no timing or throughput measurement is claimed.',
@@ -359,8 +360,10 @@ flow('flow-query-stale','Query — alternative: moved database refreshes placeme
     ('dp-owner',F,'Send request with old epoch to former owner'),
     ('dp-owner',R,'Reject before executing: WrongOwner / stale epoch'),
     ('dp-forward',R,'Invalidate cached database location'),
-    ('dp-placement',F,'Consult control-plane routing again for ACTIVE database VM and epoch'),
+    ('dp-route',F,'Gateway authorization repeats routing RPC for this database'),
+    ('dp-placement',F,'Router reads authoritative ACTIVE database VM and epoch'),
     ('dp-placement',R,'Return new owner and epoch after completed move'),
+    ('dp-route',R,'Return refreshed route to gateway authorization'),
     ('dp-forward',F,'Reopen database location at new owner'),
     ('dp-owner',F,'Retry safely with same request ID at new owner; no client node change'),
     ('dp-owner',R,'Return result or recorded per-database mutation outcome'),
@@ -378,7 +381,7 @@ flow('flow-move-database','Move database: fence, copy, then flip placement',[
     ('cp-lifecycle',F,'Request move of one database A → B with operation ID'),
     ('cp-operation',F,'CAS ACTIVE → MOVING; persist source A, target B and next epoch; block new opens'),
     ('cp-node',F,'Fence this database on source A; stop all new admissions including existing sessions'),
-    ('cp-node',F,'Drain or cancel in-flight work; close all handles; checkpoint after settlement'),
+    ('cp-node',F,'Settle requests; checkpoint with controlled maintenance connection; close it and all remaining handles'),
     ('cp-node',R,'Source A confirms durable fence and no live database handles / writers'),
     ('cp-node',F,'Instruct source VM agent (process) to copy out to target VM agent (process); target receives and verifies snapshot / request-ID state'),
     ('cp-node',R,'Target VM agent (process) confirms verified staged data and readiness; source agent stays fenced'),
@@ -388,7 +391,7 @@ flow('flow-move-database','Move database: fence, copy, then flip placement',[
     ('cp-node',F,'Remove fenced source copy and sidecars; reconcile cleanup if needed'),
     ('cp-operation',F,'Record move complete; keep epoch and operation history'),
     ('cp-lifecycle',R,'Report completed move; stale routing will refresh at open'),
-], 'Design choice: an offline, per-database move with temporary unavailability. The source must acknowledge a durable fence; otherwise placement does not flip. Recovery reads durable MOVING state before reopening any file. Only after in-flight work settles, all handles close, and target data verifies does one Postgres transaction publish the new ACTIVE epoch. Target admits only after that commit. Source remains fenced even after restart. Cleanup follows activation; its failure never re-enables the old owner. Other databases can remain active, except for the documented shared-lane kill blast radius. Snapshot copy uses a closed/checkpointed database, not a live main-file-only copy; online WAL streaming is deferred.',
+], 'Design choice: an offline, per-database move with temporary unavailability. The source must acknowledge a durable fence; otherwise placement does not flip. Recovery reads durable MOVING state before reopening any file. Only after requests settle, a controlled maintenance connection checkpoints, that connection and remaining handles close, and target data verifies does one Postgres transaction publish the new ACTIVE epoch. Target admits only after that commit. Source remains fenced even after restart. Cleanup follows activation; its failure never re-enables the old owner. Other databases can remain active, except for the documented shared-lane kill blast radius. Snapshot copy uses a closed/checkpointed database, not a live main-file-only copy; online WAL streaming is deferred.',
      'Stop access to this database. Drain its work and close handles on A. Verify the copied database on B. Change owner and epoch in one transaction. Activate B and remove the old copy. Keep A fenced after a restart.', 'planes-control-components')
 flow('flow-move-failed','Move database — alternative: target verification fails before flip',[
     ('cp-node',R,'Source fence confirmed; staged target copy fails integrity check'),
@@ -553,7 +556,7 @@ replacements = {
     'planes-containers': (ROUTING + ' ' + AGENT, STE_ROUTING + ' ' + STE_AGENT),
     'planes-control-components': (ROUTING + ' Tenant and database registries manage CRUD using Postgres hand-written SQL, no ORM. Lifecycle controllers instruct VM agents for moves, suspend/resume, backup/restore and deletion; they never manipulate disk directly.',
                                  STE_ROUTING + ' Use hand-written SQL in Postgres. Instruct VM agents to do all lifecycle file work.'),
-    'planes-data-components': ('Ingress authenticates and authorizes the selected database through the control-plane registry, consults control-plane routing at open, then forwards to the VM agent (process). The router and database registry shown here belong to the control plane, not the gateway. The gateway contains ingress, authorization and forwarding only. ' + AGENT + ' Carry operation IR with SQL/binds to reuse the landed classifier. Database-aware API selection and remote routing are planned.',
+    'planes-data-components': ('Ingress authenticates and authorizes the selected database through the control-plane registry, consults control-plane routing at open, then forwards to the VM agent (process). The router belongs to the control plane, not the gateway; database registry details are in the control-plane view. The gateway contains ingress, authorization and forwarding only. ' + AGENT + ' Carry operation IR with SQL/binds to reuse the landed classifier. Database-aware API selection and remote routing are planned.',
                               'The gateway contains ingress, authorization and forwarding. Routing and registry logic belong to the control plane. Ask it for the VM, then send the query to its agent. ' + STE_AGENT),
 }
 for id, (plain, ste) in replacements.items():
@@ -588,6 +591,91 @@ elements['lanes']['description'] = 'Private agent-managed execution workers; no 
 elements['node-admission']['name'] = 'VM agent (process) — admission'
 elements['placement-router']['plannedNotes'] = ['Tenant-only seam is landed; control-plane database routing and remote execution are planned.']
 
+
+# DP-01 repair: routing, local admission and trust contracts are explicit proposal decisions.
+def extend(ids, plain, ste):
+    for id in ids:
+        document = next(d for d in b['documents'] if d['id'] == 'doc-' + id)
+        document['plain'] += '\n\n' + plain
+        document['ste']['text'] += '\n\n' + ste
+        if id in elements:
+            provenance[id] += ' ' + plain
+
+AVAILABILITY = """Chosen availability policy: fail closed for ALL new admissions when control-plane authority cannot be confirmed. There is no offline lease or heartbeat authorization. Decision issuance is the admission point; no decision prefetch or reuse is permitted. Every request, including an existing session, needs an online one-request admission decision from the authority, bound to database ID, owner epoch/generation, principal, permission, request ID and a deadline of at most 30 seconds. Agent checks that decision and its durable local ACTIVE epoch/fence. A decision is consumed once; it cannot open an offline session. Revocation denies subsequent decisions; a decision already issued may execute until its deadline, and already-running work settles or is cancelled by its deadline. Lifecycle fences override outstanding decisions locally.
+
+| State / event | Admission / recovery |
+| --- | --- |
+| Authority reachable, database ACTIVE | Online authorization and current epoch plus durable local ACTIVE state required for each request. |
+| Authority unavailable, running agent | Reject new requests, including existing sessions. Already admitted work settles within its deadline; no transfer. |
+| MOVING, SUSPENDED, DROPPING or durable local fence | Reject admission even with a previously issued decision. No ownership transfer without confirmed source fencing. |
+| Agent restart | Keep closed. Terminate and confirm exit of orphan workers before opening files. Reconcile committed owner/epoch/generation and durable fences online; unavailable authority means stay closed. |
+| Controller crash after placement commit, before activation ACK | Target remains sole committed owner; it stays closed until idempotent activation reconciles that commit. Source stays fenced. Never roll back to stale ownership. |
+
+Serialize lifecycle operations per database. Every command carries database ID, operation ID, expected owner epoch and generation, and intended transition. Persist accepted transition/fence and its acknowledgement before replying. Replay returns recorded status; reject superseded activation, unfence and delete commands. Cleanup names the exact old generation and operation: a delayed A-to-B delete cannot delete A's later active generation after B-to-A. Recheck these preconditions before filesystem effects, not only on receipt."""
+STE_AVAILABILITY = """Policy: reject every new request if the control plane cannot confirm authority. Do this for existing sessions too. There is no offline lease or heartbeat authority. Admission occurs when the decision is issued. Do not prefetch or reuse decisions. For each request, obtain one online admission decision. Bind it to the database ID, owner epoch, generation, principal, permission, request ID and a deadline no more than 30 seconds away. Use it once. Check the local durable ACTIVE state and fence too. Reject new decisions after permission revocation. An issued decision can run until its deadline. A local fence blocks it immediately.
+
+| State / event | Required action |
+| --- | --- |
+| ACTIVE and authority available | Check online permission and epoch, then local state, for each request. |
+| Authority unavailable | Reject new requests. Let admitted work settle by its deadline. Do not move ownership. |
+| Fenced or inactive | Reject requests, including decisions issued before the fence. |
+| Agent restart | Keep files closed. Stop orphan workers and confirm exit. Reconcile ownership and durable fences online before opening files. |
+| Controller stops after owner commit | Keep the source fenced. Reconcile activation on the committed target. Do not restore the old owner. |
+
+Serialize lifecycle commands for each database. Each command must name the database, operation, expected epoch, generation and intended transition. Store the transition and acknowledgement durably before replying. Reject obsolete activation, unfence and delete commands. Before changing files, check the operation and exact generation again. A delayed cleanup must not delete a later active generation."""
+extend(['node-admission','placement-router','flow-move-database','flow-move-failed'], AVAILABILITY, STE_AVAILABILITY)
+TRUST = ('Trust boundary: agents trust authenticated gateway service assertions for execute-only operations, including the authority-issued one-request decision described in the admission contract. Customers cannot issue these assertions. Gateway identity cannot provision, unfence, move or delete. Only the control-plane lifecycle identity can issue lifecycle commands, subject to durable operation/epoch/generation checks. Agent-to-agent snapshot transfer credentials authorize only the named operation, source, target, database and generation, expire at that operation deadline and cannot authorize execution or activation. '
+         'Trusted gateway server code validates the supported document CRUD/query request, then derives matching operation IR and parameterized SQL/binds from that same request. No customer SQL or customer-supplied IR is accepted. Enforce this at ingress before classification; agent accepts only the authenticated compiler/gateway identity and scoped database operation. Disable SQL extension loading and file-access features, ATTACH, arbitrary PRAGMA and path-bearing SQL; the worker opens only the agent-selected database. The landed classifier is not a security validator. This is a proposed boundary, not an implemented security subsystem.')
+STE_TRUST = ('Agents accept execute assertions only from the authenticated gateway service. Require the online one-request authority decision. The gateway cannot create files, unfence, move or delete. Only the control-plane lifecycle identity can send lifecycle commands. Check their operation, epoch and generation. Limit transfer credentials to one operation, source, target, database, generation and operation deadline. They cannot activate a database. '
+             'Accept only supported document CRUD and query requests. Trusted gateway code validates each request and generates matching IR and parameterized SQL. Reject customer SQL and IR. Disable extension loading, file access, ATTACH, arbitrary PRAGMA and SQL paths. Workers open only the database selected by the agent. The classifier does not validate security. This boundary is proposed.')
+extend(['authorization','ingress','forwarder','node','node-admission'], TRUST, STE_TRUST)
+BUDGETS = ('Retain the lanes proposal bounded pool, scheduler and handle-cache policies, keyed by database with aggregate tenant and VM ceilings. Bound queue count and bytes, concurrent reads, one writer per database, open handles and lane count. Reject or backpressure excess admission; fairly schedule databases within tenant budgets so many databases cannot consume the VM. Evict idle handles only after transactions settle. Require disk plus WAL/snapshot headroom and bounded backup/move I/O reservations; throttle or reject when exhausted. Reserve supervisor/control capacity for fencing and cancellation under execution saturation. Quotas are accounting, not a tenant-wide execution lock. 0..N is cardinality, not unlimited capacity. Logical/file isolation is provided; VM/process failure and resource contention remain shared. Numeric limits and fairness weights remain OPEN configuration choices.')
+STE_BUDGETS = ('Keep bounded lanes, queues, handles and scheduling. Apply database limits and total tenant and VM limits. Bound queue bytes, reads, writers and I/O. Permit one writer per database. Reject or slow excess work. Schedule fairly across tenant budgets. Close idle handles after transactions finish. Reserve disk space for WAL, snapshots and moves. Reserve supervisor capacity to fence and cancel when execution is full. Tenant budgets do not require a tenant execution lock. Many databases do not mean unlimited capacity. Files are separate; VM failure and resource contention are shared. Numeric limits and scheduling weights remain OPEN.')
+extend(['lanes','node-admission','deadline'], BUDGETS, STE_BUDGETS)
+PLACEMENT = ('Placement algorithm and weights remain OPEN, but eligibility requires fresh authenticated agent health/readiness, compatible software/schema versions, available disk including WAL/snapshot/move headroom, resource ceilings and requested locality constraints. Reserve capacity transactionally for concurrent creates and staged moves; release reservations only after confirmed cleanup. Reject placement when no VM is eligible. Agents report health, database sizes, usage and reservations to control-plane metadata; reports carry agent incarnation and monotonic sequence. Stale/missing reports make a VM ineligible for new placements; they never prove an old writer fenced. Reporting interval and freshness threshold remain OPEN configuration decisions.')
+STE_PLACEMENT = ('The placement algorithm and weights remain OPEN. Require fresh health and readiness reports, compatible software and schema, sufficient disk and WAL/snapshot/move space, resource limits and locality. Reserve capacity for creates and staged moves. Release it after cleanup is confirmed. Reject placement if no VM is eligible. Agents report health, size and usage with an incarnation and sequence number. Stale reports block new placement. They do not prove a writer stopped. Report intervals and freshness limits remain OPEN.')
+extend(['provisioner','metadata','planes-control-components'], PLACEMENT, STE_PLACEMENT)
+DEFER6 = ('Review tweak 6 DEFERRED: end-to-end backup publication, VM-loss recovery and replacement backup-deletion executor scenarios need a separate recovery design that chooses storage credentials, durable manifest ownership and acceptable isolation evidence; DP-01 does not choose those mechanisms. RPO/RTO policy remains OPEN; WAL streaming is deferred. Until then only verified identity/generation/checksum/format-compatible completed backups can be candidates for restore, not a promise of recoverability or continuous protection. Losing a VM makes every hosted database unavailable. Detection is not fencing proof; no replacement writer may activate without explicit operator-verified isolation/proof of fencing. If the former agent is permanently lost, keep deletion DROPPING and the name reserved: no agent or object-store deletion confirmation is invented. Full backup completion manifests and replacement cleanup remain unimplemented design work, not a successful recovery path.')
+STE_DEFER6 = ('Review tweak 6 is DEFERRED to a recovery design. It must choose storage credentials, manifest ownership, fencing evidence and a replacement cleanup executor before adding complete flows. RPO and RTO remain OPEN. WAL streaming is deferred. Consider only completed, verified backups with database and generation IDs, checksum and compatible format for restore. This does not promise recovery or continuous protection. If a VM is lost, all its databases are unavailable. Failure detection does not prove fencing. Require operator-verified isolation before any replacement writer activates. If the old agent is permanently lost, keep deletion DROPPING and reserve the name. Backup publication and replacement cleanup need further design.')
+extend(['backups','lifecycle-policies','planes-control-components','flow-drop-database','flow-drop-failed'], DEFER6, STE_DEFER6)
+DEFER7 = ('Review tweak 7 instance companion DEFERRED: source/target instance-level move and failure diagrams will accompany the recovery design so transfer credentials and isolation evidence can be reviewed together. The current dynamic participant node denotes the logical VM agent type, not a single physical VM; step labels identify source A and target B. Proposed transfer is authenticated direct agent-to-agent snapshot streaming scoped to the move operation, not snapshot bytes through the controller. Ordering correction APPLIED: settle requests, checkpoint through a controlled maintenance connection, close that connection and all remaining handles, then durably acknowledge quiescence and copy. No fence acknowledgement precedes worker exit/maintenance completion.')
+STE_DEFER7 = ('Review tweak 7 instance companion is DEFERRED to the recovery design so transfer credentials and fencing evidence are reviewed together. The node participant is a logical agent type. A and B in the steps are different VMs. Proposed snapshot bytes stream directly from source agent to target agent with a move-scoped credential. The controller sends instructions only. Corrected order: settle requests; checkpoint with a controlled maintenance connection; close it and all other handles; durably acknowledge quiescence; copy. Confirm worker exit and maintenance completion before acknowledgement.')
+extend(['flow-move-database','flow-move-failed'], DEFER7, STE_DEFER7)
+PATH = 'Authorization calls the control-plane router and receives its route on the reverse lookup RPC. It then calls the forwarder locally. Query rows return agent to forwarder to authorization to ingress/client; they never pass through the router. Stale routing repeats the gateway routing RPC before the router reads metadata.'
+STE_PATH = 'Ask the router for a route. Receive the route on the lookup response. Call the gateway forwarder locally. Return rows from agent to forwarder to authorization to ingress and client. Do not send rows through the router. For a stale route, repeat the gateway routing RPC before reading placement.'
+extend(['flow-query-right-node','flow-query-stale','planes-data-components','forwarder'], PATH, STE_PATH)
+for rid, label in [('c-lifecycle','Lifecycle identity only: epoch/generation-checked file commands'), ('c-forward','Gateway execute-only identity + one-request authority decision')]:
+    relationships[rid]['label'] = label
+    provenance[rid] = label + '. ' + TRUST
+rel('cp-health','node','provisioner','Report health, size, usage and reservations; stale is ineligible, not fenced','Authenticated control-plane reporting RPC')
+edge_numbers['cp-health'] = 14
+cp['edges'].append(dict(relationshipId='cp-health', displayNumber=14))
+# A separate agent detail preserves the landed execution path without crowding the overview.
+execution_members = ['node-admission','classifier','execution','deadline','files']
+execution_edges = ['dp-classify','dp-execute','dp-deadline','dp-interrupt','dp-escalate','dp-files']
+agent_detail = diagram('planes-agent-components','component','VM agent: private execution and deadlines', execution_members, execution_edges,
+    AGENT + ' ' + BUDGETS, STE_AGENT + ' ' + STE_BUDGETS, scope='node', parent='planes-data-components')
+dp['nodes'] = [n for n in dp['nodes'] if n['elementId'] not in ['classifier','execution','deadline','files','metadata']]
+dp['edges'] = [e for e in dp['edges'] if e['relationshipId'] not in execution_edges + ['dp-placement']]
+dp['groups'] = [dict(id='g-cp-authority',label='Control plane — lookup only',memberIds=['placement-router','database-registry'],status='planned'),
+                dict(id='g-agent-execution',label='VM agent boundary — execute only; lifecycle identity separate',memberIds=['node-admission'],status='planned')]
+dp['nodes'] = [n for n in dp['nodes'] if n['elementId'] not in ['caller','database-registry']]
+dp['edges'] = [e for e in dp['edges'] if e['relationshipId'] not in ['dp-request','dp-auth-sql']]
+dp['groups'][0]['memberIds'] = ['placement-router']
+dp['groups'][1]['label'] = 'VM agent — scoped service identities'
+dp['layout']['direction'] = 'LR'
+for rid, label in [('dp-auth','Validate request + permission'), ('dp-route','Online authority lookup'), ('dp-forward','Local authorized dispatch'), ('dp-owner','Execute-only RPC / result')]:
+    relationships[rid]['label'] = label
+    provenance[rid] = label + '. ' + PATH
+dp['related'].append(dict(diagramId=agent_detail['id'],label=agent_detail['title']))
+REPAIR_NOTES = [('DP6 / tweak 1 — applied', PATH), ('DP6 / DP7 / tweak 2 — applied', AVAILABILITY),
+                ('DP6 / tweak 3 — applied', TRUST), ('DP9 / tweak 4 — applied', BUDGETS),
+                ('A3 / tweak 5 — applied', PLACEMENT), ('DP8 / DP10 / tweak 6 — deferred', DEFER6),
+                ('DP7 / tweak 7 — partial, companion deferred', DEFER7),
+                ('DP1 / DP9 / DP10 / tweak 8 — applied', 'The data overview links to a separate agent execution detail. The lanes lease/heartbeat contract is not specified or retained here; the replacement is online per-request authority with fail-closed admission. Bounded pool/scheduler/handle policies are retained with aggregate tenant and VM budgets. Existing/mixed/planned markings remain unchanged. The logical move capture is not an instance participant diagram; see explicit tweak 7 deferral.')]
+for obj in b['documents'] + b['model']['elements'] + b['model']['relationships'] + b['diagrams']:
+    obj['sourceIds'] = list(dict.fromkeys(obj['sourceIds'] + ['src-review']))
+
 for obj in b['diagrams'] + b['model']['elements']:
     document = next(d for d in b['documents'] if d['id'] == 'doc-' + obj['id'])
     document['title'] = obj.get('title', obj.get('name'))
@@ -610,7 +698,7 @@ lines += ['', '## Decisions and discrepancies', '',
           '- **DP4 — router truth.** `platform/tenants/routing.ts` supplies the landed TenantStorageRouter capability seam; ControlPlaneRouter is a future implementation, not landed code. Its current `resolve(tenantId)` and tenant-only context cannot already select multiple databases. Database ID/context/client-selection extension is explicit planned work. Location resolution remains behind the seam; the brief’s unchanged Storage/client implementation-swap invariant does not magically add a database-selection API.',
           '- **DP5 — metadata.** Postgres, hand-written SQL, no ORM. Database state and placement/epoch publish atomically using conditional transactions; file/RPC work uses durable operations and reconciliation, not an invented cross-store transaction. Tenant drop is restricted until its databases have completed deletion.',
           '- **DP6 — dynamic access.** Same session/endpoint, database name or ID per selection. Authenticate and authorize the pair; resolve ACTIVE placement at open. Owner validates state/epoch for every admission, so a cached open is not perpetual access. Refresh WrongOwner at reopen; inactive/unknown state fails closed. Forward only server-trusted identities over authenticated RPC.',
-          '- **DP7 — relocation.** Chosen offline move: record MOVING, block opens, fence old admissions including sessions, drain/cancel all in-flight work, close handles, verify checkpointed copy, then flip owner+epoch and ACTIVE in one transaction. Target gates activation on committed placement; old owner remains fenced across restart. Source must acknowledge fencing: unreachable source means unavailable, not guessed failover. Confirm process exit after a kill before acknowledging drain. Pre-flip rollback needs verified intact source and confirmed target cleanup, and uses a fresh epoch. After-flip failures reconcile target activation/cleanup; no rollback to stale owner.',
+          '- **DP7 — relocation.** Chosen offline move: record MOVING, block opens, fence old admissions including sessions, settle requests, checkpoint through a controlled maintenance connection, close it and remaining handles, verify copy, then flip owner+epoch and ACTIVE in one transaction. Target gates activation on committed placement; old owner remains fenced across restart. Source must acknowledge fencing: unreachable source means unavailable, not guessed failover. Confirm process exit after a kill before acknowledging drain. Pre-flip rollback needs verified intact source and confirmed target cleanup, and uses a fresh epoch. After-flip failures reconcile target activation/cleanup; no rollback to stale owner.',
           '- **DP8 — deletion/restore.** Remove files and sidecars/all known copies before live registry cleanup; retain non-routable identity tombstone and operation history. Drop erases backups and archived WAL as well as local data; pending cleanup is never reported as success. Failed cleanup remains DROPPING and reserves the name. Backup/restore and suspend/resume use database gates/generations (see `doc-lifecycle-policies`).',
           '- **DP9 — lane reuse.** Reuse placement table, forwarder, supervisor, statement lanes, per-database request-ID dedup, FFI classifier/deadline and optional WAL-frame vocabulary. Carry operation IR alongside SQL/binds so the classifier never parses SQL (lanes discrepancy 11). No tenant-wide sticky lane set, file, queue or lock. A shared child-process lane has a multi-database failure blast radius; it is not a database isolation boundary.',
           '- **DP10 — omissions.** No invented code-level symbols, latency/capacity measurements, automatic failover, online migration or WAL-shipping implementation. Optional future WAL frames are database/generation keyed; offline verified snapshots suffice for this design. DuckDB event-log analysis and unchanged app/observability paths are omitted for focus (P8). Existing two bundles and their content remain byte-identical.',
@@ -626,7 +714,7 @@ for r in b['model']['relationships']:
     if 'modelRelationshipId' in r:
         sources += ' / `'+r['modelRelationshipId']+'`'
     lines.append(f'| `{r["id"]}` | `{r["sourceId"]}` → `{r["targetId"]}` | {r["status"]} | {sources} | {provenance[r["id"]]} |')
-lines += ['', '## Views and steps', '', 'Each step below inherits its diagram’s `src-brief` / `src-lanes` / `src-addendum` provenance. The authored labels specify the proposed protocol; only the identified classifier/FFI operations are landed. Diagrams link their alternatives and parent views.', '']
+lines += ['', '## Views and steps', '', 'Each step below inherits its diagram’s `src-brief` / `src-lanes` / `src-addendum` / `src-review` provenance. The authored labels specify the proposed protocol; only the identified classifier/FFI operations are landed. Diagrams link their alternatives and parent views.', '']
 for d in b['diagrams']:
     lines += [f'### `{d["id"]}` — {d["kind"]}', '', f'Document: `doc-{d["id"]}`. Status: {d["status"]}.', '']
     if 'scenario' in d:
@@ -637,6 +725,9 @@ for d in b['diagrams']:
     else:
         lines += ['Members: '+', '.join('`'+n['elementId']+'`' for n in d['nodes'])+'.', '',
                   'Edges: '+', '.join('`'+e['relationshipId']+'`' for e in d['edges'])+'.', '']
+lines += ['## Repair dispositions (2026-10-20)', '']
+for title, note in REPAIR_NOTES:
+    lines += ['### ' + title, '', note, '']
 lines += ['## Learning preservation handoff', '',
           'The database-aware router caveat (DP4), offline relocation safety conditions (DP7), and shared-lane blast radius (DP9) are durable design findings. This inventory preserves them within builder ownership. Coordinator: link this inventory from `docs/knowledge/decisions.md` / `index.md` after review; those files are outside this unit’s Owns set. No reusable general-purpose script was discovered: `build-dataset.py` is a unit-specific authoring source, not a work-scripts building block.', '']
 (CONTENT/'inventory.md').write_text('\n'.join(lines))
