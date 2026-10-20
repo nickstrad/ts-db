@@ -15,6 +15,11 @@
       "id": "tsdb-planes-proposal",
       "title": "Proposed: control plane / data plane — tenants own many databases",
       "url": "architectures/tsdb-planes-proposal.json"
+    },
+    {
+      "id": "tsdb-planes-fable",
+      "title": "Fable revision: control/data planes with route grants (M1–M8 applied)",
+      "url": "architectures/tsdb-planes-fable.json"
     }
   ]
 }

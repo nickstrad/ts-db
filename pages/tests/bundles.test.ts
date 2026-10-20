@@ -9,6 +9,7 @@ describe("catalog", () => {
       "tsdb-current",
       "tsdb-lanes-proposal",
       "tsdb-planes-proposal",
+      "tsdb-planes-fable",
     ]);
     expect(catalog.defaultId).toBe("tsdb-current");
   });

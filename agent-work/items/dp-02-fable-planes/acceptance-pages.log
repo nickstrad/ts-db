@@ -1,0 +1,97 @@
+
+> tsdb-architecture-pages@0.0.0 check
+> npm run typecheck && npm run test && npm run build && npm run test:browser
+
+
+> tsdb-architecture-pages@0.0.0 typecheck
+> tsc -b
+
+
+> tsdb-architecture-pages@0.0.0 test
+> vitest run
+
+
+ RUN  v5.0.4 /root/Software/tsdb-work/dp02/pages
+
+
+ Test Files  5 passed (5)
+      Tests  240 passed (240)
+   Start at  22:56:16
+   Duration  1.69s (import 57%, tests 32%, transform 9%, worker 2%)
+
+
+> tsdb-architecture-pages@0.0.0 build
+> vite build --base /ts-db/
+
+vite v8.3.4 building client environment for production...
+transforming...
+✓ 26 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                            0.73 kB │ gzip:   0.42 kB
+dist/assets/layout-worker-BeIcR9gj.js  2,107.55 kB
+dist/assets/index-ChqLlcAG.css            33.27 kB │ gzip:   6.31 kB
+dist/assets/index-BU0vMukh.js            801.21 kB │ gzip: 251.84 kB
+
+✓ built in 880ms
+
+> tsdb-architecture-pages@0.0.0 test:browser
+> playwright test
+
+
+Running 52 tests using 1 worker
+
+[1/52] [chromium] › tests/smoke.spec.ts:28:1 › the site opens on the default architecture and lists every catalog entry
+[2/52] [chromium] › tests/smoke.spec.ts:49:1 › choosing an architecture opens its default diagram, and Back returns
+[3/52] [chromium] › tests/smoke.spec.ts:69:1 › a deep link to a diagram of another entry reloads to the same diagram
+[4/52] [chromium] › tests/smoke.spec.ts:92:1 › unknown routes show Not Found instead of falling back
+[5/52] [chromium] › tests/smoke.spec.ts:103:1 › the skip link and the architecture dropdown are keyboard reachable
+[6/52] [chromium] › tests/smoke.spec.ts:119:1 › a three-entry catalog works with no code change and opens its defaultId
+[7/52] [chromium] › tests/smoke.spec.ts:141:1 › the top bar stays in the viewport while a tall diagram page scrolls
+[8/52] [chromium] › tests/smoke.spec.ts:177:3 › the landscape view renders
+[9/52] [chromium] › tests/smoke.spec.ts:177:3 › the code-document-reader view renders
+[10/52] [chromium] › tests/smoke.spec.ts:177:3 › the flow-long-query-interrupt view renders
+[11/52] [chromium] › tests/smoke.spec.ts:177:3 › the lanes-deployment view renders
+[12/52] [chromium] › tests/smoke.spec.ts:191:3 › the planes planes-context view renders
+[13/52] [chromium] › tests/smoke.spec.ts:191:3 › the planes planes-containers view renders
+[14/52] [chromium] › tests/smoke.spec.ts:191:3 › the planes planes-control-components view renders
+[15/52] [chromium] › tests/smoke.spec.ts:191:3 › the planes planes-data-components view renders
+[16/52] [chromium] › tests/smoke.spec.ts:191:3 › the planes flow-create-database view renders
+[17/52] [chromium] › tests/smoke.spec.ts:191:3 › the planes flow-create-failed view renders
+[18/52] [chromium] › tests/smoke.spec.ts:191:3 › the planes flow-query-right-node view renders
+[19/52] [chromium] › tests/smoke.spec.ts:191:3 › the planes flow-query-stale view renders
+[20/52] [chromium] › tests/smoke.spec.ts:191:3 › the planes flow-query-deadline view renders
+[21/52] [chromium] › tests/smoke.spec.ts:191:3 › the planes flow-move-database view renders
+[22/52] [chromium] › tests/smoke.spec.ts:191:3 › the planes flow-move-failed view renders
+[23/52] [chromium] › tests/smoke.spec.ts:191:3 › the planes flow-drop-database view renders
+[24/52] [chromium] › tests/smoke.spec.ts:191:3 › the planes flow-drop-failed view renders
+[25/52] [chromium] › tests/smoke.spec.ts:191:3 › the planes planes-deployment view renders
+[26/52] [chromium] › tests/smoke.spec.ts:191:3 › the planes planes-agent-components view renders
+[27/52] [chromium] › tests/smoke.spec.ts:206:3 › the fable planes-context view renders
+[28/52] [chromium] › tests/smoke.spec.ts:206:3 › the fable planes-containers view renders
+[29/52] [chromium] › tests/smoke.spec.ts:206:3 › the fable planes-control-components view renders
+[30/52] [chromium] › tests/smoke.spec.ts:206:3 › the fable planes-data-components view renders
+[31/52] [chromium] › tests/smoke.spec.ts:206:3 › the fable planes-agent-components view renders
+[32/52] [chromium] › tests/smoke.spec.ts:206:3 › the fable planes-lane-components view renders
+[33/52] [chromium] › tests/smoke.spec.ts:206:3 › the fable flow-create-database view renders
+[34/52] [chromium] › tests/smoke.spec.ts:206:3 › the fable flow-create-failed view renders
+[35/52] [chromium] › tests/smoke.spec.ts:206:3 › the fable flow-query-right-node view renders
+[36/52] [chromium] › tests/smoke.spec.ts:206:3 › the fable flow-query-grant-reuse view renders
+[37/52] [chromium] › tests/smoke.spec.ts:206:3 › the fable flow-query-stale view renders
+[38/52] [chromium] › tests/smoke.spec.ts:206:3 › the fable flow-query-deadline view renders
+[39/52] [chromium] › tests/smoke.spec.ts:206:3 › the fable flow-move-database view renders
+[40/52] [chromium] › tests/smoke.spec.ts:206:3 › the fable flow-move-failed view renders
+[41/52] [chromium] › tests/smoke.spec.ts:206:3 › the fable flow-backup-manifest view renders
+[42/52] [chromium] › tests/smoke.spec.ts:206:3 › the fable flow-backup-unverified view renders
+[43/52] [chromium] › tests/smoke.spec.ts:206:3 › the fable flow-recover-from-loss view renders
+[44/52] [chromium] › tests/smoke.spec.ts:206:3 › the fable flow-recover-refused view renders
+[45/52] [chromium] › tests/smoke.spec.ts:206:3 › the fable flow-drop-database view renders
+[46/52] [chromium] › tests/smoke.spec.ts:206:3 › the fable flow-drop-failed view renders
+[47/52] [chromium] › tests/smoke.spec.ts:206:3 › the fable flow-drop-lost-agent view renders
+[48/52] [chromium] › tests/smoke.spec.ts:206:3 › the fable planes-deployment view renders
+[49/52] [chromium] › tests/smoke.spec.ts:206:3 › the fable flow-move-instances view renders
+[50/52] [chromium] › tests/smoke.spec.ts:206:3 › the fable flow-move-failed-instances view renders
+[51/52] [chromium] › tests/smoke.spec.ts:214:1 › the Fable revision is selectable and Back preserves the current architecture
+[52/52] [chromium] › tests/smoke.spec.ts:224:1 › the planes proposal is selectable and Back preserves the current architecture
+  52 passed (1.7m)
+check exit=0

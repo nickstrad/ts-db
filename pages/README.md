@@ -16,13 +16,14 @@ Future URL: <https://nickstrad.github.io/ts-db/> (GitHub Pages is **not enabled 
 
 ## What it shows
 
-Today the catalog lists three architectures:
+Today the catalog lists four architectures:
 
-| Catalog entry          | Content                                                                                                    |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `tsdb-current`         | The default: the four audited pairs of `docs/architecture/`, a landscape and a code view                   |
-| `tsdb-lanes-proposal`  | Statement lanes and placement: context, containers, lane components, flows and a deployment                |
-| `tsdb-planes-proposal` | Control plane / data plane: tenants own 0..N databases; database-scoped placement, isolation and lifecycle |
+| Catalog entry          | Content                                                                                                                                                                |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tsdb-current`         | The default: the four audited pairs of `docs/architecture/`, a landscape and a code view                                                                               |
+| `tsdb-lanes-proposal`  | Statement lanes and placement: context, containers, lane components, flows and a deployment                                                                            |
+| `tsdb-planes-proposal` | Control plane / data plane: tenants own 0..N databases; database-scoped placement, isolation and lifecycle                                                             |
+| `tsdb-planes-fable`    | Fable revision of the planes proposal: route grants, lane view, default database, VM-loss recovery, backup manifests, instance moves, candidate placement rule (M1–M8) |
 
 The `tsdb-planes-proposal` addition supersedes one-file-per-tenant **in this proposal only**. It adds
 control/data-plane component views, create/query/move/drop scenarios with separate failure alternatives, and
@@ -35,6 +36,23 @@ protocol, fail-closed online admission, service trust boundaries, bounded resour
 between landed FFI code and proposed lane processes. The data overview links to agent execution detail.
 Backup/VM-loss flow expansion and source/target move instance companions are explicitly deferred in the
 inventory and documents. Registration adds one entry to `public/catalog.json`; no viewer code changes.
+
+The `tsdb-planes-fable` entry (DP-02) is the planes proposal with the eight modifications from
+[`docs/architecture/scale-out-comparison-fable.md`](../docs/architecture/scale-out-comparison-fable.md) §4
+applied, generated from the DP-01 generator plus a patch
+(`agent-work/items/dp-02-fable-planes/build-dataset.py`), so everything an M-number does not name is carried
+over unchanged. M1 replaces the per-request single-use decision with a time-boxed **route grant** held by the
+gateway (new `grant-cache`, a grant-reuse flow with no control-plane call, and a stale-route retry that
+obtains a _fresh decision_); M3 adds the lane view inside the agent with backups on a read-only snapshot
+connection; M4 specifies the database selection surface and the per-tenant `default` database; M5 closes the
+VM-loss deferral (operator-attested isolation with provider proof, then restore elsewhere; refusal without
+attestation); M6 makes backup completion a recorded manifest keyed by (database, generation); M7 adds
+instance-level move companions (drawn as illustrative deployment views, because c4-sdk places deployment
+instances only there); M8 draws a candidate v1 placement rule labelled **proposed, pending Nick's decision**;
+M2 (build order) is recorded in documents only. It is a proposal: everything new is `planned`, and the landed
+FFI pieces keep the planes dataset's `existing`/`mixed` marks. M1 and M5 alter contracts Astra reviewed in
+DP-01, so they need Nick's word and a re-review. Its [inventory](content/tsdb-planes-fable/inventory.md)
+records F1–F11. The three older datasets are byte-identical.
 
 ### The architecture dropdown and the sticky bar
 
@@ -83,9 +101,11 @@ No code changes (the tests prove it with a three-entry fixture catalog):
 
 ### Diagram kinds per dataset
 
-All seven C4 kinds are drawn across the catalog (`tests/views.test.ts` checks it). The new
-`tsdb-planes-proposal` entry has context, container, three component views, nine dynamic scenarios and one
-illustrative deployment; it adds no landscape or code view. The original two entries retain these views:
+All seven C4 kinds are drawn across the catalog (`tests/views.test.ts` checks it). The `tsdb-planes-proposal`
+entry has context, container, three component views, nine dynamic scenarios and one illustrative deployment;
+`tsdb-planes-fable` has context, container, four component views (adding the lane view), fifteen dynamic
+scenarios and three illustrative deployment views (the fleet plus the two instance-level move companions).
+Neither adds a landscape or code view. The original two entries retain these views:
 
 | Kind       | `tsdb-current`                                    | `tsdb-lanes-proposal`                                              |
 | ---------- | ------------------------------------------------- | ------------------------------------------------------------------ |
@@ -112,12 +132,12 @@ npm run preview      # serve dist/ at http://localhost:4173/ts-db/
 npm run check        # typecheck + unit tests + build + browser smoke
 ```
 
-| Script         | What it does                                                                                             |
-| -------------- | -------------------------------------------------------------------------------------------------------- |
-| `typecheck`    | `tsc -b` over the viewer and the tests, against the c4-sdk package's declarations                        |
-| `test`         | vitest: every bundle decodes with `decodeArchitecture` and **zero** diagnostics; catalog, routes, views  |
-| `build`        | `vite build --base /ts-db/`                                                                              |
-| `test:browser` | Playwright against `vite preview` of `dist/`: dropdown, three entries, sticky bar, deep links, Not Found |
+| Script         | What it does                                                                                            |
+| -------------- | ------------------------------------------------------------------------------------------------------- |
+| `typecheck`    | `tsc -b` over the viewer and the tests, against the c4-sdk package's declarations                       |
+| `test`         | vitest: every bundle decodes with `decodeArchitecture` and **zero** diagnostics; catalog, routes, views |
+| `build`        | `vite build --base /ts-db/`                                                                             |
+| `test:browser` | Playwright against `vite preview` of `dist/`: dropdown, four entries, sticky bar, deep links, Not Found |
 
 The browser smoke reuses Playwright 1.64.0's Chromium from `~/.cache/ms-playwright` (already installed on vm-1
 for c4-sdk); elsewhere run `npx playwright install chromium` once.
@@ -128,7 +148,7 @@ for c4-sdk); elsewhere run `npx playwright install chromium` once.
 pages/
   index.html, src/             the viewer; src/sdk.ts is the ONLY module that touches c4-sdk
   public/catalog.json          { defaultId?, entries: [{ id, title, url }] }; entry id = bundle id
-  public/architectures/        tsdb-current.json, tsdb-lanes-proposal.json (ArchitectureBundle v1)
+  public/architectures/        one ArchitectureBundle v1 JSON per catalog entry
   content/<dataset>/           inventory.md: source node/edge → JSON id → documents, discrepancies, decisions
   tests/                       *.test.ts (vitest), smoke.spec.ts (Playwright)
   tests/fixtures/              the three-entry test catalog and its tiny third bundle (never published)
