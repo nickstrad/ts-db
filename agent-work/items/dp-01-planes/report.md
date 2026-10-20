@@ -152,3 +152,109 @@ The one ignored root unit test is reported by the existing suite. No tests were 
 
 The unit-specific authoring script was rerun and formatted; `git diff --exit-code` against the staged bundle
 and inventory returned no output (exit 0), verifying reproducibility.
+
+## Addendum 1 — applied 2026-10-20
+
+Actor: `sol-dp-01-addendum`. Applied on top of implementation `db0bb43617fac36127b99e1d312c3e0900f609f2` in
+the explicitly assigned existing worktree. The one addendum commit contains this section; its completion event
+supplies the SHA. Branch remains `item/dp-01-planes`.
+
+The control plane now owns routing logic and the placement registry. Its routing component resolves (tenant,
+database) to VM/epoch; the gateway consults this authority and forwards requests to the hosting **VM agent
+(process)**. The gateway no longer reads placement directly from Postgres. The data component view explicitly
+groups the supporting control-plane registry/router separately from agent execution internals.
+
+Every VM runs the labelled software daemon, not an AI agent. It is the sole last-mile tenant-file boundary:
+all external query and lifecycle work arrives as instructions to this agent. Managed statement-lane workers,
+the landed classifier, FFI execution and deadlines sit behind that boundary, with no independent external
+endpoint or file authority. Container/deployment file-access edges originate at the agent; execution-component
+edges explain the FFI internals. Agents provision, open/close, suspend/resume, snapshot/backup, copy
+out/receive, restore and delete files, return query results, and report health, size and usage.
+
+Topology is explicitly **n SQLite files across m VMs**. The control plane chooses each placement, but
+**placement policy remains an OPEN QUESTION**. The illustrative 3/1/2 distribution demonstrates topology, not
+a solved allocator. Creation publishes active placement after agent provisioning confirmation. Source and
+target agents fence, drain, copy and verify moves under control-plane coordination; registry placement flips
+only after target-agent readiness. Drop cleans live registry records only after agent deletion confirmation.
+Stale route hints are invalidated after moves; hosting admission rejects stale epochs.
+
+Updated the JSON diagrams, every plain/STE explanation, inventory, README dataset description and authoring
+source. Diagram kinds remain context (1), container (1), component (2), dynamic (9), deployment (1):
+create/query/move/drop plus the five separate provisioning, stale-route, deadline, move and drop alternatives.
+The dataset still contains 44 elements, 54 relationships and 59 documents. Registration remains the existing
+catalog entry; no viewer or catalog changes were needed for this addendum.
+
+The inventory records `addendum-1.md` as a design source. Because a same-commit source cannot contain its own
+commit hash, this one new source uses a clearly identified branch URL plus a SHA-256 source-byte revision. The
+source test verifies that exact URL, path, dataset and file digest; all prior commit-pin checks remain intact.
+The original sources retain their commit pins. The addendum source bytes are included unchanged.
+
+Fresh desktop and 390×844 mobile captures replace the previous screenshots. Inspected the container,
+control/data component and deployment canvases: Fit provides the overview; zoom/1:1 and the explanation panel
+provide readable detail in large views. Mobile document width and scroll width both equal 390. The authoring
+script was rerun and both generated output checksums matched, confirming reproducibility.
+
+Learning assessment: routing authority, process boundaries and the intentionally unsolved placement policy are
+preserved as inventory decisions A1–A4 within this unit's ownership. Coordinator knowledge handoff remains as
+recorded above; no reusable work script was discovered. Independent design review remains a separate
+coordinator step; this addendum makes no independent review verdict or main landing claim.
+
+Validation history: initial checks caught a supporting-component scope tag, a duplicate diagram edge number,
+and explicit-file formatting using different defaults; these were corrected. A generator edit briefly failed
+before writing outputs and was corrected. The new source is verified by content digest for the self-reference
+reason above. No existing dataset checks or acceptance expectations were removed.
+
+### Addendum acceptance outputs
+
+```text
+$ cd pages && npm ci
+added 51 packages, and audited 52 packages in 3s
+13 packages are looking for funding
+found 0 vulnerabilities
+
+$ npm run check
+> tsc -b
+Test Files  5 passed (5)
+     Tests  164 passed (164)
+✓ built in 1.10s
+26 passed (53.7s)
+
+$ deno task fmt:check
+Checked 292 files
+
+$ deno task lint
+Checked 183 files
+
+$ git diff --exit-code db0bb43617fac36127b99e1d312c3e0900f609f2 -- [both old bundles and content trees]
+(no output; exit 0)
+$ git diff --exit-code 351a51b -- [both old bundles and content trees]
+(no output; exit 0)
+
+$ sha256sum pages/public/architectures/{tsdb-current,tsdb-lanes-proposal}.json
+0a736cb8d39de3df1c8d4a438d1a1c80ee0ab4a4e962ff69700b07a0298f2f77  tsdb-current.json
+04c7f6f300bdc58be126bebf7521056995d3317a079f3ba4fe995d96122089b9  tsdb-lanes-proposal.json
+
+$ sha256sum -c /tmp/dp01-addendum-generated.sha256
+pages/public/architectures/tsdb-planes-proposal.json: OK
+pages/content/tsdb-planes-proposal/inventory.md: OK
+```
+
+Additional full root CI completed successfully (exit 0):
+
+```text
+$ deno task ci
+Task ci deno task fmt:check && deno task lint && deno task check && deno task test && deno task test:prop
+Task fmt:check deno fmt --check
+Checked 292 files
+Task lint deno lint
+Checked 183 files
+Task check deno check core/errors.ts platform/services.ts platform/server.ts platform/reader.ts scripts/demo.ts scripts/explain.ts scripts/restore.ts tests/core_test.ts tests/types.ts tests/errors_exhaustiveness.ts tests/integration.ts
+Task test deno test --v8-flags=--expose-gc -A tests/unit/**/*.ts tests/core_test.ts
+ok | 687 passed | 0 failed | 1 ignored (4m40s)
+Task test:prop deno test --v8-flags=--expose-gc -A tests/property/**/*.ts
+ok | 84 passed | 0 failed (2m59s)
+```
+
+An earlier full-CI process ended with SIGTERM before completing and without a test-failure verdict. The
+complete rerun saved its log and exit status separately and returned 0. The ignored unit test is the existing
+suite baseline. Final Pages output is preserved in `acceptance-pages.log`.

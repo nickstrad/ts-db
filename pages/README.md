@@ -26,7 +26,10 @@ Today the catalog lists three architectures:
 
 The `tsdb-planes-proposal` addition supersedes one-file-per-tenant **in this proposal only**. It adds
 control/data-plane component views, create/query/move/drop scenarios with separate failure alternatives, and
-an illustrative uneven three-node deployment. Existing scale-out content is preserved. Its
+an illustrative uneven three-VM deployment: n SQLite files across m VMs. Routing and the placement registry
+belong to the control plane; the gateway consults them. Every VM runs **VM agent (process)** as the last mile
+for all query and lifecycle file work. The control plane chooses each database’s VM, but the placement policy
+remains an explicit open question. Existing scale-out content is preserved. Its
 [inventory](content/tsdb-planes-proposal/inventory.md) records the database-aware router extension, fencing
 protocol and the distinction between landed FFI code and proposed lane processes. Registration adds one entry
 to `public/catalog.json`; no viewer code changes.
@@ -53,7 +56,10 @@ Found (with a link to each architecture); nothing falls back silently.
 `public/catalog.json` is the SDK catalog plus one optional site-level key:
 
 ```json
-{ "defaultId": "tsdb-current", "entries": [{ "id": "…", "title": "…", "url": "architectures/….json" }] }
+{
+  "defaultId": "tsdb-current",
+  "entries": [{ "id": "…", "title": "…", "url": "architectures/….json" }]
+}
 ```
 
 `defaultId` names the entry shown when the URL names none; without it the first entry is the default. A

@@ -1,5 +1,6 @@
 """Author DP-01 only. Run from the assigned repository root; format outputs with deno fmt."""
 import copy
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -25,6 +26,10 @@ def source(id, path, title, rev=BASE, notes=None):
 
 
 source('src-brief', 'agent-work/items/dp-01-planes/brief.md', 'DP-01 authorized design brief', BRIEF)
+source('src-addendum', 'agent-work/items/dp-01-planes/addendum-1.md',
+       'DP-01 addendum 1: VM agents and control-plane routing / placement',
+       'item/dp-01-planes', notes='Same-change design source: URL is a branch reference; revision is the SHA-256 of the source bytes, not a commit pin.')
+SOURCES[-1]['revision'] = 'sha256:' + hashlib.sha256((ROOT / SOURCES[-1]['path']).read_bytes()).hexdigest()
 source('src-lanes', 'pages/public/architectures/tsdb-lanes-proposal.json', 'Preserved scale-out dataset')
 source('src-lanes-inventory', 'pages/content/tsdb-lanes-proposal/inventory.md', 'Scale-out decisions P1–P17')
 source('src-router', 'platform/tenants/routing.ts', 'Landed TenantStorageRouter seam; future ControlPlaneRouter')
@@ -35,7 +40,7 @@ source('src-decisions', 'docs/knowledge/decisions.md', 'Router seam and Postgres
 
 b = dict(schemaVersion=1, id='tsdb-planes-proposal',
          title='Proposed: control plane / data plane — tenants own many databases',
-         revision='dp-01-2026-10-20', defaultDiagramId='planes-context',
+         revision='dp-01-addendum-1-2026-10-20', defaultDiagramId='planes-context',
          model=dict(elements=[], relationships=[]), diagrams=[], documents=[], sources=SOURCES, terms=[])
 elements = {}
 relationships = {}
@@ -114,7 +119,7 @@ element('lanes', 'container', 'Statement lane processes',
         parent='platform', tech='Proposed Deno child processes; system libsqlite3 via Deno FFI', tags=external,
         sources=['src-brief', 'src-lanes', 'src-ffi'])
 element('files', 'container', 'Isolated database SQLite files',
-        'One SQLite database file and its WAL/SHM sidecars per immutable database ID. File paths are server-issued capabilities; user names are not paths. Each file has its own transaction and writer-lock domain. Delete closes handles and removes sidecars too.',
+        'Only the hosting VM agent (process) and its private workers access one SQLite database file and its WAL/SHM sidecars per immutable database ID. File paths are server-issued capabilities; user names are not paths. Each file has its own transaction and writer-lock domain. Delete closes handles and removes sidecars too.',
         'Keep one SQLite file for each database. Keep its WAL and SHM files with it. Use a server-issued path. Close handles before removing all these files.',
         parent='platform', tech='Node-local SQLite WAL files', tags=external,
         sources=['src-brief', 'src-router', 'src-lanes'])
@@ -153,7 +158,7 @@ element('authorization', 'component', 'Session authentication + database authori
 element('placement-router', 'component', 'Placement router (ControlPlaneRouter extension)',
         'Proposed database → node resolver, keyed by immutable database ID plus epoch. Resolve at open; invalidate cached locations on stale epoch or a move; fail closed on inactive state. The landed TenantStorageRouter seam isolates storage location from Storage, but resolve(tenantId) does not yet accept a database ID or route remotely. The ControlPlaneRouter implementation and database-aware context/API extension are planned.',
         'Resolve the database location when it opens. Refresh a stale location. Reject an inactive database. The router interface exists today. Database selection and remote routing require new code.',
-        parent='data', status='mixed', tech='Existing seam; proposed database router',
+        parent='control', status='mixed', tags=external, tech='Existing seam; proposed database router',
         notes=['The TenantStorageRouter interface is landed; database-aware ControlPlaneRouter, gateway placement and remote execution are planned.'],
         sources=['src-brief', 'src-router', 'src-decisions'])
 element('forwarder', 'component', 'Owner-node forwarder',
@@ -190,11 +195,11 @@ for args in [
     ('c-manage','operator','control','Manage tenants and databases','HTTPS JSON'),
     ('c-query','caller','data','Select any authorized database and query it','HTTPS JSON'),
     ('c-catalog','control','metadata','Tenant/database CRUD, operation state and placement publication','Postgres hand-written SQL'),
-    ('c-resolve','data','metadata','Authorize database and resolve active owner / epoch','Postgres hand-written SQL'),
+    ('c-resolve','data','control','Consult control-plane routing and database authorization','Authenticated internal RPC'),
     ('c-lifecycle','control','node','Provision, fence, drain, copy, delete one database','Authenticated internal RPC'),
     ('c-forward','data','node','Execute on owner: tenant ID, database ID, epoch, request ID, plan, SQL, deadline','Authenticated internal RPC'),
     ('c-lane','node','lanes','Admit database-scoped work; supervise child processes','JSON-lines IPC'),
-    ('c-files','lanes','files','Execute through landed FFI against the addressed database file','Deno FFI / SQLite WAL'),
+    ('c-files','node','files','Sole tenant-file access boundary: execute through managed FFI workers','Agent-local FFI / SQLite WAL'),
     ('c-node-files','node','files','Provision, verify, snapshot, restore and remove database files','Node-local filesystem / SQLite backup'),
     ('c-node-backup','node','backups','Publish or fetch verified per-database snapshot','Object-store HTTPS'),
 ]:
@@ -216,10 +221,10 @@ for args in [
 for args in [
     ('dp-request','caller','ingress','Query a named database using the same session and endpoint','HTTPS JSON'),
     ('dp-auth','ingress','authorization','Authenticate session and authorize tenant / database selection','In-process call'),
-    ('dp-auth-sql','authorization','metadata','Resolve name and verify tenant ownership / database grants','Postgres hand-written SQL'),
-    ('dp-route','authorization','placement-router','Resolve authorized database at open; refresh after relocation','Proposed database-aware router call'),
+    ('dp-auth-sql','authorization','database-registry','Consult control plane: resolve name and verify tenant ownership / grants','Authenticated internal RPC'),
+    ('dp-route','authorization','placement-router','Resolve authorized database at open; refresh after relocation','Authenticated control-plane routing RPC'),
     ('dp-placement','placement-router','metadata','Read ACTIVE database → node and epoch; reject inactive state','Postgres hand-written SQL'),
-    ('dp-forward','placement-router','forwarder','Trusted database location and epoch for this request','In-process call'),
+    ('dp-forward','placement-router','forwarder','Trusted database location and epoch for this request','Control-plane route response'),
     ('dp-owner','forwarder','node-admission','Owner-node request or WrongOwner / inactive response','Authenticated internal RPC'),
     ('dp-classify','node-admission','classifier','Admit and classify operation IR in a selected lane','JSON-lines IPC; proposed lane placement'),
     ('dp-execute','classifier','execution','Choose bounded blocking or unbounded nonblocking step','Existing classifier path choice; planned lane dispatch'),
@@ -274,18 +279,18 @@ context = diagram('planes-context','context','System context: control plane / da
 containers = diagram('planes-containers','container','Containers: management plane, query plane and hosting nodes',
                      ['operator','caller','control','data','metadata','node','lanes','files','backups'],
                      [r for r in relationships if r.startswith('c-')],
-                     'Control plane owns management state in Postgres with hand-written SQL (no ORM). Data plane reads metadata, selects the owner and returns results. A fleet node manages database files and child-process lanes. The node boundary represents one of many nodes, not one tenant. Grey supporting containers are internal to the platform, except the backup service; component-view tags make them grey in this view too.',
+                     'Control plane owns management state in Postgres with hand-written SQL (no ORM). Data plane consults control-plane routing, forwards to its VM agent and returns results. A fleet node manages database files and child-process lanes. The node boundary represents one of many nodes, not one tenant. Grey supporting containers are internal to the platform, except the backup service; component-view tags make them grey in this view too.',
                      'The control plane changes metadata. The data plane reads metadata and sends queries to owner nodes. A node runs lanes and holds database files. Grey can mean a supporting internal container.',scope='platform',parent='planes-context')
 containers['groups']=[dict(id='g-node',label='Hosting node (one of N; database-scoped placement)',memberIds=['node','lanes','files'],status='planned')]
 cp = diagram('planes-control-components','component','Control plane: tenant/database CRUD and lifecycle',
-             ['operator','management','tenant-registry','database-registry','provisioner','lifecycle','metadata','node'],
-             [r for r in relationships if r.startswith('cp-')],
+             ['operator','management','tenant-registry','database-registry','provisioner','lifecycle','placement-router','metadata','node'],
+             [r for r in relationships if r.startswith('cp-')] + ['dp-placement'],
              'Tenant registry owns tenant CRUD; database registry owns tenant-scoped database CRUD, configure and inspect. Postgres metadata is accessed with hand-written SQL, no ORM. Provisioning publishes only verified files. Lifecycle operations move, suspend/resume, back up, restore or delete one database. Tenant drop is restricted until all its databases are deleted. Operations are durable and idempotent across crashes; the control plane reconciles intermediate states.',
              'Keep tenants and their databases in separate records. Use hand-written SQL in Postgres. Publish a new database only after verification. Record lifecycle work so it can resume after a crash. Reject tenant deletion while databases remain.',scope='control',parent='planes-containers')
-dp = diagram('planes-data-components','component','Data plane: dynamic access to the right database node',
-             ['caller','ingress','authorization','placement-router','forwarder','metadata','node-admission','classifier','execution','deadline','files'],
+dp = diagram('planes-data-components','component','Data plane: consult control-plane routing → VM agent',
+             ['caller','ingress','authorization','placement-router','forwarder','database-registry','metadata','node-admission','classifier','execution','deadline','files'],
              [r for r in relationships if r.startswith('dp-')],
-             'A session selects any authorized database by name/ID. Resolve its immutable ID and ACTIVE placement at open. Keep location/epoch as a revocable routing hint, revalidated by owner-node admission on each request; after a move, WrongOwner invalidates it and forces refresh. The data gateway contains ingress, authorization, router and forwarder; grey components execute in the node/lane processes, not the gateway. Existing FFI code is solid; lane deployment remains proposed. Carry operation IR with compiled SQL so the landed classifier can be reused without parsing SQL. The existing router interface takes only tenantId; database-aware selection/context and remote forwarding must be added. Swapping location resolution uses the landed seam without rewriting Storage; the present client API does not already support selecting arbitrary databases.',
+             'A session selects any authorized database by name/ID. Resolve its immutable ID and ACTIVE placement at open. Keep location/epoch as a revocable routing hint, revalidated by owner-node admission on each request; after a move, WrongOwner invalidates it and forces refresh. The data gateway contains ingress, authorization and forwarder; routing is a control-plane component; grey components execute in the node/lane processes, not the gateway. Existing FFI code is solid; lane deployment remains proposed. Carry operation IR with compiled SQL so the landed classifier can be reused without parsing SQL. The existing router interface takes only tenantId; database-aware selection/context and remote forwarding must be added. Swapping location resolution uses the landed seam without rewriting Storage; the present client API does not already support selecting arbitrary databases.',
              'Select the database by name or ID. Check permission and resolve placement when it opens. The owner checks epoch and state on each request. Refresh a stale location after a move. Grey components run on the hosting node. Pass operation IR to the installed classifier. Add database selection to the existing tenant-only router and client context.',scope='data',parent='planes-containers')
 
 
@@ -306,9 +311,9 @@ flow('flow-create-database','Create database: provision then publish',[
     ('cp-database',F,'Authorize and register requested database name'),
     ('cp-databases-sql',F,'Reserve immutable database ID and unique name; persist PROVISIONING operation'),
     ('cp-provision',F,'Start idempotent provisioning for database ID'),
-    ('cp-placement',F,'Reserve selected node; keep placement non-routable'),
-    ('cp-create-file',F,'Create database file and schema on selected node under generation token'),
-    ('cp-create-file',R,'Acknowledge verified file readiness'),
+    ('cp-placement',F,'Control plane selects VM (placement policy OPEN); reserve non-routable intent'),
+    ('cp-create-file',F,'Instruct selected VM agent (process) to provision file/schema under generation token'),
+    ('cp-create-file',R,'VM agent (process) confirms verified file readiness'),
     ('cp-placement',F,'CAS operation generation: publish ACTIVE owner and initial epoch atomically'),
     ('cp-provision',R,'Return successful operation state'),
     ('cp-database',R,'Return database ID and operation status'),
@@ -332,7 +337,7 @@ flow('flow-query-right-node','Query: resolve database and execute on its owner',
     ('dp-auth-sql',F,'Verify database belongs to trusted tenant and grants allow access'),
     ('dp-auth-sql',R,'Return authorized immutable database ID'),
     ('dp-route',F,'Resolve location at open for this database'),
-    ('dp-placement',F,'Read ACTIVE owner and epoch'),
+    ('dp-placement',F,'Control-plane routing reads authoritative ACTIVE VM and epoch'),
     ('dp-placement',R,'Return node B and current epoch; client need not know node B'),
     ('dp-forward',F,'Use trusted placement and preserve request identity'),
     ('dp-owner',F,'Forward tenant/database IDs, epoch, plan IR, SQL/binds and deadline to node B'),
@@ -354,7 +359,7 @@ flow('flow-query-stale','Query — alternative: moved database refreshes placeme
     ('dp-owner',F,'Send request with old epoch to former owner'),
     ('dp-owner',R,'Reject before executing: WrongOwner / stale epoch'),
     ('dp-forward',R,'Invalidate cached database location'),
-    ('dp-placement',F,'Refresh ACTIVE database owner and epoch'),
+    ('dp-placement',F,'Consult control-plane routing again for ACTIVE database VM and epoch'),
     ('dp-placement',R,'Return new owner and epoch after completed move'),
     ('dp-forward',F,'Reopen database location at new owner'),
     ('dp-owner',F,'Retry safely with same request ID at new owner; no client node change'),
@@ -375,8 +380,8 @@ flow('flow-move-database','Move database: fence, copy, then flip placement',[
     ('cp-node',F,'Fence this database on source A; stop all new admissions including existing sessions'),
     ('cp-node',F,'Drain or cancel in-flight work; close all handles; checkpoint after settlement'),
     ('cp-node',R,'Source A confirms durable fence and no live database handles / writers'),
-    ('cp-node',F,'Copy closed database snapshot and request-ID state to inactive target B; verify integrity / identity'),
-    ('cp-node',R,'Target B confirms verified staged data and readiness; source remains fenced'),
+    ('cp-node',F,'Instruct source VM agent (process) to copy out to target VM agent (process); target receives and verifies snapshot / request-ID state'),
+    ('cp-node',R,'Target VM agent (process) confirms verified staged data and readiness; source agent stays fenced'),
     ('cp-operation',F,'Transaction CAS MOVING operation: flip owner A → B, increment epoch and publish ACTIVE'),
     ('cp-node',F,'Activate target B only after reading new ACTIVE owner / epoch; old epoch stays rejected'),
     ('cp-node',R,'Target B accepts current-epoch access'),
@@ -402,8 +407,8 @@ flow('flow-drop-database','Drop database: remove files then clean registry',[
     ('cp-operation',F,'CAS state → DROPPING; tombstone identity and block opens'),
     ('cp-node',F,'Fence owner and drain/cancel work; close read/write handles on all known copies'),
     ('cp-node',R,'Confirm no in-flight work, live handles or old copies can serve'),
-    ('cp-node',F,'Remove main file, WAL/SHM, staged/source remnants and all database backups / WAL archives'),
-    ('cp-node',R,'Confirm all database data and backups are removed'),
+    ('cp-node',F,'Instruct hosting VM agent (process) to remove file, sidecars, remnants and backups / WAL archives'),
+    ('cp-node',R,'VM agent (process) confirms all database data and backups removed'),
     ('cp-operation',F,'Remove active placement and live database/name registry records; retain non-routable ID tombstone and operation audit'),
     ('cp-lifecycle',R,'Report database deletion complete'),
     ('cp-database',R,'Return completed drop status'),
@@ -419,16 +424,16 @@ flow('flow-drop-failed','Drop database — alternative: file removal is not conf
      'Keep deletion pending if removal is not confirmed. Do not admit queries. Keep the records needed to remove all copies. Retry cleanup with the same operation ID.', 'planes-control-components')
 
 # Illustrative deployment: uneven distribution, tenant Alpha spans nodes, node A mixes tenants.
-for id, name, tech in [('dep-gateway','Gateway host','Linux host'),('dep-management','Management host','Linux host'),('dep-postgres','Metadata host','Postgres host'),('dep-a','Data node A','Linux host'),('dep-b','Data node B','Linux host'),('dep-c','Data node C','Linux host')]:
+for id, name, tech in [('dep-gateway','Gateway host','Linux host'),('dep-management','Management host','Linux host'),('dep-postgres','Metadata host','Postgres host'),('dep-a','VM A','Linux host'),('dep-b','VM B','Linux host'),('dep-c','VM C','Linux host')]:
     element(id,'deploymentNode',name,'Illustrative proposed host; not a claim about the actual droplet.',
             'This is a proposed example host. It does not describe the actual droplet.',tech=tech,environment='illustrative')
 for id, name, logical, host, desc in [
     ('dep-query','Shared query endpoint','data','dep-gateway','One stable query access path for all tenant databases.'),
     ('dep-control','Management API','control','dep-management','Tenant and database lifecycle requests.'),
     ('dep-metadata','Registry / placement Postgres','metadata','dep-postgres','Database-keyed owner and epoch records; handwritten SQL.'),
-    ('dep-a-agent','Node A execution agent','node','dep-a','Owns Alpha/orders, Alpha/archive and Beta/metrics (three databases).'),
-    ('dep-b-agent','Node B execution agent','node','dep-b','Owns Alpha/analytics (one database).'),
-    ('dep-c-agent','Node C execution agent','node','dep-c','Owns Beta/sandbox and Gamma/events (two databases).'),
+    ('dep-a-agent','VM agent (process)','node','dep-a','Owns Alpha/orders, Alpha/archive and Beta/metrics (three databases).'),
+    ('dep-b-agent','VM agent (process)','node','dep-b','Owns Alpha/analytics (one database).'),
+    ('dep-c-agent','VM agent (process)','node','dep-c','Owns Beta/sandbox and Gamma/events (two databases).'),
     ('dep-a-lane','Node A statement lane','lanes','dep-a','Illustrative lane; per-database file handles and queues.'),
     ('dep-b-lane','Node B statement lane','lanes','dep-b','Illustrative lane for Alpha/analytics.'),
     ('dep-c-lane','Node C statement lane','lanes','dep-c','Illustrative lane; Beta and Gamma remain separate files.'),
@@ -442,13 +447,13 @@ for id, name, logical, host, desc in [
     element(id,'instance',name,'Illustrative proposed instance. '+desc, 'This is a proposed example. '+desc,
             parent=host,instanceOf=logical,environment='illustrative')
 for src,dst,model in [
-    ('dep-control','dep-metadata','c-catalog'),('dep-query','dep-metadata','c-resolve'),
+    ('dep-control','dep-metadata','c-catalog'),('dep-query','dep-control','c-resolve'),
     *[( 'dep-query',f'dep-{n}-agent','c-forward') for n in 'abc'],
     *[( 'dep-control',f'dep-{n}-agent','c-lifecycle') for n in 'abc'],
     *[( f'dep-{n}-agent',f'dep-{n}-lane','c-lane') for n in 'abc'],
-    ('dep-a-lane','dep-alpha-orders','c-files'),('dep-a-lane','dep-alpha-archive','c-files'),
-    ('dep-a-lane','dep-beta-metrics','c-files'),('dep-b-lane','dep-alpha-analytics','c-files'),
-    ('dep-c-lane','dep-beta-sandbox','c-files'),('dep-c-lane','dep-gamma-events','c-files'),
+    ('dep-a-agent','dep-alpha-orders','c-files'),('dep-a-agent','dep-alpha-archive','c-files'),
+    ('dep-a-agent','dep-beta-metrics','c-files'),('dep-b-agent','dep-alpha-analytics','c-files'),
+    ('dep-c-agent','dep-beta-sandbox','c-files'),('dep-c-agent','dep-gamma-events','c-files'),
 ]:
     id=f'{src}-to-{dst}'
     rel(id,src,dst,relationships[model]['label'],relationships[model]['technology'],modelRelationshipId=model)
@@ -473,22 +478,22 @@ for d in [context,containers,cp,dp]:
 
 # Compact card summaries; full explanations remain in the documents above.
 summaries = {
-    'platform': ('Database platform', 'Control plane manages tenant databases. Data plane routes queries to database owner nodes.'),
+    'platform': ('Database platform', 'Control plane owns routing and placement. Data plane consults it and forwards to VM agents.'),
     'backups': ('Database backup store', 'Verified snapshots per database ID and generation. Optional WAL frames are future work.'),
-    'control': ('Control plane', 'Manage tenants and their databases: CRUD, configuration, provisioning and lifecycle.'),
-    'data': ('Data plane', 'One query endpoint. Authorize database selection, resolve placement and return results.'),
+    'control': ('Control plane', 'Own routing, registry and VM placement decisions; instruct VM agents for all tenant-file work.'),
+    'data': ('Data plane', 'One query endpoint. Consult control-plane routing, forward to VM agent, return results.'),
     'metadata': ('Postgres metadata', 'Tenants, databases, placement epochs and durable operations. Hand-written SQL; no ORM.'),
-    'node': ('Node agent + supervisor', 'Validate database epochs, manage files and supervise child-process statement lanes.'),
+    'node': ('VM agent (process)', 'Sole VM tenant-file boundary. Execute queries and lifecycle instructions; report health, size and usage.'),
     'lanes': ('Statement lanes', 'Proposed child processes. Per-database handles, queues and request-ID state; landed FFI code.'),
     'files': ('Database SQLite files', 'One file and WAL/SHM set per database. Separate transactions and writer locks.'),
     'management': ('Management ingress', 'Authenticate administrators. Check permissions. Record idempotent operations and return status.'),
     'tenant-registry': ('Tenant registry', 'Create, configure and inspect tenants. Drop only after all owned databases are deleted.'),
     'database-registry': ('Database registry', 'Tenant-scoped database CRUD, configure and inspect. Immutable IDs; names are not paths.'),
-    'provisioner': ('Database provisioner', 'Select a node, create and verify one database file, then publish its active placement.'),
+    'provisioner': ('Database provisioner', 'Choose VM (placement policy OPEN). Instruct agent to provision; register placement after confirmation.'),
     'lifecycle': ('Database lifecycle', 'Move, suspend/resume, backup/restore and delete. Fence and drain before changing ownership.'),
     'ingress': ('Query ingress', 'Select any authorized database by name/ID through the same endpoint and session; return results.'),
     'authorization': ('Session + database auth', 'Derive trusted tenant identity. Verify database ownership and grants for each selection.'),
-    'placement-router': ('Placement router', 'Database → node and epoch at open. Refresh after moves. Database-aware seam extension is planned.'),
+    'placement-router': ('Control-plane routing', 'Authority for (tenant, database) → VM / epoch. Gateway consults it; moves invalidate cached routes.'),
     'forwarder': ('Owner-node forwarder', 'Forward trusted tenant/database IDs, epoch, request ID, operation IR, SQL/binds and deadline.'),
     'node-admission': ('Admission + supervisor', 'Check database state/epoch per request. Gate, drain and close handles before acknowledging a fence.'),
     'classifier': ('Statement classifier', 'Landed operation-IR classifier: bounded blocking path or unbounded nonblocking read.'),
@@ -519,6 +524,74 @@ doc('doc-lifecycle-policies','Suspend, resume, backup and restore',
 elements['lifecycle']['docIds'].append('doc-lifecycle-policies')
 cp['docIds'].append('doc-lifecycle-policies')
 
+# Addendum 1 overrides the original brief where routing/process authority changed.
+elements['database-registry']['tags'] = ['external']
+cp['edges'][-1]['displayNumber'] = 12
+AGENT = ('Every hosting VM runs a daemon labelled VM agent (process), software, not AI. '
+         'It is the sole last-mile tenant-file access boundary on that VM. Outside services never access its disk. '
+         'Its private managed statement-lane workers execute only behind this agent boundary; they expose no independent file or RPC authority. '
+         'On instruction the agent executes queries and returns results, provisions, opens/closes, suspends/resumes, snapshots/backs up, '
+         'copies out/receives moves, restores and deletes files, and reports health, size and usage to the control plane.')
+ROUTING = ('The control plane owns routing logic and the placement registry: (tenant, database) resolves to a hosting VM and epoch. '
+           'The data plane consults that authority; a cached route is only a hint. Moves invalidate stale routes and agent admission rejects stale epochs. '
+           'The topology is n SQLite files across m VMs, not one VM per database or tenant. '
+           'Placement is a control-plane decision, but how it selects a VM is an OPEN QUESTION: no placement policy or balancing algorithm is solved here. '
+           'Creation records active placement only after the selected VM agent confirms provisioning; the registry is then the source of truth.')
+STE_AGENT = ('Each VM runs VM agent (process). This is software, not AI. Only this agent and its private execution workers can access tenant files. '
+             'Send all query and lifecycle work to the agent. It returns results and reports health, size and usage. Never access VM disk from another service.')
+STE_ROUTING = ('The control plane owns routing and placement records. Ask it which VM holds a tenant database. '
+               'Invalidate cached routes after moves. Distribute n SQLite files across m VMs. '
+               'The control plane selects the VM, but the selection policy is an OPEN QUESTION. Record active placement only after the agent confirms creation.')
+replacements = {
+    'node': (AGENT, STE_AGENT),
+    'control': (ROUTING + ' It instructs VM agents for all file work.', STE_ROUTING + ' Send file instructions to VM agents.'),
+    'data': ('Authenticate and authorize the selected database through the control plane; consult control-plane routing and forward queries to the selected VM agent (process). Return agent results. Never read placement metadata or VM files directly.',
+             'Check permission through the control plane. Ask its router for the VM. Send the query to that VM agent (process). Return its results.'),
+    'placement-router': (ROUTING + ' The landed TenantStorageRouter seam is tenant-only; database-aware ControlPlaneRouter and remote routing remain planned.', STE_ROUTING + ' Extend the existing tenant-only router for database selection.'),
+    'provisioner': ('The control plane selects a VM; placement policy is an OPEN QUESTION. Reserve identity and non-routable operation intent, instruct its VM agent (process) to create and verify a file, then publish placement only after agent confirmation. Reconcile partial files through the agent.',
+                    'Select a VM in the control plane. The selection policy is open. Ask its agent to create and verify the file. Record active placement after confirmation.'),
+    'planes-containers': (ROUTING + ' ' + AGENT, STE_ROUTING + ' ' + STE_AGENT),
+    'planes-control-components': (ROUTING + ' Tenant and database registries manage CRUD using Postgres hand-written SQL, no ORM. Lifecycle controllers instruct VM agents for moves, suspend/resume, backup/restore and deletion; they never manipulate disk directly.',
+                                 STE_ROUTING + ' Use hand-written SQL in Postgres. Instruct VM agents to do all lifecycle file work.'),
+    'planes-data-components': ('Ingress authenticates and authorizes the selected database through the control-plane registry, consults control-plane routing at open, then forwards to the VM agent (process). The router and database registry shown here belong to the control plane, not the gateway. The gateway contains ingress, authorization and forwarding only. ' + AGENT + ' Carry operation IR with SQL/binds to reuse the landed classifier. Database-aware API selection and remote routing are planned.',
+                              'The gateway contains ingress, authorization and forwarding. Routing and registry logic belong to the control plane. Ask it for the VM, then send the query to its agent. ' + STE_AGENT),
+}
+for id, (plain, ste) in replacements.items():
+    d = next(d for d in b['documents'] if d['id'] == 'doc-' + id)
+    d.update(plain=plain + '\n\n' + SHIFT)
+    d['ste']['text'] = ste + '\n\n' + STE_SHIFT
+    if id in elements:
+        provenance[id] = plain
+for d in b['documents']:
+    id = d['id'].removeprefix('doc-')
+    if id in elements:
+        d['title'] = elements[id]['name']
+# Append explicit boundary/authority notes to every explanation, including inherited flow policies.
+for d in b['documents']:
+    for note in [ROUTING, AGENT]:
+        if note not in d['plain']:
+            d['plain'] += '\n\n' + note
+    for note in [STE_ROUTING, STE_AGENT]:
+        if note not in d['ste']['text']:
+            d['ste']['text'] += '\n\n' + note
+    d['sourceIds'] = list(dict.fromkeys(d['sourceIds'] + ['src-addendum']))
+for obj in b['model']['elements'] + b['model']['relationships'] + b['diagrams']:
+    obj['sourceIds'] = list(dict.fromkeys(obj['sourceIds'] + ['src-addendum']))
+containers['groups'][0]['label'] = 'One of m VMs — VM agent boundary and its private workers / files'
+dp['groups'] = [dict(id='g-cp-authority', label='Control plane — routing authority',
+                     memberIds=['placement-router','database-registry','metadata'], status='planned'),
+                dict(id='g-agent-execution', label='VM agent (process) — private execution internals',
+                     memberIds=['node-admission','classifier','execution','deadline','files'], status='planned')]
+cp['title'] = 'Control plane: routing authority, placement and lifecycle'
+containers['title'] = 'Containers: control-plane routing → VM agent (process) → n files on m VMs'
+elements['lanes']['description'] = 'Private agent-managed execution workers; no independent external endpoint or file authority. Landed FFI code inside proposed lanes.'
+elements['node-admission']['name'] = 'VM agent (process) — admission'
+elements['placement-router']['plannedNotes'] = ['Tenant-only seam is landed; control-plane database routing and remote execution are planned.']
+
+for obj in b['diagrams'] + b['model']['elements']:
+    document = next(d for d in b['documents'] if d['id'] == 'doc-' + obj['id'])
+    document['title'] = obj.get('title', obj.get('name'))
+
 CONTENT.mkdir(parents=True, exist_ok=True)
 BUNDLE.write_text(json.dumps(b,ensure_ascii=False,indent=2)+'\n')
 # Inventory maps each item to source identifiers and a precise local design rationale.
@@ -527,6 +600,10 @@ lines = ['# DP-01 inventory: `tsdb-planes-proposal`', '', 'Date: 2026-10-20. Bui
 for s in SOURCES:
     lines.append(f'| `{s["id"]}` | [{s["path"]}]({s["url"]}) | {s["title"]} |')
 lines += ['', '## Decisions and discrepancies', '',
+          '- **A1 — addendum precedence (2026-10-20).** Addendum 1 overrides the brief: routing authority and placement registry are in the control plane. The gateway consults that authority, not Postgres placement directly. Stale routes are invalidated after moves.',
+          '- **A2 — VM last mile.** Every VM runs **VM agent (process)**, a software daemon, not AI. Only this agent boundary (including private managed execution workers) accesses local tenant files. All external query and lifecycle work arrives as agent instructions. Agents report health, size and usage; source and target agents copy/fence/hand over under controller coordination.',
+          '- **A3 — placement remains OPEN.** n SQLite files span m VMs. Choosing the VM is a control-plane decision; its selection policy is an explicit unsolved open question. Reservation is non-routable intent, not confirmed placement. Publish registry placement after provision confirmation, flip a move after target-agent readiness, and clean a drop registry after agent deletion confirmation.',
+          '- **A4 — source reference.** The addendum is included in this change; its URL uses the item branch, while its revision records the exact source-byte SHA-256 verified by the source test. This avoids a self-referential commit hash. Other sources retain their original commit pins.',
           '- **DP1 — identity.** Tenant → 0..N databases; immutable database ID is the placement, file, isolation, backup and lifecycle key. Names are unique within a tenant and never file paths. This intentionally supersedes the lanes proposal’s one-file-per-tenant model only here.',
           '- **DP2 — scope/status.** New control/data planes, database-aware routing, files and all deployments are planned. Landed classifier and FFI code are existing; the routing seam is mixed because database-aware remote routing is new, and deadline policy is mixed because watchdog escalation is new. Existing code inside a planned process does not make the process landed (P1/P3/P13).',
           '- **DP3 — context abstraction.** One software system at Level 1 with explicitly separate management and query paths. Level 2 expands it into the control plane, data plane and node-local hosting processes. Postgres is an internal container here (as in the current dataset), not the lanes dataset’s separate registry system (P4). Supporting containers/components are tagged external for SDK component grammar; the key explains that grey does not imply external ownership (D3/P12).',
@@ -549,7 +626,7 @@ for r in b['model']['relationships']:
     if 'modelRelationshipId' in r:
         sources += ' / `'+r['modelRelationshipId']+'`'
     lines.append(f'| `{r["id"]}` | `{r["sourceId"]}` → `{r["targetId"]}` | {r["status"]} | {sources} | {provenance[r["id"]]} |')
-lines += ['', '## Views and steps', '', 'Each step below inherits its diagram’s `src-brief` / `src-lanes` provenance. The authored labels specify the proposed protocol; only the identified classifier/FFI operations are landed. Diagrams link their alternatives and parent views.', '']
+lines += ['', '## Views and steps', '', 'Each step below inherits its diagram’s `src-brief` / `src-lanes` / `src-addendum` provenance. The authored labels specify the proposed protocol; only the identified classifier/FFI operations are landed. Diagrams link their alternatives and parent views.', '']
 for d in b['diagrams']:
     lines += [f'### `{d["id"]}` — {d["kind"]}', '', f'Document: `doc-{d["id"]}`. Status: {d["status"]}.', '']
     if 'scenario' in d:
