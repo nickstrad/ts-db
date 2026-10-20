@@ -41,7 +41,7 @@ describe("C4 kinds", () => {
   });
 });
 
-describe.each(["tsdb-lanes-proposal", "tsdb-planes-proposal"])(
+describe.each(["tsdb-lanes-proposal", "tsdb-planes-proposal", "tsdb-planes-fable"])(
   "dynamic views of %s",
   (dataset) => {
     const proposed = all.find(({ id }) => id === dataset)!.bundle;
@@ -53,7 +53,7 @@ describe.each(["tsdb-lanes-proposal", "tsdb-planes-proposal"])(
 
     it("draws the four key flows", () => {
       for (
-        const id of (dataset === "tsdb-planes-proposal"
+        const id of (dataset === "tsdb-planes-proposal" || dataset === "tsdb-planes-fable"
           ? [
             "flow-create-database",
             "flow-query-right-node",
@@ -297,5 +297,125 @@ describe("database-scoped planes proposal", () => {
       "flow-move-failed",
       "flow-drop-failed",
     ]));
+  });
+});
+
+describe("the Fable revision of the planes proposal (DP-02, M1–M8)", () => {
+  const fable = all.find(({ id }) => id === "tsdb-planes-fable")!.bundle;
+  const elements = new Map(fable.model.elements.map((e) => [e.id, e]));
+  const documents = new Map(fable.documents.map((d) => [d.id, d]));
+  const diagramIds = fable.diagrams.map((d) => d.id);
+  const text = (id: string) => documents.get(id)!.plain + "\n" + documents.get(id)!.ste.text;
+
+  it("M1: draws the route grant in the gateway and says a stale retry obtains a fresh decision", () => {
+    expect(elements.get("grant-cache")).toMatchObject({
+      parentId: "data",
+      status: "planned",
+    });
+    expect(fable.model.relationships.find((r) => r.id === "dp-grant"))
+      .toMatchObject({
+        sourceId: "authorization",
+        targetId: "grant-cache",
+      });
+    expect(diagramIds).toEqual(
+      expect.arrayContaining(["flow-query-grant-reuse", "flow-query-stale"]),
+    );
+    expect(text("doc-flow-query-stale")).toMatch(/fresh decision/);
+    expect(text("doc-node-admission")).toMatch(
+      /existing grants serve until their TTL; no new grants/i,
+    );
+    expect(text("doc-node-admission")).not.toMatch(
+      /one-request admission decision/,
+    );
+  });
+
+  it("M3: has the lane view with snapshots off the writer lock; M4: names the default database", () => {
+    const lane = fable.diagrams.find((d) => d.id === "planes-lane-components")!;
+    expect(lane.kind).toBe("component");
+    expect(lane.nodes.map((n) => n.elementId)).toEqual(
+      expect.arrayContaining([
+        "lane-snapshot",
+        "lane-scheduler",
+        "classifier",
+        "execution",
+        "deadline",
+      ]),
+    );
+    expect(text("doc-lane-snapshot")).toMatch(/read-only/);
+    expect(text("doc-ingress")).toMatch(/`default`/);
+    expect(elements.get("classifier")!.status).toBe("existing");
+    expect(elements.get("execution")!.status).toBe("existing");
+    expect(elements.get("deadline")!.status).toBe("mixed");
+    expect(elements.get("placement-router")!.status).toBe("mixed");
+  });
+
+  it("M5, M6, M7: recovery, manifest and instance-move flows exist with their failure alternatives", () => {
+    expect(diagramIds).toEqual(expect.arrayContaining([
+      "flow-recover-from-loss",
+      "flow-recover-refused",
+      "flow-drop-lost-agent",
+      "flow-backup-manifest",
+      "flow-backup-unverified",
+      "flow-move-instances",
+      "flow-move-failed-instances",
+    ]));
+    expect(text("doc-flow-recover-refused")).toMatch(
+      /never permission to activate a copy/,
+    );
+    expect(text("doc-backup-registry")).toMatch(/restore candidate only if/);
+    const move = fable.diagrams.find((d) => d.id === "flow-move-instances")!;
+    expect(move.kind === "deployment" && move.environment).toBe("illustrative");
+    expect(move.nodes.map((n) => n.elementId)).toEqual(
+      expect.arrayContaining([
+        "dep-a-agent",
+        "dep-b-agent",
+        "dep-control",
+        "dep-metadata",
+        "dep-alpha-archive",
+      ]),
+    );
+    expect(move.edges.map((e) => e.relationshipId)).toContain(
+      "dep-a-agent-to-dep-b-agent",
+    );
+    expect(text("doc-flow-move-instances")).toMatch(
+      /Checkpoint through a controlled maintenance connection/,
+    );
+  });
+
+  it("M8: the candidate placement rule is labelled pending Nick's decision", () => {
+    expect(elements.get("placement-policy")).toMatchObject({
+      parentId: "control",
+      status: "planned",
+    });
+    expect(text("doc-placement-policy")).toMatch(/PENDING NICK'S DECISION/);
+    expect(text("doc-provisioner")).toMatch(/OPEN/);
+  });
+
+  it("stays a proposal: every new element is planned and every element is documented in both variants", () => {
+    for (const element of fable.model.elements) {
+      expect(element.docIds.length, element.id).toBeGreaterThan(0);
+      for (const id of element.docIds) {
+        expect(documents.get(id)!.plain, id).toMatch(
+          /Fable revision \(DP-02\)/,
+        );
+        expect(documents.get(id)!.ste.text, id).toMatch(
+          /Fable revision of the planes proposal/,
+        );
+      }
+    }
+    for (
+      const id of [
+        "grant-cache",
+        "lane-ipc",
+        "lane-request-ids",
+        "lane-snapshot",
+        "backup-registry",
+        "placement-policy",
+        "platform-operator",
+        "provider",
+      ]
+    ) {
+      expect(elements.get(id)!.status, id).toBe("planned");
+    }
   });
 });

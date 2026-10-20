@@ -38,8 +38,8 @@ async function load(catalog: string) {
 describe("catalog loading", () => {
   it("loads the site catalog and opens tsdb-current by default", async () => {
     expect(await load(readText("public/catalog.json"))).toEqual({
-      ids: ["tsdb-current", "tsdb-lanes-proposal", "tsdb-planes-proposal"],
-      ok: [true, true, true],
+      ids: ["tsdb-current", "tsdb-lanes-proposal", "tsdb-planes-proposal", "tsdb-planes-fable"],
+      ok: [true, true, true, true],
       defaultId: "tsdb-current",
       choice: { ok: true, id: "tsdb-current" },
     });
@@ -162,8 +162,8 @@ describe("the catalog fetch keeps the SDK's size bound while streaming", () => {
     const padded = (bytes: number) => json + " ".repeat(bytes - new TextEncoder().encode(json).byteLength);
     expect(new TextEncoder().encode(padded(LIMIT)).byteLength).toBe(LIMIT);
     expect(await load(padded(LIMIT))).toEqual({
-      ids: ["tsdb-current", "tsdb-lanes-proposal", "tsdb-planes-proposal"],
-      ok: [true, true, true],
+      ids: ["tsdb-current", "tsdb-lanes-proposal", "tsdb-planes-proposal", "tsdb-planes-fable"],
+      ok: [true, true, true, true],
       defaultId: "tsdb-lanes-proposal",
       choice: { ok: true, id: "tsdb-lanes-proposal" },
     });

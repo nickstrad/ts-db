@@ -42,6 +42,7 @@ test("the site opens on the default architecture and lists every catalog entry",
     "ts-db today (main 2d30330)",
     "Proposed: statement lanes and tenant placement (scale-out)",
     "Proposed: control plane / data plane — tenants own many databases",
+    "Fable revision: control/data planes with route grants (M1–M8 applied)",
   ]);
 });
 
@@ -194,6 +195,31 @@ for (const diagram of planes.diagrams) {
     await expect(picker(page)).toHaveValue("tsdb-planes-proposal");
   });
 }
+
+// DP-02: the Fable revision renders every view from the production catalog too.
+const fable = JSON.parse(readFileSync(
+  new URL("../public/architectures/tsdb-planes-fable.json", import.meta.url),
+  "utf8",
+)) as { diagrams: { id: string; title: string }[] };
+
+for (const diagram of fable.diagrams) {
+  test(`the fable ${diagram.id} view renders`, async ({ page }) => {
+    await page.goto(`./#/architectures/tsdb-planes-fable/diagrams/${diagram.id}`);
+    await expect(page.getByRole("heading", { level: 1, name: diagram.title, exact: true })).toBeVisible();
+    await expect(page.locator(canvas)).toHaveCount(1);
+    await expect(picker(page)).toHaveValue("tsdb-planes-fable");
+  });
+}
+
+test("the Fable revision is selectable and Back preserves the current architecture", async ({ page }) => {
+  await page.goto("./");
+  await expect(page.locator(canvas)).toHaveCount(1);
+  await picker(page).selectOption("tsdb-planes-fable");
+  await expect(page).toHaveURL(/#\/architectures\/tsdb-planes-fable\/diagrams\/planes-context$/);
+  await expect(page.locator(canvas)).toHaveCount(1);
+  await back(page).click();
+  await expect(picker(page)).toHaveValue("tsdb-current");
+});
 
 test("the planes proposal is selectable and Back preserves the current architecture", async ({ page }) => {
   await page.goto("./");
