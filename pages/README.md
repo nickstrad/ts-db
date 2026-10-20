@@ -16,12 +16,20 @@ Future URL: <https://nickstrad.github.io/ts-db/> (GitHub Pages is **not enabled 
 
 ## What it shows
 
-Today the catalog lists two architectures:
+Today the catalog lists three architectures:
 
-| Catalog entry         | Content                                                                                     |
-| --------------------- | ------------------------------------------------------------------------------------------- |
-| `tsdb-current`        | The default: the four audited pairs of `docs/architecture/`, a landscape and a code view    |
-| `tsdb-lanes-proposal` | Statement lanes and placement: context, containers, lane components, flows and a deployment |
+| Catalog entry          | Content                                                                                                    |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `tsdb-current`         | The default: the four audited pairs of `docs/architecture/`, a landscape and a code view                   |
+| `tsdb-lanes-proposal`  | Statement lanes and placement: context, containers, lane components, flows and a deployment                |
+| `tsdb-planes-proposal` | Control plane / data plane: tenants own 0..N databases; database-scoped placement, isolation and lifecycle |
+
+The `tsdb-planes-proposal` addition supersedes one-file-per-tenant **in this proposal only**. It adds
+control/data-plane component views, create/query/move/drop scenarios with separate failure alternatives, and
+an illustrative uneven three-node deployment. Existing scale-out content is preserved. Its
+[inventory](content/tsdb-planes-proposal/inventory.md) records the database-aware router extension, fencing
+protocol and the distinction between landed FFI code and proposed lane processes. Registration adds one entry
+to `public/catalog.json`; no viewer code changes.
 
 ### The architecture dropdown and the sticky bar
 
@@ -67,7 +75,9 @@ No code changes (the tests prove it with a three-entry fixture catalog):
 
 ### Diagram kinds per dataset
 
-All seven C4 kinds are drawn across today's two entries (`tests/views.test.ts` checks it):
+All seven C4 kinds are drawn across the catalog (`tests/views.test.ts` checks it). The new
+`tsdb-planes-proposal` entry has context, container, two component views, nine dynamic scenarios and one
+illustrative deployment; it adds no landscape or code view. The original two entries retain these views:
 
 | Kind       | `tsdb-current`                                    | `tsdb-lanes-proposal`                                              |
 | ---------- | ------------------------------------------------- | ------------------------------------------------------------------ |

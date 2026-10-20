@@ -41,6 +41,7 @@ test("the site opens on the default architecture and lists every catalog entry",
   await expect(picker(page).getByRole("option")).toHaveText([
     "ts-db today (main 2d30330)",
     "Proposed: statement lanes and tenant placement (scale-out)",
+    "Proposed: control plane / data plane — tenants own many databases",
   ]);
 });
 
@@ -178,3 +179,28 @@ for (
     await expect(page.locator(canvas)).toHaveCount(1);
   });
 }
+
+// DP-01: use the production catalog, and render every proposed view, not just a fixture.
+const planes = JSON.parse(readFileSync(
+  new URL("../public/architectures/tsdb-planes-proposal.json", import.meta.url),
+  "utf8",
+)) as { diagrams: { id: string; title: string }[] };
+
+for (const diagram of planes.diagrams) {
+  test(`the planes ${diagram.id} view renders`, async ({ page }) => {
+    await page.goto(`./#/architectures/tsdb-planes-proposal/diagrams/${diagram.id}`);
+    await expect(page.getByRole("heading", { level: 1, name: diagram.title, exact: true })).toBeVisible();
+    await expect(page.locator(canvas)).toHaveCount(1);
+    await expect(picker(page)).toHaveValue("tsdb-planes-proposal");
+  });
+}
+
+test("the planes proposal is selectable and Back preserves the current architecture", async ({ page }) => {
+  await page.goto("./");
+  await expect(page.locator(canvas)).toHaveCount(1);
+  await picker(page).selectOption("tsdb-planes-proposal");
+  await expect(page).toHaveURL(/#\/architectures\/tsdb-planes-proposal\/diagrams\/planes-context$/);
+  await expect(page.locator(canvas)).toHaveCount(1);
+  await back(page).click();
+  await expect(picker(page)).toHaveValue("tsdb-current");
+});

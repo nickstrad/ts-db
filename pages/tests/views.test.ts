@@ -28,20 +28,27 @@ describe("C4 kinds", () => {
   });
 });
 
-describe("dynamic views of tsdb-lanes-proposal", () => {
-  const proposed = all.find(({ id }) => id === "tsdb-lanes-proposal")!.bundle;
+describe.each(["tsdb-lanes-proposal", "tsdb-planes-proposal"])("dynamic views of %s", (dataset) => {
+  const proposed = all.find(({ id }) => id === dataset)!.bundle;
   const relationships = new Map(proposed.model.relationships.map((r) => [r.id, r]));
   const dynamics = proposed.diagrams.filter((d): d is DiagramOf<"dynamic"> => d.kind === "dynamic");
   const cases = dynamics.map((d) => [d.id, d] as const);
 
   it("draws the four key flows", () => {
     for (
-      const id of [
-        "flow-point-read",
-        "flow-long-query-interrupt",
-        "flow-forwarded-mutation",
-        "flow-lane-kill-restart",
-      ]
+      const id of (dataset === "tsdb-planes-proposal"
+        ? [
+          "flow-create-database",
+          "flow-query-right-node",
+          "flow-move-database",
+          "flow-drop-database",
+        ]
+        : [
+          "flow-point-read",
+          "flow-long-query-interrupt",
+          "flow-forwarded-mutation",
+          "flow-lane-kill-restart",
+        ])
     ) {
       expect(dynamics.map((d) => d.id)).toContain(id);
     }
@@ -144,5 +151,58 @@ describe("the current code view", () => {
       expect(element.tags.includes("external"), element.id).toBe(!local);
       expect(element.members.length, element.id).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("database-scoped planes proposal", () => {
+  const proposed = all.find(({ id }) => id === "tsdb-planes-proposal")!.bundle;
+  const elements = new Map(proposed.model.elements.map((e) => [e.id, e]));
+  const deployment = proposed.diagrams.find((d) => d.kind === "deployment")!;
+
+  it("keeps deployment illustrative with uneven database counts and tenants spanning nodes", () => {
+    expect(deployment.kind === "deployment" && deployment.environment).toBe("illustrative");
+    expect(deployment.status).toBe("planned");
+    const files = proposed.model.elements.filter((e) => e.kind === "instance" && e.instanceOf === "files");
+    const byHost = new Map<string, number>();
+    for (const file of files) {
+      if (file.kind === "instance") byHost.set(file.parentId, (byHost.get(file.parentId) ?? 0) + 1);
+    }
+    expect([...byHost.values()].sort()).toEqual([1, 2, 3]);
+    expect(elements.get("dep-alpha-orders")).toMatchObject({ parentId: "dep-a" });
+    expect(elements.get("dep-alpha-analytics")).toMatchObject({ parentId: "dep-b" });
+    expect(elements.get("dep-beta-metrics")).toMatchObject({ parentId: "dep-a" });
+    for (const node of deployment.nodes) expect(elements.get(node.elementId)!.status).toBe("planned");
+    for (const edge of deployment.edges) {
+      const relationship = proposed.model.relationships.find((r) => r.id === edge.relationshipId)!;
+      expect(relationship.status).toBe("planned");
+      expect(relationship.modelRelationshipId).toBeTruthy();
+    }
+  });
+
+  it("documents every element with both language variants and preserves landed-code status", () => {
+    for (const element of proposed.model.elements) {
+      expect(element.docIds.length, element.id).toBeGreaterThan(0);
+      for (const id of element.docIds) {
+        const document = proposed.documents.find((d) => d.id === id)!;
+        expect(document.plain, id).toMatch(/zero or more databases/);
+        expect(document.ste.text, id).toMatch(/zero or more databases/);
+      }
+    }
+    expect(elements.get("classifier")!.status).toBe("existing");
+    expect(elements.get("execution")!.status).toBe("existing");
+    expect(elements.get("deadline")!.status).toBe("mixed");
+    expect(elements.get("placement-router")!.status).toBe("mixed");
+    expect(elements.get("lanes")!.status).toBe("planned");
+  });
+
+  it("has separate failure scenarios for lifecycle and routing failures", () => {
+    const ids = proposed.diagrams.filter((d) => d.kind === "dynamic").map((d) => d.id);
+    expect(ids).toEqual(expect.arrayContaining([
+      "flow-create-failed",
+      "flow-query-stale",
+      "flow-query-deadline",
+      "flow-move-failed",
+      "flow-drop-failed",
+    ]));
   });
 });

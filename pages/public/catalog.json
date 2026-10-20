@@ -10,6 +10,11 @@
       "id": "tsdb-lanes-proposal",
       "title": "Proposed: statement lanes and tenant placement (scale-out)",
       "url": "architectures/tsdb-lanes-proposal.json"
+    },
+    {
+      "id": "tsdb-planes-proposal",
+      "title": "Proposed: control plane / data plane — tenants own many databases",
+      "url": "architectures/tsdb-planes-proposal.json"
     }
   ]
 }
