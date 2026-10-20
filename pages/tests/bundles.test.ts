@@ -8,6 +8,7 @@ describe("catalog", () => {
     expect(catalog.entries.map((entry) => entry.id)).toEqual([
       "tsdb-current",
       "tsdb-lanes-proposal",
+      "tsdb-planes-proposal",
     ]);
     expect(catalog.defaultId).toBe("tsdb-current");
   });

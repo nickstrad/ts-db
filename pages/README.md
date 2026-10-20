@@ -16,12 +16,25 @@ Future URL: <https://nickstrad.github.io/ts-db/> (GitHub Pages is **not enabled 
 
 ## What it shows
 
-Today the catalog lists two architectures:
+Today the catalog lists three architectures:
 
-| Catalog entry         | Content                                                                                     |
-| --------------------- | ------------------------------------------------------------------------------------------- |
-| `tsdb-current`        | The default: the four audited pairs of `docs/architecture/`, a landscape and a code view    |
-| `tsdb-lanes-proposal` | Statement lanes and placement: context, containers, lane components, flows and a deployment |
+| Catalog entry          | Content                                                                                                    |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `tsdb-current`         | The default: the four audited pairs of `docs/architecture/`, a landscape and a code view                   |
+| `tsdb-lanes-proposal`  | Statement lanes and placement: context, containers, lane components, flows and a deployment                |
+| `tsdb-planes-proposal` | Control plane / data plane: tenants own 0..N databases; database-scoped placement, isolation and lifecycle |
+
+The `tsdb-planes-proposal` addition supersedes one-file-per-tenant **in this proposal only**. It adds
+control/data-plane component views, create/query/move/drop scenarios with separate failure alternatives, and
+an illustrative uneven three-VM deployment: n SQLite files across m VMs. Routing and the placement registry
+belong to the control plane; the gateway consults them. Every VM runs **VM agent (process)** as the last mile
+for all query and lifecycle file work. The control plane chooses each database’s VM, but the placement policy
+remains an explicit open question. Existing scale-out content is preserved. Its
+[inventory](content/tsdb-planes-proposal/inventory.md) records the database-aware router extension, fencing
+protocol, fail-closed online admission, service trust boundaries, bounded resource budgets and the distinction
+between landed FFI code and proposed lane processes. The data overview links to agent execution detail.
+Backup/VM-loss flow expansion and source/target move instance companions are explicitly deferred in the
+inventory and documents. Registration adds one entry to `public/catalog.json`; no viewer code changes.
 
 ### The architecture dropdown and the sticky bar
 
@@ -45,7 +58,10 @@ Found (with a link to each architecture); nothing falls back silently.
 `public/catalog.json` is the SDK catalog plus one optional site-level key:
 
 ```json
-{ "defaultId": "tsdb-current", "entries": [{ "id": "…", "title": "…", "url": "architectures/….json" }] }
+{
+  "defaultId": "tsdb-current",
+  "entries": [{ "id": "…", "title": "…", "url": "architectures/….json" }]
+}
 ```
 
 `defaultId` names the entry shown when the URL names none; without it the first entry is the default. A
@@ -67,7 +83,9 @@ No code changes (the tests prove it with a three-entry fixture catalog):
 
 ### Diagram kinds per dataset
 
-All seven C4 kinds are drawn across today's two entries (`tests/views.test.ts` checks it):
+All seven C4 kinds are drawn across the catalog (`tests/views.test.ts` checks it). The new
+`tsdb-planes-proposal` entry has context, container, three component views, nine dynamic scenarios and one
+illustrative deployment; it adds no landscape or code view. The original two entries retain these views:
 
 | Kind       | `tsdb-current`                                    | `tsdb-lanes-proposal`                                              |
 | ---------- | ------------------------------------------------- | ------------------------------------------------------------------ |

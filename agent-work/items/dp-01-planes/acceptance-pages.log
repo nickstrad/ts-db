@@ -1,0 +1,80 @@
+
+> tsdb-architecture-pages@0.0.0 check
+> npm run typecheck && npm run test && npm run build && npm run test:browser
+
+
+> tsdb-architecture-pages@0.0.0 typecheck
+> tsc -b
+
+
+> tsdb-architecture-pages@0.0.0 test
+> vitest run
+
+
+ RUN  v5.0.4 /root/Software/tsdb-work/dp01/pages
+
+
+ Test Files  5 passed (5)
+      Tests  164 passed (164)
+   Start at  20:20:06
+   Duration  1.64s (import 56%, tests 32%, transform 9%, worker 3%)
+
+
+> tsdb-architecture-pages@0.0.0 build
+> vite build --base /ts-db/
+
+vite v8.3.4 building client environment for production...
+transforming...
+✓ 26 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                            0.73 kB │ gzip:   0.42 kB
+dist/assets/layout-worker-BeIcR9gj.js  2,107.55 kB
+dist/assets/index-ChqLlcAG.css            33.27 kB │ gzip:   6.31 kB
+dist/assets/index-BU0vMukh.js            801.21 kB │ gzip: 251.84 kB
+
+✓ built in 1.10s
+
+> tsdb-architecture-pages@0.0.0 test:browser
+> playwright test
+
+[WebServer] (node:3610824) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+
+[WebServer] (node:3610837) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+
+
+Running 26 tests using 1 worker
+
+(node:3610866) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+
+[1/26] [chromium] › tests/smoke.spec.ts:28:1 › the site opens on the default architecture and lists every catalog entry
+[2/26] [chromium] › tests/smoke.spec.ts:48:1 › choosing an architecture opens its default diagram, and Back returns
+[3/26] [chromium] › tests/smoke.spec.ts:68:1 › a deep link to a diagram of another entry reloads to the same diagram
+[4/26] [chromium] › tests/smoke.spec.ts:91:1 › unknown routes show Not Found instead of falling back
+[5/26] [chromium] › tests/smoke.spec.ts:102:1 › the skip link and the architecture dropdown are keyboard reachable
+[6/26] [chromium] › tests/smoke.spec.ts:118:1 › a three-entry catalog works with no code change and opens its defaultId
+[7/26] [chromium] › tests/smoke.spec.ts:140:1 › the top bar stays in the viewport while a tall diagram page scrolls
+[8/26] [chromium] › tests/smoke.spec.ts:176:3 › the landscape view renders
+[9/26] [chromium] › tests/smoke.spec.ts:176:3 › the code-document-reader view renders
+[10/26] [chromium] › tests/smoke.spec.ts:176:3 › the flow-long-query-interrupt view renders
+[11/26] [chromium] › tests/smoke.spec.ts:176:3 › the lanes-deployment view renders
+[12/26] [chromium] › tests/smoke.spec.ts:190:3 › the planes planes-context view renders
+[13/26] [chromium] › tests/smoke.spec.ts:190:3 › the planes planes-containers view renders
+[14/26] [chromium] › tests/smoke.spec.ts:190:3 › the planes planes-control-components view renders
+[15/26] [chromium] › tests/smoke.spec.ts:190:3 › the planes planes-data-components view renders
+[16/26] [chromium] › tests/smoke.spec.ts:190:3 › the planes flow-create-database view renders
+[17/26] [chromium] › tests/smoke.spec.ts:190:3 › the planes flow-create-failed view renders
+[18/26] [chromium] › tests/smoke.spec.ts:190:3 › the planes flow-query-right-node view renders
+[19/26] [chromium] › tests/smoke.spec.ts:190:3 › the planes flow-query-stale view renders
+[20/26] [chromium] › tests/smoke.spec.ts:190:3 › the planes flow-query-deadline view renders
+[21/26] [chromium] › tests/smoke.spec.ts:190:3 › the planes flow-move-database view renders
+[22/26] [chromium] › tests/smoke.spec.ts:190:3 › the planes flow-move-failed view renders
+[23/26] [chromium] › tests/smoke.spec.ts:190:3 › the planes flow-drop-database view renders
+[24/26] [chromium] › tests/smoke.spec.ts:190:3 › the planes flow-drop-failed view renders
+[25/26] [chromium] › tests/smoke.spec.ts:190:3 › the planes planes-deployment view renders
+[26/26] [chromium] › tests/smoke.spec.ts:198:1 › the planes proposal is selectable and Back preserves the current architecture
+  26 passed (53.7s)
